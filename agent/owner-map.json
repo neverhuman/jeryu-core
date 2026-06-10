@@ -1,0 +1,28 @@
+{
+  "owners": {
+    ".github/": "ops",
+    "AGENTS.md": "split",
+    "Cargo.lock": "workspace",
+    "Cargo.toml": "workspace",
+    "Justfile": "workspace",
+    "README.md": "docs",
+    "agent/": "agent",
+    "contracts/AGENTS.md": "jeryu-core",
+    "contracts/generated/**": "jeryu-core",
+    "crates/domain/**": "jeryu-core",
+    "crates/jeryu-bugtracker/**": "jeryu-core",
+    "crates/jeryu-core/**": "jeryu-core",
+    "crates/jeryu-enterprise/**": "jeryu-core",
+    "crates/jeryu-gitd/**": "jeryu-core",
+    "crates/jeryu-mirror-cli/**": "jeryu-core",
+    "crates/jeryu-mirror/**": "jeryu-core",
+    "crates/jeryu-proof/**": "jeryu-core",
+    "crates/jeryu-readmodel/**": "jeryu-core",
+    "crates/jeryu-tui/**": "jeryu-core",
+    "db/**": "jeryu-core",
+    "docs/": "docs",
+    "ops/": "ops",
+    "scripts/": "ops"
+  },
+  "workspace": "jeryu-core"
+}

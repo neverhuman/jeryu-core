@@ -1,0 +1,85 @@
+{
+  "tests": {
+    ".github/": {
+      "command": "just fast && just check",
+      "lane": "ci",
+      "purpose": "verify hosted workflows stay thin and local-reproducible"
+    },
+    "AGENTS.md": {
+      "command": "just score",
+      "lane": "score",
+      "purpose": "verify split metadata and agent maps"
+    },
+    "Cargo.toml": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify workspace manifest shape"
+    },
+    "contracts/AGENTS.md": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    },
+    "contracts/generated/**": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    },
+    "crates/domain/**": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    },
+    "crates/jeryu-bugtracker/**": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    },
+    "crates/jeryu-core/**": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    },
+    "crates/jeryu-enterprise/**": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    },
+    "crates/jeryu-gitd/**": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    },
+    "crates/jeryu-mirror-cli/**": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    },
+    "crates/jeryu-mirror/**": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    },
+    "crates/jeryu-proof/**": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    },
+    "crates/jeryu-readmodel/**": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    },
+    "crates/jeryu-tui/**": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    },
+    "db/**": {
+      "command": "just check",
+      "lane": "check",
+      "purpose": "verify jeryu-core owned source remains build-addressable"
+    }
+  },
+  "workspace": "jeryu-core"
+}
