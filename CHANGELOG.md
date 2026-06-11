@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- v5.0.0 split baseline live on the local forge; merge-to-GitHub mirror verified.
 
 ## jeryu-core-v5.0.0-split.0 - 2026-06-11
 - MAJOR: first standalone split-family release; the legacy monorepo
