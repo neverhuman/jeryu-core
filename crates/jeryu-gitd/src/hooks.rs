@@ -7,6 +7,35 @@ use crate::refs::{is_zero_oid, validate_ref_name};
 use crate::repo::Repository;
 use std::io::{self, Read};
 
+/// The protected trunk ref. Wire clients must use PRs; trusted server-side
+/// merge/update code may still advance this ref through [`crate::refs::RefService`].
+const MAIN_REF: &str = "refs/heads/main";
+
+/// Template installed as `hooks/pre-receive` for bare repos served by Jeryu.
+///
+/// The shell layer rejects direct main pushes before invoking the Rust guard so
+/// the PR-only policy remains durable even when Git itself launches the hook.
+pub const PRE_RECEIVE_HOOK: &str = r#"#!/usr/bin/env bash
+set -euo pipefail
+
+input=$(cat)
+if printf '%s\n' "$input" | awk '$3 == "refs/heads/main" { found = 1 } END { exit found ? 0 : 1 }'; then
+  printf '%s\n' "jeryu-gitd: direct pushes to refs/heads/main are blocked; open a pull request and merge through Jeryu" >&2
+  exit 1
+fi
+
+bin=${JERYU_GITD_BIN:-jeryu-gitd}
+if command -v "$bin" >/dev/null 2>&1; then
+  repo_dir=$(pwd -P)
+  repo_git=${repo_dir##*/}
+  owner_dir=${repo_dir%/*}
+  owner=${owner_dir##*/}
+  root=${owner_dir%/*}
+  repo=${repo_git%.git}
+  printf '%s\n' "$input" | "$bin" pre-receive --root "$root" --actor "${JERYU_ACTOR:-wire-client}" "$owner" "$repo"
+fi
+"#;
+
 /// Pre-receive guard for protected refs and quarantine object validation.
 #[derive(Clone, Debug)]
 pub struct PreReceiveGuard {
@@ -54,6 +83,11 @@ impl PreReceiveGuard {
             } else {
                 RefOperation::Update
             };
+            if ref_name == MAIN_REF {
+                return Err(GitdError::ProtectedRefDenied(
+                    "direct pushes to refs/heads/main are blocked; open a pull request and merge through Jeryu".to_string(),
+                ));
+            }
             let force = operation == RefOperation::Update
                 && !self
                     .fsck

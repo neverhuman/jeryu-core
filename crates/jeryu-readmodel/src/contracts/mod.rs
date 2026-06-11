@@ -29,8 +29,10 @@ pub use pulls::{
     ReviewPosture,
 };
 pub use repository::{
-    CreateRepositoryPreview, CreateRepositoryRequest, RepositoryFacets, RepositoryHostKind,
-    RepositoryId, RepositoryListResponse, RepositorySummary, RepositoryVisibility,
+    CreateRepositoryPreview, CreateRepositoryRequest, DeleteRepositoryReceipt,
+    DeleteRepositoryRequest, DeletedCount, JankuraiScoreListResponse, JankuraiScoreSummary,
+    RepositoryFacets, RepositoryHostKind, RepositoryId, RepositoryListResponse,
+    RepositoryMirrorStatus, RepositoryRole, RepositorySummary, RepositoryVisibility,
 };
 pub use review::{
     CreateReviewCommentRequest, ReviewComment, ReviewEvidence, ReviewSuggestion, ReviewThread,
@@ -52,7 +54,7 @@ pub use web::{
 
 use ts_rs::{Config, ExportError, TS};
 
-/// The 57 exported web/TUI wire contracts, in stable (sorted) order.
+/// The 64 exported web/TUI wire contracts, in stable (sorted) order.
 ///
 /// Each entry exports exactly one `contracts/generated/<Name>.ts` file. This
 /// list is the single source the export binary and the drift test share, so
@@ -103,10 +105,15 @@ contract_exports!(
     CreateRepositoryPreview,
     CreateRepositoryRequest,
     CreateReviewCommentRequest,
+    DeleteRepositoryReceipt,
+    DeleteRepositoryRequest,
+    DeletedCount,
     FeatureSettings,
     GeneralSettings,
     IssueState,
     IssueSummary,
+    JankuraiScoreListResponse,
+    JankuraiScoreSummary,
     MarkdownHeading,
     MarkdownLink,
     MergePassport,
@@ -125,6 +132,8 @@ contract_exports!(
     RepositoryHostKind,
     RepositoryId,
     RepositoryListResponse,
+    RepositoryMirrorStatus,
+    RepositoryRole,
     RepositorySettings,
     RepositorySummary,
     RepositoryVisibility,

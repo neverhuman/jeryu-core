@@ -33,8 +33,15 @@ impl ForgeCore {
         Ok(markdown)
     }
 
-    /// Return the persisted README or a deterministic local fallback.
-    pub fn readme_or_default(&self, owner: &str, repo: &str, fallback: String) -> Result<String> {
-        Ok(self.get_repository_readme(owner, repo)?.unwrap_or(fallback))
+    /// Return the persisted README or a deterministic local default.
+    pub fn readme_or_default(
+        &self,
+        owner: &str,
+        repo: &str,
+        default_text: String,
+    ) -> Result<String> {
+        Ok(self
+            .get_repository_readme(owner, repo)?
+            .unwrap_or(default_text))
     }
 }

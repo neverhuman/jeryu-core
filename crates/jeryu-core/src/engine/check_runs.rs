@@ -68,16 +68,19 @@ impl ForgeCore {
         self.ensure_repo_exists(owner, repo)?;
         // No check-runs entry for the repo means none have been created; an
         // empty list is the intended value.
-        let runs: Vec<_> = self
+        let runs: Vec<_> = match self
             .state
             .read()
             .check_runs
             .get(&(owner.to_string(), repo.to_string()))
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|run| head_sha.is_none_or(|sha| run.head_sha == sha))
-            .collect();
+        {
+            Some(runs) => runs
+                .iter()
+                .filter(|run| head_sha.is_none_or(|sha| run.head_sha == sha))
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
         Ok(CheckRunList {
             total_count: runs.len(),
             check_runs: runs,

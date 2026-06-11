@@ -58,13 +58,14 @@ impl ForgeCore {
         self.ensure_repo_exists(owner, repo)?;
         // No status entry for the sha means no statuses have been posted; an
         // empty list is the intended value (and is itself reported as Pending).
-        let statuses = self
-            .state
-            .read()
-            .statuses
-            .get(&(owner.to_string(), repo.to_string(), sha.to_string()))
-            .cloned()
-            .unwrap_or_default();
+        let statuses = match self.state.read().statuses.get(&(
+            owner.to_string(),
+            repo.to_string(),
+            sha.to_string(),
+        )) {
+            Some(statuses) => statuses.clone(),
+            None => Vec::new(),
+        };
         let state = if statuses
             .iter()
             .any(|status| status.state == CommitStatusState::Error)

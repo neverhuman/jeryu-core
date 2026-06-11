@@ -93,13 +93,17 @@ impl ForgeCore {
         self.get_pull_request(owner, repo, number)?;
         // The PR exists (checked above); a missing reviews entry just means it
         // has no reviews yet, so an empty list is the intended value.
-        Ok(self
-            .state
-            .read()
-            .reviews
-            .get(&(owner.to_string(), repo.to_string(), number))
-            .cloned()
-            .unwrap_or_default())
+        Ok(
+            match self
+                .state
+                .read()
+                .reviews
+                .get(&(owner.to_string(), repo.to_string(), number))
+            {
+                Some(reviews) => reviews.clone(),
+                None => Vec::new(),
+            },
+        )
     }
 
     pub fn list_review_comments(
@@ -111,12 +115,15 @@ impl ForgeCore {
         self.get_pull_request(owner, repo, number)?;
         // The PR exists (checked above); a missing review-comments entry just
         // means it has no review comments yet, so an empty list is intended.
-        Ok(self
-            .state
-            .read()
-            .review_comments
-            .get(&(owner.to_string(), repo.to_string(), number))
-            .cloned()
-            .unwrap_or_default())
+        Ok(
+            match self.state.read().review_comments.get(&(
+                owner.to_string(),
+                repo.to_string(),
+                number,
+            )) {
+                Some(comments) => comments.clone(),
+                None => Vec::new(),
+            },
+        )
     }
 }

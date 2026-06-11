@@ -3,6 +3,7 @@
 use crate::command::run_capture;
 use crate::config::GitdConfig;
 use crate::error::{GitdError, Result};
+use crate::hooks::PRE_RECEIVE_HOOK;
 use crate::path::{normalize_repo_name, safe_join, validate_segment};
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
@@ -136,6 +137,24 @@ impl RepoManager {
         }
         self.write_metadata(&repo)?;
         Ok(repo)
+    }
+
+    /// Install Jeryu's server-side pre-receive hook into a bare repository.
+    ///
+    /// This is intentionally separate from [`Self::create_bare`] so tests and
+    /// import tooling can seed fixtures with raw Git, while production
+    /// materializers can opt into the durable receive guard after creation.
+    pub fn install_pre_receive_hook(&self, repo: &Repository) -> Result<()> {
+        let hooks = repo.path.join("hooks");
+        std::fs::create_dir_all(&hooks)?;
+        let hook = hooks.join("pre-receive");
+        std::fs::write(&hook, PRE_RECEIVE_HOOK.as_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(())
     }
 
     fn write_metadata(&self, repo: &Repository) -> Result<()> {

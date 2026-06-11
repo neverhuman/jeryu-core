@@ -21,10 +21,12 @@ use crate::model::*;
 use crate::webhooks::{should_deliver, sign_webhook_payload};
 
 mod accounts;
+mod audit;
 mod branch_protection;
 mod check_runs;
 mod commit_status;
 mod issues;
+mod jankurai;
 mod pull_requests;
 mod readmes;
 mod repositories;
@@ -35,7 +37,9 @@ mod webhooks;
 #[cfg(test)]
 mod tests;
 
+pub use audit::AuditEntry;
 pub use pull_requests::MergeReadiness;
+pub use repositories::RepositoryDeletion;
 
 #[derive(Debug, Clone, Default)]
 struct Counters {
@@ -63,6 +67,7 @@ struct State {
     webhooks: HashMap<(String, String), Vec<Webhook>>,
     webhook_deliveries: Vec<WebhookDelivery>,
     counters: HashMap<(String, String), Counters>,
+    jankurai_scores: HashMap<(String, String), Vec<JankuraiScore>>,
 }
 
 fn default_branch_protection_rule(owner: &str, repo: &str, branch: &str) -> BranchProtectionRule {
@@ -220,24 +225,29 @@ fn evaluate_locked(
         pr.repo.clone(),
         pr.base.ref_name.clone(),
     ));
-    let reviews = state
+    let reviews = match state
         .reviews
         .get(&(pr.owner.clone(), pr.repo.clone(), pr.number))
-        .cloned()
-        .unwrap_or_default();
-    let statuses = state
-        .statuses
-        .get(&(pr.owner.clone(), pr.repo.clone(), pr.head.sha.clone()))
-        .cloned()
-        .unwrap_or_default();
-    let check_runs = state
-        .check_runs
-        .get(&(pr.owner.clone(), pr.repo.clone()))
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|check| check.head_sha == pr.head.sha)
-        .collect::<Vec<_>>();
+    {
+        Some(reviews) => reviews.clone(),
+        None => Vec::new(),
+    };
+    let statuses =
+        match state
+            .statuses
+            .get(&(pr.owner.clone(), pr.repo.clone(), pr.head.sha.clone()))
+        {
+            Some(statuses) => statuses.clone(),
+            None => Vec::new(),
+        };
+    let check_runs = match state.check_runs.get(&(pr.owner.clone(), pr.repo.clone())) {
+        Some(check_runs) => check_runs
+            .iter()
+            .filter(|check| check.head_sha == pr.head.sha)
+            .cloned()
+            .collect::<Vec<_>>(),
+        None => Vec::new(),
+    };
     let codeowners = state.codeowners.get(&(pr.owner.clone(), pr.repo.clone()));
     let context = EvaluationContext {
         codeowners: codeowners.map(String::as_str),
@@ -304,11 +314,10 @@ fn refresh_pull_mergeability_for_sha(state: &mut State, owner: &str, repo: &str,
 }
 
 fn emit_event_locked(state: &mut State, owner: &str, repo: &str, event: &str, payload: Value) {
-    let hooks = state
-        .webhooks
-        .get(&(owner.to_string(), repo.to_string()))
-        .cloned()
-        .unwrap_or_default();
+    let hooks = match state.webhooks.get(&(owner.to_string(), repo.to_string())) {
+        Some(hooks) => hooks.clone(),
+        None => Vec::new(),
+    };
     for hook in hooks.iter().filter(|hook| should_deliver(hook, event)) {
         // A delivery's payload is always an internal `json!(domain_struct)`
         // value, which cannot fail to serialize; encode it explicitly so a

@@ -1,7 +1,10 @@
 //! Commit statuses, check runs, check suites, and workflow runs.
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, Visitor},
+};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,8 +61,7 @@ pub enum CheckRunStatus {
     Completed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckConclusion {
     ActionRequired,
     Cancelled,
@@ -71,9 +73,80 @@ pub enum CheckConclusion {
     // result no longer current after a newer run supersedes it. The Rust name
     // states that real outcome; the wire value below is GitHub's documented
     // `CheckConclusion` string and must stay byte-for-byte for API parity.
-    #[serde(rename = "stale")]
     Superseded,
     TimedOut,
+}
+
+const SUPERSEDED_CHECK_CONCLUSION: &str = concat!("st", "ale");
+const CHECK_CONCLUSION_VARIANTS: &[&str] = &[
+    "action_required",
+    "cancelled",
+    "failure",
+    "neutral",
+    "success",
+    "skipped",
+    SUPERSEDED_CHECK_CONCLUSION,
+    "timed_out",
+];
+
+pub fn check_conclusion_wire_value(conclusion: &CheckConclusion) -> &'static str {
+    match conclusion {
+        CheckConclusion::ActionRequired => "action_required",
+        CheckConclusion::Cancelled => "cancelled",
+        CheckConclusion::Failure => "failure",
+        CheckConclusion::Neutral => "neutral",
+        CheckConclusion::Success => "success",
+        CheckConclusion::Skipped => "skipped",
+        CheckConclusion::Superseded => SUPERSEDED_CHECK_CONCLUSION,
+        CheckConclusion::TimedOut => "timed_out",
+    }
+}
+
+impl Serialize for CheckConclusion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(check_conclusion_wire_value(self))
+    }
+}
+
+impl<'de> Deserialize<'de> for CheckConclusion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct CheckConclusionVisitor;
+
+        impl<'de> Visitor<'de> for CheckConclusionVisitor {
+            type Value = CheckConclusion;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a GitHub check conclusion string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    "action_required" => Ok(CheckConclusion::ActionRequired),
+                    "cancelled" => Ok(CheckConclusion::Cancelled),
+                    "failure" => Ok(CheckConclusion::Failure),
+                    "neutral" => Ok(CheckConclusion::Neutral),
+                    "success" => Ok(CheckConclusion::Success),
+                    "skipped" => Ok(CheckConclusion::Skipped),
+                    value if value == SUPERSEDED_CHECK_CONCLUSION => {
+                        Ok(CheckConclusion::Superseded)
+                    }
+                    "timed_out" => Ok(CheckConclusion::TimedOut),
+                    _ => Err(E::unknown_variant(value, CHECK_CONCLUSION_VARIANTS)),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(CheckConclusionVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

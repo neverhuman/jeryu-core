@@ -472,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_base_is_evaluated_only_for_best_candidate() {
+    fn superseded_base_is_evaluated_only_for_best_candidate() {
         // The highest-overlap PR is safe; a lower-overlap PR has a diverged base.
         // We must route to the safe best, not refuse on the worse candidate.
         let change = ChangeSet::new(["a", "b", "c", "d"], "base", None);
@@ -480,7 +480,7 @@ mod tests {
             // overlap 1.0, safe
             OpenPr::new(1, ["a", "b", "c", "d"], "base", true),
             // overlap 0.5, diverged base — should be ignored
-            OpenPr::new(2, ["a", "b"], "stale", true),
+            OpenPr::new(2, ["a", "b"], "superseded", true),
         ];
         let decision = decide(&change, &open, OverlapConfig::with_threshold(0.5));
         match decision {

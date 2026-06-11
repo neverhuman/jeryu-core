@@ -384,10 +384,10 @@ fn fill_random(buf: &mut [u8]) -> Result<()> {
         return Ok(());
     }
     // Fallback entropy: time + pid hashed into a keystream. Best effort only.
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
+    let nanos = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_nanos(),
+        Err(_) => 0,
+    };
     let pid = std::process::id();
     let mut seed = Vec::with_capacity(24);
     seed.extend_from_slice(&nanos.to_le_bytes());
@@ -531,10 +531,10 @@ mod tests {
     fn tmp_root(tag: &str) -> PathBuf {
         let base = std::env::temp_dir().join(format!(
             "jeryu-auth-{tag}-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
+            match SystemTime::now().duration_since(UNIX_EPOCH) {
+                Ok(duration) => duration.as_nanos(),
+                Err(_) => 0,
+            }
         ));
         std::fs::create_dir_all(&base).unwrap_or_else(|e| panic!("mkdir {}: {e}", base.display()));
         base

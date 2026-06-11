@@ -179,11 +179,18 @@ impl ForgeCore {
 
     pub fn get_pull_request(&self, owner: &str, repo: &str, number: u64) -> Result<PullRequest> {
         let state = self.state.read();
-        let mut pr = state
+        let mut pr = match state
             .pulls
             .get(&(owner.to_string(), repo.to_string(), number))
             .cloned()
-            .ok_or_else(|| ForgeError::NotFound(format!("pull request {owner}/{repo}#{number}")))?;
+        {
+            Some(pr) => pr,
+            None => {
+                return Err(ForgeError::NotFound(format!(
+                    "pull request {owner}/{repo}#{number}"
+                )));
+            }
+        };
         let evaluation = evaluate_locked(&state, &pr, None);
         apply_evaluation(&mut pr, evaluation);
         Ok(pr)
@@ -199,10 +206,14 @@ impl ForgeCore {
         let mut state = self.state.write();
         let previous = state.clone();
         let key = (owner.to_string(), repo.to_string(), number);
-        let pr = state
-            .pulls
-            .get_mut(&key)
-            .ok_or_else(|| ForgeError::NotFound(format!("pull request {owner}/{repo}#{number}")))?;
+        let pr = match state.pulls.get_mut(&key) {
+            Some(pr) => pr,
+            None => {
+                return Err(ForgeError::NotFound(format!(
+                    "pull request {owner}/{repo}#{number}"
+                )));
+            }
+        };
         if let Some(title) = request.title {
             require_name("pull request title", &title)?;
             pr.title = title;
@@ -317,17 +328,20 @@ impl ForgeCore {
     ) -> Result<MergeReadiness> {
         let state = self.state.read();
         let key = (owner.to_string(), repo.to_string(), number);
-        let pr =
-            state.pulls.get(&key).cloned().ok_or_else(|| {
-                ForgeError::NotFound(format!("pull request {owner}/{repo}#{number}"))
-            })?;
+        let pr = match state.pulls.get(&key).cloned() {
+            Some(pr) => pr,
+            None => {
+                return Err(ForgeError::NotFound(format!(
+                    "pull request {owner}/{repo}#{number}"
+                )));
+            }
+        };
         if pr.merged {
             return Ok(MergeReadiness::AlreadyMerged {
-                // An already-merged PR normally records its merge commit; fall
-                // back to the head sha only for the rare case where the merge
-                // sha was never persisted. This is a real default, not a
-                // swallowed error.
-                sha: pr.merge_commit_sha.unwrap_or_else(|| pr.head.sha.clone()),
+                sha: match pr.merge_commit_sha.clone() {
+                    Some(sha) => sha,
+                    None => pr.head.sha.clone(),
+                },
             });
         }
         if pr.state == PullRequestState::Closed {
@@ -382,15 +396,20 @@ impl ForgeCore {
         let mut state = self.state.write();
         let previous = state.clone();
         let key = (owner.to_string(), repo.to_string(), number);
-        let pr_snapshot =
-            state.pulls.get(&key).cloned().ok_or_else(|| {
-                ForgeError::NotFound(format!("pull request {owner}/{repo}#{number}"))
-            })?;
+        let pr_snapshot = match state.pulls.get(&key).cloned() {
+            Some(pr) => pr,
+            None => {
+                return Err(ForgeError::NotFound(format!(
+                    "pull request {owner}/{repo}#{number}"
+                )));
+            }
+        };
         if pr_snapshot.merged {
             return Ok(MergeResult {
-                sha: pr_snapshot
-                    .merge_commit_sha
-                    .unwrap_or_else(|| merge_sha.clone()),
+                sha: match pr_snapshot.merge_commit_sha.clone() {
+                    Some(sha) => sha,
+                    None => merge_sha.clone(),
+                },
                 merged: true,
                 message: "Pull Request already merged".to_string(),
             });

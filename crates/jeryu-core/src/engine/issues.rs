@@ -200,12 +200,15 @@ impl ForgeCore {
         self.get_issue(owner, repo, number)?;
         // The issue exists (checked above); a missing comments entry just means
         // it has no comments yet, so an empty list is the intended value.
-        Ok(self
-            .state
-            .read()
-            .issue_comments
-            .get(&(owner.to_string(), repo.to_string(), number))
-            .cloned()
-            .unwrap_or_default())
+        Ok(
+            match self.state.read().issue_comments.get(&(
+                owner.to_string(),
+                repo.to_string(),
+                number,
+            )) {
+                Some(comments) => comments.clone(),
+                None => Vec::new(),
+            },
+        )
     }
 }

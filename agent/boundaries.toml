@@ -19,3 +19,11 @@ cargo_members = [
   "crates/jeryu-enterprise",
   "crates/jeryu-proof",
 ]
+
+[python]
+allowed_non_product_paths = ["ops/split/"]
+
+[db]
+root_paths = ["db"]
+migration_paths = ["db/migrations"]
+constraint_paths = ["db/constraints"]

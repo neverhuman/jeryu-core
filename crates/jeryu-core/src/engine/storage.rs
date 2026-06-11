@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, params};
 
+use super::audit::AuditEntry;
 use super::{Counters, State};
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
@@ -48,6 +49,62 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Append one audit receipt through a fresh connection.
+    ///
+    /// `forge_audit_log` is intentionally NOT part of `persist`/`delete_all`:
+    /// the full-state rewrite must never wipe the trail, so audit writes take
+    /// this dedicated path instead of riding the state snapshot.
+    pub(super) fn append_audit(&self, entry: &AuditEntry) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            INSERT INTO forge_audit_log (
+              id, occurred_at, actor, action, subject, phase, detail_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                entry.id,
+                entry.occurred_at,
+                entry.actor,
+                entry.action,
+                entry.subject,
+                entry.phase,
+                json(&entry.detail)?,
+            ],
+        )
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// All audit entries for one subject, oldest first.
+    pub(super) fn list_audit(&self, subject: &str) -> Result<Vec<AuditEntry>> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT id, occurred_at, actor, action, subject, phase, detail_json
+                FROM forge_audit_log
+                WHERE subject = ?1
+                ORDER BY occurred_at, rowid
+                "#,
+            )
+            .map_err(storage_error)?;
+        let mut rows = stmt.query(params![subject]).map_err(storage_error)?;
+        let mut entries = Vec::new();
+        while let Some(row) = rows.next().map_err(storage_error)? {
+            entries.push(AuditEntry {
+                id: row.get(0).map_err(storage_error)?,
+                occurred_at: row.get(1).map_err(storage_error)?,
+                actor: row.get(2).map_err(storage_error)?,
+                action: row.get(3).map_err(storage_error)?,
+                subject: row.get(4).map_err(storage_error)?,
+                phase: row.get(5).map_err(storage_error)?,
+                detail: parse_json(row.get(6).map_err(storage_error)?)?,
+            });
+        }
+        Ok(entries)
+    }
+
     fn connect(&self) -> Result<Connection> {
         let conn = Connection::open(&self.path).map_err(storage_error)?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")
@@ -69,6 +126,7 @@ fn delete_all(conn: &Connection) -> Result<()> {
         DELETE FROM webhook_metadata;
         DELETE FROM webhooks;
         DELETE FROM branch_protection_rules;
+        DELETE FROM jankurai_scores;
         DELETE FROM check_runs;
         DELETE FROM reviews;
         DELETE FROM pull_requests;
@@ -114,8 +172,8 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
             r#"
             INSERT INTO repositories (
               id, owner, name, full_name, private, description, default_branch,
-              archived, disabled, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+              archived, disabled, created_at, updated_at, family
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             "#,
             params![
                 repo.id.to_string(),
@@ -129,6 +187,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
                 bool_int(repo.disabled),
                 time(repo.created_at),
                 time(repo.updated_at),
+                repo.family,
             ],
         )
         .map_err(storage_error)?;
@@ -332,6 +391,33 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         }
     }
 
+    for scores in state.jankurai_scores.values() {
+        for score in scores {
+            let repo_id = repo_id(&repo_ids, &score.owner, &score.repo)?;
+            conn.execute(
+                r#"
+                INSERT INTO jankurai_scores (
+                  id, repo_id, branch, commit_sha, score, hard_findings,
+                  decision, caps_json, report_json, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "#,
+                params![
+                    score.id.to_string(),
+                    repo_id,
+                    score.branch,
+                    score.commit_sha,
+                    score.score,
+                    score.hard_findings,
+                    score.decision,
+                    json(&score.caps_applied)?,
+                    score.report_json,
+                    time(score.created_at),
+                ],
+            )
+            .map_err(storage_error)?;
+        }
+    }
+
     for hooks in state.webhooks.values() {
         for hook in hooks {
             let repo_id = repo_id(&repo_ids, &hook.owner, &hook.repo)?;
@@ -430,6 +516,7 @@ fn load_state(conn: &Connection) -> Result<State> {
     load_readmes(conn, &mut state)?;
     load_commit_statuses(conn, &mut state)?;
     load_check_runs(conn, &mut state)?;
+    load_jankurai_scores(conn, &mut state)?;
     load_webhooks(conn, &mut state)?;
     load_webhook_deliveries(conn, &mut state)?;
     load_counters(conn, &mut state)?;
@@ -481,7 +568,7 @@ fn load_repositories(conn: &Connection, state: &mut State) -> Result<()> {
         .prepare(
             r#"
             SELECT id, owner, name, full_name, private, description, default_branch,
-                   archived, disabled, created_at, updated_at
+                   archived, disabled, created_at, updated_at, family
             FROM repositories
             "#,
         )
@@ -496,6 +583,7 @@ fn load_repositories(conn: &Connection, state: &mut State) -> Result<()> {
             private: int_bool(row.get(4).map_err(storage_error)?),
             description: row.get(5).map_err(storage_error)?,
             default_branch: row.get(6).map_err(storage_error)?,
+            family: row.get(11).map_err(storage_error)?,
             archived: int_bool(row.get(7).map_err(storage_error)?),
             disabled: int_bool(row.get(8).map_err(storage_error)?),
             created_at: parse_time(row.get(9).map_err(storage_error)?)?,
@@ -831,6 +919,45 @@ fn load_check_runs(conn: &Connection, state: &mut State) -> Result<()> {
             completed_at: parse_optional_time(row.get(10).map_err(storage_error)?)?,
         };
         state.check_runs.entry((owner, repo)).or_default().push(run);
+    }
+    Ok(())
+}
+
+fn load_jankurai_scores(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT r.owner, r.name, s.id, s.branch, s.commit_sha, s.score,
+                   s.hard_findings, s.decision, s.caps_json, s.report_json,
+                   s.created_at
+            FROM jankurai_scores s
+            JOIN repositories r ON r.id = s.repo_id
+            ORDER BY s.rowid
+            "#,
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let owner: String = row.get(0).map_err(storage_error)?;
+        let repo: String = row.get(1).map_err(storage_error)?;
+        let score = JankuraiScore {
+            id: parse_uuid(row.get(2).map_err(storage_error)?)?,
+            owner: owner.clone(),
+            repo: repo.clone(),
+            branch: row.get(3).map_err(storage_error)?,
+            commit_sha: row.get(4).map_err(storage_error)?,
+            score: row.get(5).map_err(storage_error)?,
+            hard_findings: row.get::<_, i64>(6).map_err(storage_error)? as u32,
+            decision: row.get(7).map_err(storage_error)?,
+            caps_applied: parse_json(row.get(8).map_err(storage_error)?)?,
+            report_json: row.get(9).map_err(storage_error)?,
+            created_at: parse_time(row.get(10).map_err(storage_error)?)?,
+        };
+        state
+            .jankurai_scores
+            .entry((owner, repo))
+            .or_default()
+            .push(score);
     }
     Ok(())
 }

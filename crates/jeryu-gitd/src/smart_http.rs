@@ -2,7 +2,7 @@
 
 use crate::auth::{AuthDecision, AuthRegistry, extract_bearer_or_basic};
 use crate::error::{GitdError, Result};
-use crate::pack::{PackService, advertise_refs, stateless_rpc};
+use crate::pack::{PackService, advertise_refs, ensure_receive_pack_policy, stateless_rpc};
 use crate::pktline;
 use crate::repo::RepoManager;
 use std::collections::HashMap;
@@ -88,6 +88,7 @@ impl SmartHttpServer {
             Ok(response) => response,
             Err(GitdError::Unauthorized) => unauthorized_response(),
             Err(GitdError::Forbidden(msg)) => forbidden_response(&msg),
+            Err(GitdError::ProtectedRefDenied(msg)) => forbidden_response(&msg),
             Err(err) => HttpResponse::text(500, &format!("jeryu_gitd error: {err}\n")),
         }
     }
@@ -141,6 +142,9 @@ impl SmartHttpServer {
         let (owner, repo_name) = parse_repo_from_path(base)?;
         self.authorize(request, &owner, service.is_write())?;
         let repo = self.manager.open_parts(&owner, &repo_name)?;
+        if service == PackService::ReceivePack {
+            ensure_receive_pack_policy(&request.body)?;
+        }
         let body = stateless_rpc(
             &self.manager.config().git_bin,
             &repo,

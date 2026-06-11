@@ -50,14 +50,18 @@ impl ForgeCore {
         repo: &str,
         branch: &str,
     ) -> Result<BranchProtectionRule> {
-        self.state
+        match self
+            .state
             .read()
             .branch_protections
             .get(&(owner.to_string(), repo.to_string(), branch.to_string()))
             .cloned()
-            .ok_or_else(|| {
-                ForgeError::NotFound(format!("branch protection {owner}/{repo}:{branch}"))
-            })
+        {
+            Some(rule) => Ok(rule),
+            None => Err(ForgeError::NotFound(format!(
+                "branch protection {owner}/{repo}:{branch}"
+            ))),
+        }
     }
 
     /// Stores the repository's CODEOWNERS file contents. Used by branch
@@ -75,12 +79,16 @@ impl ForgeCore {
 
     pub fn get_codeowners(&self, owner: &str, repo: &str) -> Result<String> {
         self.ensure_repo_exists(owner, repo)?;
-        self.state
+        match self
+            .state
             .read()
             .codeowners
             .get(&(owner.to_string(), repo.to_string()))
             .cloned()
-            .ok_or_else(|| ForgeError::NotFound(format!("CODEOWNERS {owner}/{repo}")))
+        {
+            Some(codeowners) => Ok(codeowners),
+            None => Err(ForgeError::NotFound(format!("CODEOWNERS {owner}/{repo}"))),
+        }
     }
 
     pub fn evaluate_pull_request(
@@ -91,10 +99,17 @@ impl ForgeCore {
         sha: Option<&str>,
     ) -> Result<BranchProtectionEvaluation> {
         let state = self.state.read();
-        let pr = state
+        let pr = match state
             .pulls
             .get(&(owner.to_string(), repo.to_string(), number))
-            .ok_or_else(|| ForgeError::NotFound(format!("pull request {owner}/{repo}#{number}")))?;
+        {
+            Some(pr) => pr,
+            None => {
+                return Err(ForgeError::NotFound(format!(
+                    "pull request {owner}/{repo}#{number}"
+                )));
+            }
+        };
         Ok(evaluate_locked(&state, pr, sha))
     }
 

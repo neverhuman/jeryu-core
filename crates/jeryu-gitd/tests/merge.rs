@@ -1,6 +1,9 @@
 mod common;
 
 use jeryu_gitd::error::GitdError;
+use jeryu_gitd::hooks::PreReceiveGuard;
+use jeryu_gitd::object_fsck::ObjectFsck;
+use jeryu_gitd::protection::ProtectedRefRule;
 use jeryu_gitd::refs::RefService;
 use jeryu_gitd::repo::Repository;
 use jeryu_gitd::{GitdConfig, RepoId, RepoManager};
@@ -33,6 +36,47 @@ fn merge_pull_fast_forward_advances_base() {
         .unwrap_or_else(|err| panic!("merge_pull failed: {err}"));
 
     assert!(outcome.fast_forward, "expected a fast-forward merge");
+    assert_eq!(outcome.merge_oid, head_oid);
+    assert_eq!(ref_oid(&svc, &fixture.repo, "refs/heads/main"), head_oid);
+    fixture.cleanup();
+}
+
+#[test]
+fn merge_pull_advances_main_even_when_pre_receive_blocks_wire_update() {
+    if !common::git_available() {
+        return;
+    }
+    let fixture = seed_bare_with_main("jeryu-merge-pr-only");
+    let base_oid = fixture.main_oid.clone();
+    let head_oid = commit_on_top(&fixture.work, &fixture.repo, "feature", "line two\n");
+    let guard = PreReceiveGuard::new(
+        ProtectedRefRule::default_phase1_rules(),
+        ObjectFsck::new("git"),
+    );
+    let wire_update = format!("{base_oid} {head_oid} refs/heads/main\n");
+    let direct_err = guard
+        .evaluate_lines(&fixture.repo, "alice", &wire_update)
+        .unwrap_err();
+    assert!(
+        direct_err
+            .to_string()
+            .contains("direct pushes to refs/heads/main are blocked"),
+        "unexpected direct-push error: {direct_err}"
+    );
+
+    let svc = RefService::new(fixture.manager.clone());
+    let outcome = svc
+        .merge_pull(
+            &fixture.repo,
+            MERGE_ACTOR,
+            "refs/heads/main",
+            &base_oid,
+            &head_oid,
+            "Merge pull request #1",
+            false,
+        )
+        .unwrap_or_else(|err| panic!("server-side merge_pull failed: {err}"));
+
     assert_eq!(outcome.merge_oid, head_oid);
     assert_eq!(ref_oid(&svc, &fixture.repo, "refs/heads/main"), head_oid);
     fixture.cleanup();

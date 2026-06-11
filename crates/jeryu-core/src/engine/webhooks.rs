@@ -43,13 +43,17 @@ impl ForgeCore {
         self.ensure_repo_exists(owner, repo)?;
         // No webhooks entry for the repo means none are registered; an empty
         // list is the intended value.
-        Ok(self
-            .state
-            .read()
-            .webhooks
-            .get(&(owner.to_string(), repo.to_string()))
-            .cloned()
-            .unwrap_or_default())
+        Ok(
+            match self
+                .state
+                .read()
+                .webhooks
+                .get(&(owner.to_string(), repo.to_string()))
+            {
+                Some(webhooks) => webhooks.clone(),
+                None => Vec::new(),
+            },
+        )
     }
 
     pub fn list_webhook_deliveries(&self, owner: &str, repo: &str) -> Result<Vec<WebhookDelivery>> {

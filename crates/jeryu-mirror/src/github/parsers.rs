@@ -259,23 +259,21 @@ pub(super) fn parse_webhook(value: &Value) -> WebhookMigration {
 }
 
 pub(super) fn parse_app(value: &Value) -> AppInstallationMigration {
-    let id = value
-        .get("id")
-        .map(Value::to_string)
-        .unwrap_or_else(|| "unknown".to_string());
+    let id = match value.get("id").map(Value::to_string) {
+        Some(id) => id,
+        None => "unknown".to_string(),
+    };
     AppInstallationMigration {
         id: id.clone(),
         slug: string(value, "slug", "github-app"),
-        permissions: value
-            .get("permissions")
-            .and_then(Value::as_object)
-            .map(|object| object.keys().cloned().collect())
-            .unwrap_or_default(),
-        events: value
-            .get("events")
-            .and_then(Value::as_array)
-            .map(|values| strings_from_array(values))
-            .unwrap_or_default(),
+        permissions: match value.get("permissions").and_then(Value::as_object) {
+            Some(object) => object.keys().cloned().collect(),
+            None => Vec::new(),
+        },
+        events: match value.get("events").and_then(Value::as_array) {
+            Some(values) => strings_from_array(values),
+            None => Vec::new(),
+        },
         token_secret_name: Some(format!("jeryu_mirror/app/{id}/token")),
         notes: vec![
             "Installation token is not exportable; recreate or rotate after restore.".to_string(),
@@ -291,11 +289,13 @@ pub(super) fn parse_protected_branch(value: &Value) -> ProtectedBranchArchive {
             .and_then(Value::as_str)
             .unwrap_or("main")
             .to_string(),
-        required_status_checks: value
+        required_status_checks: match value
             .pointer("/required_status_checks/contexts")
             .and_then(Value::as_array)
-            .map(|values| strings_from_array(values))
-            .unwrap_or_default(),
+        {
+            Some(values) => strings_from_array(values),
+            None => Vec::new(),
+        },
         required_reviews: value
             .pointer("/required_pull_request_reviews/required_approving_review_count")
             .or_else(|| value.get("required_reviews"))

@@ -4,6 +4,8 @@ use jeryu_gitd::hooks::PreReceiveGuard;
 use jeryu_gitd::object_fsck::ObjectFsck;
 use jeryu_gitd::protection::ProtectedRefRule;
 use jeryu_gitd::{GitdConfig, RepoId, RepoManager};
+use std::path::Path;
+use std::process::Command;
 
 #[test]
 fn pre_receive_blocks_main_delete_before_fsck_matters() {
@@ -25,6 +27,82 @@ fn pre_receive_blocks_main_delete_before_fsck_matters() {
 }
 
 #[test]
+fn pre_receive_blocks_direct_main_update_before_fsck_matters() {
+    if !common::git_available() {
+        return;
+    }
+    let root = common::temp_dir("jeryu-prereceive-main-update");
+    let manager = RepoManager::new(GitdConfig::new(&root));
+    let repo = manager
+        .create_bare(&RepoId::new("acme", "demo").unwrap_or_else(|err| panic!("id failed: {err}")))
+        .unwrap_or_else(|err| panic!("create failed: {err}"));
+    let guard = PreReceiveGuard::new(
+        ProtectedRefRule::default_phase1_rules(),
+        ObjectFsck::new("git"),
+    );
+    let input = "1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 refs/heads/main\n";
+
+    let err = guard.evaluate_lines(&repo, "alice", input).unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("direct pushes to refs/heads/main are blocked"),
+        "unexpected error: {err}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn installed_pre_receive_hook_blocks_direct_wire_push_to_main() {
+    if !common::git_available() {
+        return;
+    }
+    let root = common::temp_dir("jeryu-prereceive-hook-root");
+    let work = common::temp_dir("jeryu-prereceive-hook-work");
+    let manager = RepoManager::new(GitdConfig::new(&root));
+    let repo = manager
+        .create_bare(&RepoId::new("acme", "demo").unwrap_or_else(|err| panic!("id failed: {err}")))
+        .unwrap_or_else(|err| panic!("create failed: {err}"));
+    manager
+        .install_pre_receive_hook(&repo)
+        .unwrap_or_else(|err| panic!("install hook failed: {err}"));
+
+    run_git_ok(&work, &["init"], "git init");
+    run_git_ok(
+        &work,
+        &["config", "user.email", "test@example.invalid"],
+        "git config email",
+    );
+    run_git_ok(&work, &["config", "user.name", "Test"], "git config name");
+    std::fs::write(work.join("README.md"), "hello\n")
+        .unwrap_or_else(|err| panic!("write failed: {err}"));
+    run_git_ok(&work, &["add", "README.md"], "git add");
+    run_git_ok(&work, &["commit", "-m", "seed"], "git commit");
+
+    let output = Command::new("git")
+        .args([
+            "push",
+            repo.path.to_str().unwrap_or_default(),
+            "HEAD:refs/heads/main",
+        ])
+        .current_dir(&work)
+        .output()
+        .unwrap_or_else(|err| panic!("git push failed to start: {err}"));
+
+    assert!(
+        !output.status.success(),
+        "direct main push unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("direct pushes to refs/heads/main are blocked"),
+        "unexpected stderr: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(work);
+}
+
+#[test]
 fn pre_receive_rejects_invalid_ref_name_before_accepting_change() {
     if !common::git_available() {
         return;
@@ -41,6 +119,15 @@ fn pre_receive_rejects_invalid_ref_name_before_accepting_change() {
 
     assert!(err.to_string().contains("invalid ref name"));
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn run_git_ok(work: &Path, args: &[&str], label: &str) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(work)
+        .status()
+        .unwrap_or_else(|err| panic!("{label} failed to start: {err}"));
+    assert!(status.success(), "{label} failed with {status}");
 }
 
 #[test]
