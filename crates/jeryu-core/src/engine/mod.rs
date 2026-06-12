@@ -213,6 +213,21 @@ fn next_pull_number(state: &mut State, owner: &str, repo: &str) -> u64 {
     counters.pull
 }
 
+/// Whether jeryu enforces a passing `jankurai/proof` check on every merge,
+/// family-wide. Driven by the `[audit].enforce_merge` setting, surfaced to this
+/// domain layer via `JERYU_AUDIT_ENFORCE_MERGE`. Default `false` (the shadow
+/// phase: scores are still recorded and the proof check published, but the merge
+/// stays advisory). Flip to a truthy value once the fleet is green.
+fn audit_merge_enforced() -> bool {
+    matches!(
+        std::env::var("JERYU_AUDIT_ENFORCE_MERGE")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
 fn evaluate_locked(
     state: &State,
     pr: &PullRequest,
@@ -252,6 +267,7 @@ fn evaluate_locked(
     let context = EvaluationContext {
         codeowners: codeowners.map(String::as_str),
         actor_is_admin: false,
+        jankurai_proof_mandatory: audit_merge_enforced(),
     };
     evaluate_branch_protection_with(
         pr,

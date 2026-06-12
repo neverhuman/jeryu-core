@@ -38,6 +38,21 @@ pub fn evaluate_branch_protection_with(
         blockers.push(MergeBlocker::DraftPullRequest);
     }
 
+    // Intrinsic jankurai-proof gate: when jeryu enforces scoring family-wide, a
+    // passing `jankurai/proof` check is required on every head regardless of any
+    // protection rule — and, like the other intrinsic gates above, it binds admins
+    // too. This is what makes a merge of an unscored (or capped) head impossible.
+    // The legacy per-rule `require_jankurai_proof` opt-in is kept below (inside the
+    // rule block, still admin-bypassable) for repos that asked for it locally.
+    if context.jankurai_proof_mandatory {
+        match required_context_state("jankurai/proof", statuses, check_runs) {
+            RequiredContextState::Satisfied => {}
+            RequiredContextState::Missing | RequiredContextState::Failed => {
+                blockers.push(MergeBlocker::JankuraiProofRequired);
+            }
+        }
+    }
+
     let Some(rule) = protection else {
         return BranchProtectionEvaluation::from_blockers(blockers);
     };
@@ -74,7 +89,9 @@ pub fn evaluate_branch_protection_with(
         }
     }
 
-    if rule.require_jankurai_proof {
+    // Already enforced intrinsically above when mandatory; only the per-rule
+    // opt-in path needs handling here (avoids a duplicate JankuraiProofRequired).
+    if rule.require_jankurai_proof && !context.jankurai_proof_mandatory {
         match required_context_state("jankurai/proof", statuses, check_runs) {
             RequiredContextState::Satisfied => {}
             RequiredContextState::Missing | RequiredContextState::Failed => {

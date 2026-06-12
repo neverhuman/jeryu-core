@@ -137,6 +137,7 @@ impl ForgeCore {
             EvaluationContext {
                 codeowners: None,
                 actor_is_admin,
+                jankurai_proof_mandatory: false,
             },
         ))
     }

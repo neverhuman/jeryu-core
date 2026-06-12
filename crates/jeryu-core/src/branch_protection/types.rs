@@ -69,6 +69,12 @@ pub struct EvaluationContext<'a> {
     /// `enforce_admins` is false, an admin actor bypasses configurable
     /// protections (matching GitHub's "Include administrators" toggle).
     pub actor_is_admin: bool,
+    /// Whether jeryu enforces a passing `jankurai/proof` check on EVERY head,
+    /// family-wide and independent of any per-branch protection rule. When true
+    /// it is an intrinsic gate (it binds admins too) so no repo can merge a head
+    /// that jeryu has not scored. Driven by the `[audit].enforce_merge` setting;
+    /// `false` during the shadow-rollout phase (scores recorded, merge advisory).
+    pub jankurai_proof_mandatory: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
