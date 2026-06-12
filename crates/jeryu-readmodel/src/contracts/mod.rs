@@ -19,6 +19,8 @@ pub mod repository;
 pub mod review;
 pub mod settings;
 pub mod source;
+pub mod tool_fleet;
+pub mod tool_registry;
 pub mod web;
 
 pub use action::AvailableAction;
@@ -39,7 +41,7 @@ pub use review::{
     ReviewVerdict, SubmitReviewRequest,
 };
 pub use settings::{
-    AccessSettings, AgentSettings, BranchProtectionRule, CiSettings, FeatureSettings,
+    AccessSettings, AgentSettings, AuditSettings, BranchProtectionRule, CiSettings, FeatureSettings,
     GeneralSettings, MergeSettings, NotificationSettings, RepositorySettings, RetentionSettings,
     SecuritySettings, SettingsDiffPreview, SettingsFieldChange, SettingsPatch,
 };
@@ -47,6 +49,8 @@ pub use source::{
     BlobEncoding, BlobResponse, MarkdownHeading, MarkdownLink, RefKind, RefSelectorItem,
     RenderedMarkdown, TreeEntry, TreeEntryKind,
 };
+pub use tool_fleet::{ToolFleetEntry, ToolFleetResponse};
+pub use tool_registry::{ToolRegistryEntry, ToolRegistrySummary};
 pub use web::{
     ClientWsMessage, ServerWsMessage, SubscriptionSpec, Viewer, WebBootstrap, WebEvent,
     WebFeatureFlags,
@@ -54,7 +58,7 @@ pub use web::{
 
 use ts_rs::{Config, ExportError, TS};
 
-/// The 64 exported web/TUI wire contracts, in stable (sorted) order.
+/// The exported web/TUI wire contracts, in stable (sorted) order.
 ///
 /// Each entry exports exactly one `contracts/generated/<Name>.ts` file. This
 /// list is the single source the export binary and the drift test share, so
@@ -96,6 +100,7 @@ contract_exports!(
     AccessSettings,
     AgentPosture,
     AgentSettings,
+    AuditSettings,
     BlobEncoding,
     BlobResponse,
     BranchProtectionRule,
@@ -151,6 +156,10 @@ contract_exports!(
     SettingsPatch,
     SubmitReviewRequest,
     SubscriptionSpec,
+    ToolFleetEntry,
+    ToolFleetResponse,
+    ToolRegistryEntry,
+    ToolRegistrySummary,
     TreeEntry,
     TreeEntryKind,
     Viewer,

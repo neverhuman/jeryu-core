@@ -122,6 +122,30 @@ pub struct RetentionSettings {
     pub log_days: u32,
 }
 
+/// Per-repository jankurai audit controls, surfaced in the SPA settings editor.
+/// This is the jeryu OVERLAY over the repo's own `agent/audit-policy.toml`; it
+/// never edits the bytes the standalone auditor reads. Family-wide defaults live
+/// in `jeryu-tool/tool-manifest.toml` and `~/.jeryu/settings.json [audit]`; an
+/// unset (`None`) field here inherits that default. The strict gate ("any new
+/// cap blocks") is the system default; these only ever tighten or relax per repo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[ts(export)]
+pub struct AuditSettings {
+    /// Override the family jankurai version pin for this repo (rare — normally the
+    /// manifest pin governs). `None` uses the manifest pin.
+    pub version: Option<String>,
+    /// Minimum score floor; `None` inherits the profile floor from the manifest.
+    pub minimum_score: Option<u32>,
+    /// Per-tool mode overrides (tool id → "required" | "advisory" | "disabled").
+    pub tool_modes: std::collections::BTreeMap<String, String>,
+    /// Block commits that introduce new caps/hard findings. `None` = system
+    /// default (the in-sandbox commit gate is on).
+    pub enforce_commit: Option<bool>,
+    /// Require a passing `jankurai/proof` to merge. `None` = system default (the
+    /// `[audit].enforce_merge` family setting — off during the shadow phase).
+    pub enforce_merge: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RepositorySettings {
@@ -136,6 +160,8 @@ pub struct RepositorySettings {
     pub security: SecuritySettings,
     pub notifications: NotificationSettings,
     pub retention: RetentionSettings,
+    #[serde(default)]
+    pub audit: AuditSettings,
 }
 
 /// Settings patch wire-format. RFC 7396 merge semantics — only fields that

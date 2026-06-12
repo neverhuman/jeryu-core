@@ -51,6 +51,10 @@ pub enum RepositoryVisibility {
 pub enum RepositoryRole {
     PublicPortal,
     SplitMember,
+    /// The family tool control plane (`jeryu-tool`): owns the jankurai audit pin
+    /// and the reusable-code-tool registry. Surfaced as the gold "golden box" on
+    /// the repos page.
+    ToolControlPlane,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
