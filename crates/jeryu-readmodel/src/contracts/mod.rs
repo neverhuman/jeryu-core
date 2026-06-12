@@ -19,6 +19,7 @@ pub mod repository;
 pub mod review;
 pub mod settings;
 pub mod source;
+pub mod tool_finder;
 pub mod tool_fleet;
 pub mod tool_registry;
 pub mod web;
@@ -41,13 +42,17 @@ pub use review::{
     ReviewVerdict, SubmitReviewRequest,
 };
 pub use settings::{
-    AccessSettings, AgentSettings, AuditSettings, BranchProtectionRule, CiSettings, FeatureSettings,
-    GeneralSettings, MergeSettings, NotificationSettings, RepositorySettings, RetentionSettings,
-    SecuritySettings, SettingsDiffPreview, SettingsFieldChange, SettingsPatch,
+    AccessSettings, AgentSettings, AuditSettings, BranchProtectionRule, CiSettings,
+    FeatureSettings, GeneralSettings, MergeSettings, NotificationSettings, RepositorySettings,
+    RetentionSettings, SecuritySettings, SettingsDiffPreview, SettingsFieldChange, SettingsPatch,
 };
 pub use source::{
     BlobEncoding, BlobResponse, MarkdownHeading, MarkdownLink, RefKind, RefSelectorItem,
     RenderedMarkdown, TreeEntry, TreeEntryKind,
+};
+pub use tool_finder::{
+    ToolFinderCluster, ToolFinderDashboard, ToolFinderOccurrence, ToolFinderPatternFamily,
+    ToolFinderProposeReceipt, ToolFinderScanMeta, ToolFinderScanStatus,
 };
 pub use tool_fleet::{ToolFleetEntry, ToolFleetResponse};
 pub use tool_registry::{ToolRegistryEntry, ToolRegistrySummary};
@@ -156,6 +161,13 @@ contract_exports!(
     SettingsPatch,
     SubmitReviewRequest,
     SubscriptionSpec,
+    ToolFinderCluster,
+    ToolFinderDashboard,
+    ToolFinderOccurrence,
+    ToolFinderPatternFamily,
+    ToolFinderProposeReceipt,
+    ToolFinderScanMeta,
+    ToolFinderScanStatus,
     ToolFleetEntry,
     ToolFleetResponse,
     ToolRegistryEntry,
