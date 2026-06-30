@@ -1,6 +1,7 @@
 //! Server-side hook implementations.
 
 use crate::error::{GitdError, Result};
+use crate::lfs::RAW_GIT_BLOB_LIMIT_BYTES;
 use crate::object_fsck::ObjectFsck;
 use crate::protection::{ProtectedRefRule, RefChange, RefOperation};
 use crate::refs::{is_zero_oid, validate_ref_name};
@@ -106,6 +107,13 @@ impl PreReceiveGuard {
             }
             changes.push(change);
         }
+        let new_oids: Vec<String> = changes
+            .iter()
+            .filter(|change| !is_zero_oid(&change.new_oid))
+            .map(|change| change.new_oid.clone())
+            .collect();
+        self.fsck
+            .reject_oversized_raw_blobs(repo, &new_oids, RAW_GIT_BLOB_LIMIT_BYTES)?;
         self.fsck.fsck(repo)?;
         Ok(changes)
     }

@@ -131,6 +131,73 @@ fn run_git_ok(work: &Path, args: &[&str], label: &str) {
 }
 
 #[test]
+fn object_fsck_rejects_raw_blob_above_limit_with_lfs_guidance() {
+    if !common::git_available() {
+        return;
+    }
+    let root = common::temp_dir("jeryu-prereceive-large-blob-root");
+    let work = common::temp_dir("jeryu-prereceive-large-blob-work");
+    let manager = RepoManager::new(GitdConfig::new(&root));
+    let repo = manager
+        .create_bare(&RepoId::new("acme", "demo").unwrap_or_else(|err| panic!("id failed: {err}")))
+        .unwrap_or_else(|err| panic!("create failed: {err}"));
+
+    run_git_ok(&work, &["init"], "git init");
+    run_git_ok(
+        &work,
+        &["config", "user.email", "test@example.invalid"],
+        "git config email",
+    );
+    run_git_ok(&work, &["config", "user.name", "Test"], "git config name");
+    std::fs::write(work.join("model.cpkt"), vec![7u8; 2048])
+        .unwrap_or_else(|err| panic!("write failed: {err}"));
+    run_git_ok(&work, &["add", "model.cpkt"], "git add");
+    run_git_ok(&work, &["commit", "-m", "raw model"], "git commit");
+    let commit = git_output(&work, &["rev-parse", "HEAD"]);
+    let repo_path = repo.path.to_string_lossy().to_string();
+    run_git_ok(
+        &work,
+        &["push", &repo_path, "HEAD:refs/heads/tmp"],
+        "git push temp ref",
+    );
+    let status = Command::new("git")
+        .args([
+            "--git-dir",
+            &repo_path,
+            "update-ref",
+            "-d",
+            "refs/heads/tmp",
+        ])
+        .status()
+        .unwrap_or_else(|err| panic!("delete temp ref failed to start: {err}"));
+    assert!(status.success(), "delete temp ref failed with {status}");
+
+    let err = ObjectFsck::new("git")
+        .reject_oversized_raw_blobs(&repo, &[commit], 1024)
+        .unwrap_err();
+
+    let message = err.to_string();
+    assert!(
+        message.contains("model.cpkt")
+            && message.contains("exceeding GitHub's 100 MiB limit")
+            && message.contains("Git LFS"),
+        "unexpected error: {message}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(work);
+}
+
+fn git_output(work: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(work)
+        .output()
+        .unwrap_or_else(|err| panic!("git {args:?} failed to start: {err}"));
+    assert!(output.status.success(), "git {args:?} failed");
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[test]
 fn pre_receive_rejects_short_or_non_hex_oids() {
     if !common::git_available() {
         return;

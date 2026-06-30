@@ -1,6 +1,7 @@
 //! Runtime configuration for jeryu_gitd.
 
 use crate::error::{GitdError, Result};
+use crate::lfs::DEFAULT_LFS_MAX_OBJECT_BYTES;
 use crate::protection::ProtectedRefRule;
 use std::env;
 use std::path::PathBuf;
@@ -28,7 +29,7 @@ impl GitdConfig {
             storage_root: storage_root.into(),
             http_addr: "127.0.0.1:8080".to_string(),
             git_bin: env::var("GITD_GIT_BIN").unwrap_or_else(|_| "git".to_string()),
-            lfs_max_object_bytes: 2 * 1024 * 1024 * 1024,
+            lfs_max_object_bytes: DEFAULT_LFS_MAX_OBJECT_BYTES,
             protected_refs: ProtectedRefRule::default_phase1_rules(),
         }
     }

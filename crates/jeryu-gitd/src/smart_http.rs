@@ -2,11 +2,12 @@
 
 use crate::auth::{AuthDecision, AuthRegistry, extract_bearer_or_basic};
 use crate::error::{GitdError, Result};
+use crate::lfs::{LfsStore, LfsVerifyRequest, normalize_oid};
 use crate::pack::{PackService, advertise_refs, ensure_receive_pack_policy, stateless_rpc};
 use crate::pktline;
 use crate::repo::RepoManager;
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 /// Realm advertised in `WWW-Authenticate` challenges.
@@ -73,9 +74,25 @@ impl SmartHttpServer {
             .peer_addr()
             .map(|addr| addr.ip().is_loopback())
             .unwrap_or(false);
-        let mut request = HttpRequest::read(&mut stream)?;
+        let (mut request, content_length, body_prefix) = HttpRequest::read_head(&mut stream)?;
         request.is_loopback = is_loopback;
-        let response = self.route(request);
+        let response = if request.method == "PUT" && is_lfs_object_transfer_path(&request.path) {
+            match content_length {
+                Some(content_length) => {
+                    let remaining = content_length.saturating_sub(body_prefix.len() as u64);
+                    let reader = Cursor::new(body_prefix).chain((&mut stream).take(remaining));
+                    self.lfs_upload_stream(&request, Some(content_length), reader)
+                }
+                None => Ok(lfs_error_response(
+                    411,
+                    "LFS basic uploads require Content-Length",
+                )),
+            }
+            .unwrap_or_else(error_response)
+        } else {
+            request.read_remaining_body(&mut stream, content_length, body_prefix)?;
+            self.route(request)
+        };
         response.write(&mut stream)
     }
 
@@ -86,10 +103,7 @@ impl SmartHttpServer {
     pub fn route(&self, request: HttpRequest) -> HttpResponse {
         match self.route_inner(request) {
             Ok(response) => response,
-            Err(GitdError::Unauthorized) => unauthorized_response(),
-            Err(GitdError::Forbidden(msg)) => forbidden_response(&msg),
-            Err(GitdError::ProtectedRefDenied(msg)) => forbidden_response(&msg),
-            Err(err) => HttpResponse::text(500, &format!("jeryu_gitd error: {err}\n")),
+            Err(err) => error_response(err),
         }
     }
 
@@ -105,6 +119,22 @@ impl SmartHttpServer {
         }
         if request.method == "POST" && request.path.ends_with("/info/lfs/objects/batch") {
             return self.lfs_batch(&request);
+        }
+        if request.method == "POST" && request.path.ends_with("/info/lfs/locks/verify") {
+            return self.lfs_locks_verify(&request);
+        }
+        if request.method == "POST" && is_lfs_verify_path(&request.path) {
+            return self.lfs_verify(&request);
+        }
+        if request.method == "GET" && is_lfs_object_transfer_path(&request.path) {
+            return self.lfs_download(&request);
+        }
+        if request.method == "PUT" && is_lfs_object_transfer_path(&request.path) {
+            return self.lfs_upload_stream(
+                &request,
+                Some(request.body.len() as u64),
+                Cursor::new(&request.body),
+            );
         }
         Err(GitdError::Http(format!(
             "no route for {} {}",
@@ -161,14 +191,92 @@ impl SmartHttpServer {
     fn lfs_batch(&self, request: &HttpRequest) -> Result<HttpResponse> {
         let (owner, repo_name) =
             parse_repo_from_path(request.path.trim_end_matches("/info/lfs/objects/batch"))?;
+        self.authorize(request, &owner, lfs_batch_is_write(&request.body)?)?;
         let repo = self.manager.open_parts(&owner, &repo_name)?;
-        let store = crate::lfs::LfsStore::for_repo(&repo.path);
+        let store = LfsStore::for_repo(&repo.path);
         let text = String::from_utf8_lossy(&request.body);
-        let body = store.batch_response_from_jsonish(&text);
+        let objects_url = lfs_objects_url(request);
+        let auth_header = request.headers.get("authorization").map(String::as_str);
+        let body = store.batch_response(
+            &text,
+            &objects_url,
+            auth_header,
+            self.manager.config().lfs_max_object_bytes,
+        )?;
         Ok(HttpResponse::bytes(
             200,
             "application/vnd.git-lfs+json",
-            body.into_bytes(),
+            body,
+        ))
+    }
+
+    fn lfs_upload_stream(
+        &self,
+        request: &HttpRequest,
+        expected_size: Option<u64>,
+        reader: impl Read,
+    ) -> Result<HttpResponse> {
+        let (owner, repo_name, oid) = lfs_object_path_parts(&request.path)?;
+        self.authorize(request, &owner, true)?;
+        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        LfsStore::for_repo(&repo.path).put_reader_with_limit(
+            &oid,
+            expected_size,
+            self.manager.config().lfs_max_object_bytes,
+            reader,
+        )?;
+        Ok(HttpResponse::bytes(
+            200,
+            "application/vnd.git-lfs+json",
+            b"{}".to_vec(),
+        ))
+    }
+
+    fn lfs_download(&self, request: &HttpRequest) -> Result<HttpResponse> {
+        let (owner, repo_name, oid) = lfs_object_path_parts(&request.path)?;
+        self.authorize(request, &owner, false)?;
+        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        let store = LfsStore::for_repo(&repo.path);
+        if !store.exists(&oid) {
+            return Ok(lfs_error_response(404, "object not found"));
+        }
+        Ok(HttpResponse::bytes(
+            200,
+            "application/octet-stream",
+            store.get(&oid)?,
+        ))
+    }
+
+    fn lfs_verify(&self, request: &HttpRequest) -> Result<HttpResponse> {
+        let (owner, repo_name, oid) = lfs_object_path_parts(&request.path)?;
+        self.authorize(request, &owner, true)?;
+        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        let verify: LfsVerifyRequest = serde_json::from_slice(&request.body)
+            .map_err(|err| GitdError::Lfs(format!("invalid LFS verify JSON: {err}")))?;
+        let body_oid = normalize_oid(&verify.oid)?;
+        if body_oid != oid {
+            return Ok(lfs_error_response(
+                422,
+                "verify oid does not match transfer URL",
+            ));
+        }
+        LfsStore::for_repo(&repo.path).verify(&oid, verify.size)?;
+        Ok(HttpResponse::bytes(
+            200,
+            "application/vnd.git-lfs+json",
+            b"{}".to_vec(),
+        ))
+    }
+
+    fn lfs_locks_verify(&self, request: &HttpRequest) -> Result<HttpResponse> {
+        let (owner, repo_name) =
+            parse_repo_from_path(request.path.trim_end_matches("/info/lfs/locks/verify"))?;
+        self.authorize(request, &owner, true)?;
+        self.manager.open_parts(&owner, &repo_name)?;
+        Ok(HttpResponse::bytes(
+            200,
+            "application/vnd.git-lfs+json",
+            br#"{"ours":[],"theirs":[]}"#.to_vec(),
         ))
     }
 }
@@ -176,12 +284,74 @@ impl SmartHttpServer {
 fn parse_repo_from_path(path: &str) -> Result<(String, String)> {
     let path = path.trim_matches('/');
     let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() != 2 {
-        return Err(GitdError::Http(format!(
+    match parts.as_slice() {
+        [owner, repo] => Ok(((*owner).to_string(), (*repo).to_string())),
+        ["git", owner, repo] => Ok(((*owner).to_string(), (*repo).to_string())),
+        _ => Err(GitdError::Http(format!(
             "expected /owner/repo.git path, got /{path}"
+        ))),
+    }
+}
+
+fn lfs_object_path_parts(path: &str) -> Result<(String, String, String)> {
+    let path = path.trim_end_matches("/verify");
+    let Some((repo_path, oid)) = path.rsplit_once("/info/lfs/objects/") else {
+        return Err(GitdError::Http(format!(
+            "expected LFS object path, got {path}"
+        )));
+    };
+    if oid == "batch" || oid.is_empty() {
+        return Err(GitdError::Http(format!(
+            "expected LFS object oid, got {path}"
         )));
     }
-    Ok((parts[0].to_string(), parts[1].to_string()))
+    let oid = normalize_oid(oid)?;
+    let (owner, repo_name) = parse_repo_from_path(repo_path)?;
+    Ok((owner, repo_name, oid))
+}
+
+fn is_lfs_object_transfer_path(path: &str) -> bool {
+    let path = path.trim_end_matches("/verify");
+    path.contains("/info/lfs/objects/")
+        && !path.ends_with("/info/lfs/objects/batch")
+        && !path.ends_with("/info/lfs/objects/")
+}
+
+fn is_lfs_verify_path(path: &str) -> bool {
+    path.ends_with("/verify") && is_lfs_object_transfer_path(path)
+}
+
+fn lfs_batch_is_write(body: &[u8]) -> Result<bool> {
+    let value: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|err| GitdError::Lfs(format!("invalid LFS batch JSON: {err}")))?;
+    match value
+        .get("operation")
+        .and_then(|operation| operation.as_str())
+    {
+        Some("upload") => Ok(true),
+        Some("download") => Ok(false),
+        Some(other) => Err(GitdError::Lfs(format!(
+            "unsupported LFS batch operation: {other}"
+        ))),
+        None => Err(GitdError::Lfs("missing LFS batch operation".to_string())),
+    }
+}
+
+fn lfs_objects_url(request: &HttpRequest) -> String {
+    let objects_path = request.path.trim_end_matches("/batch");
+    absolute_url(request, objects_path)
+}
+
+fn absolute_url(request: &HttpRequest, path: &str) -> String {
+    let Some(host) = request.headers.get("host").filter(|host| !host.is_empty()) else {
+        return path.to_string();
+    };
+    let scheme = request
+        .headers
+        .get("x-forwarded-proto")
+        .map(String::as_str)
+        .unwrap_or("http");
+    format!("{scheme}://{host}{path}")
 }
 
 /// Parsed minimal HTTP request.
@@ -205,7 +375,7 @@ pub struct HttpRequest {
 }
 
 impl HttpRequest {
-    fn read(stream: &mut TcpStream) -> Result<Self> {
+    fn read_head(stream: &mut TcpStream) -> Result<(Self, Option<u64>, Vec<u8>)> {
         let mut buffer = Vec::new();
         let mut tmp = [0u8; 4096];
         loop {
@@ -245,25 +415,51 @@ impl HttpRequest {
         }
         let content_length = headers
             .get("content-length")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(0);
-        let mut body = buffer[header_end + 4..].to_vec();
-        while body.len() < content_length {
+            .map(|s| {
+                s.parse::<u64>()
+                    .map_err(|_| GitdError::Http("invalid Content-Length".to_string()))
+            })
+            .transpose()?;
+        let mut body_prefix = buffer[header_end + 4..].to_vec();
+        if let Some(content_length) = content_length
+            && body_prefix.len() as u64 > content_length
+        {
+            body_prefix.truncate(content_length as usize);
+        }
+        Ok((
+            Self {
+                method,
+                path,
+                query,
+                headers,
+                body: Vec::new(),
+                is_loopback: false,
+            },
+            content_length,
+            body_prefix,
+        ))
+    }
+
+    fn read_remaining_body(
+        &mut self,
+        stream: &mut TcpStream,
+        content_length: Option<u64>,
+        mut body: Vec<u8>,
+    ) -> Result<()> {
+        let content_length = content_length.unwrap_or(0);
+        let target = usize::try_from(content_length)
+            .map_err(|_| GitdError::Http("Content-Length is too large".to_string()))?;
+        let mut tmp = [0u8; 4096];
+        while body.len() < target {
             let n = stream.read(&mut tmp)?;
             if n == 0 {
                 break;
             }
             body.extend_from_slice(&tmp[..n]);
         }
-        body.truncate(content_length);
-        Ok(Self {
-            method,
-            path,
-            query,
-            headers,
-            body,
-            is_loopback: false,
-        })
+        body.truncate(target);
+        self.body = body;
+        Ok(())
     }
 }
 
@@ -382,9 +578,13 @@ impl HttpResponse {
     fn write(&self, stream: &mut TcpStream) -> Result<()> {
         let status_text = match self.status {
             200 => "OK",
+            400 => "Bad Request",
             401 => "Unauthorized",
             403 => "Forbidden",
             404 => "Not Found",
+            411 => "Length Required",
+            413 => "Payload Too Large",
+            422 => "Unprocessable Entity",
             500 => "Internal Server Error",
             _ => "OK",
         };
@@ -402,6 +602,16 @@ impl HttpResponse {
         write!(stream, "\r\n")?;
         stream.write_all(&self.body)?;
         Ok(())
+    }
+}
+
+fn error_response(err: GitdError) -> HttpResponse {
+    match err {
+        GitdError::Unauthorized => unauthorized_response(),
+        GitdError::Forbidden(msg) => forbidden_response(&msg),
+        GitdError::ProtectedRefDenied(msg) => forbidden_response(&msg),
+        GitdError::Lfs(msg) => lfs_error_response(422, &msg),
+        err => HttpResponse::text(500, &format!("jeryu_gitd error: {err}\n")),
     }
 }
 
@@ -423,6 +633,11 @@ fn forbidden_response(message: &str) -> HttpResponse {
         json_string(message)
     );
     HttpResponse::bytes(403, "application/json; charset=utf-8", body.into_bytes())
+}
+
+fn lfs_error_response(status: u16, message: &str) -> HttpResponse {
+    let body = format!("{{\"message\":{}}}", json_string(message));
+    HttpResponse::bytes(status, "application/vnd.git-lfs+json", body.into_bytes())
 }
 
 /// Minimal JSON string escaper for the small, controlled messages we emit.
