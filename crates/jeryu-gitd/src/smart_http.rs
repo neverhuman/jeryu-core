@@ -37,6 +37,9 @@ impl SmartHttpServer {
     /// returned response is a GitHub-shaped 401 (with `WWW-Authenticate`) or a
     /// 403 JSON body.
     fn authorize(&self, request: &HttpRequest, owner: &str, write: bool) -> Result<()> {
+        if request.auth_prechecked {
+            return Ok(());
+        }
         let registry = self.auth_registry()?;
         let credential = request
             .headers
@@ -372,6 +375,9 @@ pub struct HttpRequest {
     /// Set by the connection handler from the socket peer address; defaults to
     /// `false` for synthetic requests so authorization fails closed.
     pub is_loopback: bool,
+    /// Whether an embedding HTTP edge has already authenticated and authorized
+    /// this exact repository/action. Standalone gitd requests leave this false.
+    pub auth_prechecked: bool,
 }
 
 impl HttpRequest {
@@ -434,6 +440,7 @@ impl HttpRequest {
                 headers,
                 body: Vec::new(),
                 is_loopback: false,
+                auth_prechecked: false,
             },
             content_length,
             body_prefix,

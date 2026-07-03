@@ -55,6 +55,7 @@ fn post_receive_pack(owner: &str, authorization: Option<&str>, is_loopback: bool
         headers,
         body: Vec::new(),
         is_loopback,
+        auth_prechecked: false,
     }
 }
 
@@ -77,6 +78,7 @@ fn get_info_refs(
         headers,
         body: Vec::new(),
         is_loopback,
+        auth_prechecked: false,
     }
 }
 

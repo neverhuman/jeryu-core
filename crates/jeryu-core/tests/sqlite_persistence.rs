@@ -6,10 +6,186 @@ use jeryu_core::{
     CreateCommentRequest, CreateCommitStatusRequest, CreateIssueRequest, CreateLabelRequest,
     CreateOrganizationRequest, CreatePullRequestRequest, CreateRepositoryRequest,
     CreateReviewRequest, CreateTeamRequest, CreateUserRequest, CreateWebhookRequest, ForgeCore,
-    ForgeError, PullRequestCommit, ReviewCommentInput, ReviewState, SetBranchProtectionRequest,
-    WebhookConfig,
+    ForgeError, PullRequestCommit, RepoAccessLevel, ReviewCommentInput, ReviewState,
+    SetBranchProtectionRequest, UserRole, WebhookConfig,
 };
 use rusqlite::Connection;
+
+#[test]
+fn auth_accounts_sessions_tokens_and_grants_round_trip_sqlite() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("forge.sqlite");
+    let session_token;
+    let pat_secret;
+
+    {
+        let core = ForgeCore::open_sqlite(&db).unwrap();
+        core.create_repository(
+            "jeryu",
+            CreateRepositoryRequest {
+                name: "jeryu-core".to_string(),
+                private: true,
+                description: None,
+                default_branch: Some("main".to_string()),
+            },
+        )
+        .unwrap();
+        let account = core
+            .create_account("jordanh", "correct horse battery", UserRole::User)
+            .unwrap();
+        assert_eq!(account.login, "jordanh");
+        assert_eq!(account.role, UserRole::User);
+        assert!(!account.must_change_password);
+        assert!(
+            matches!(
+                core.authenticate_password("jordanh", "bad password"),
+                Err(ForgeError::Validation(_))
+            ),
+            "wrong passwords must not authenticate"
+        );
+        assert!(
+            core.authenticate_password("jordanh", "correct horse battery")
+                .is_ok()
+        );
+        let session = core.create_session("jordanh").unwrap();
+        assert!(
+            core.session_csrf_matches(&session.token, &session.session.csrf_token),
+            "session carries a per-session CSRF token"
+        );
+        session_token = session.token;
+        let pat = core
+            .create_personal_access_token("jordanh", "cli", None)
+            .unwrap();
+        assert!(pat.token.expires_at.is_some(), "PATs default to an expiry");
+        pat_secret = pat.secret;
+        core.grant_repo_access(
+            "jeryu-admin",
+            "jordanh",
+            "jeryu",
+            "jeryu-core",
+            RepoAccessLevel::Write,
+        )
+        .unwrap();
+    }
+
+    let reopened = ForgeCore::open_sqlite(&db).unwrap();
+    let session_account = reopened
+        .authenticate_session(&session_token)
+        .expect("session survives reopen");
+    assert_eq!(session_account.login, "jordanh");
+    let token_account = reopened
+        .authenticate_personal_access_token(&pat_secret)
+        .expect("PAT survives reopen");
+    assert_eq!(token_account.login, "jordanh");
+    assert!(reopened.user_can_read_repo("jordanh", "jeryu", "jeryu-core"));
+    assert!(reopened.user_can_write_repo("jordanh", "jeryu", "jeryu-core"));
+    assert!(!reopened.user_can_admin_repo("jordanh", "jeryu", "jeryu-core"));
+    let grants = reopened.list_repo_access("jeryu", "jeryu-core");
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].access, RepoAccessLevel::Write);
+    let tokens = reopened.list_personal_access_tokens("jordanh").unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].name, "cli");
+}
+
+#[test]
+fn new_user_has_no_repo_access_until_granted() {
+    let core = ForgeCore::new();
+    core.create_repository(
+        "jeryu",
+        CreateRepositoryRequest {
+            name: "jeryu-web".to_string(),
+            private: true,
+            description: None,
+            default_branch: Some("main".to_string()),
+        },
+    )
+    .unwrap();
+    core.create_account("jepsont", "correct horse battery", UserRole::User)
+        .unwrap();
+    assert!(!core.user_can_read_repo("jepsont", "jeryu", "jeryu-web"));
+    core.grant_repo_access(
+        "jeryu-admin",
+        "jepsont",
+        "jeryu",
+        "jeryu-web",
+        RepoAccessLevel::Read,
+    )
+    .unwrap();
+    assert!(core.user_can_read_repo("jepsont", "jeryu", "jeryu-web"));
+    assert!(!core.user_can_write_repo("jepsont", "jeryu", "jeryu-web"));
+}
+
+#[test]
+fn reset_password_forces_change_and_revokes_sessions_and_pats() {
+    let core = ForgeCore::new();
+    core.create_account("jordanh", "correct horse battery", UserRole::User)
+        .unwrap();
+    let session = core.create_session("jordanh").unwrap().token;
+    let pat = core
+        .create_personal_access_token("jordanh", "cli", None)
+        .unwrap()
+        .secret;
+    let reset = core
+        .reset_account_password("jordanh", "new temporary password")
+        .unwrap();
+    assert!(reset.must_change_password);
+    assert!(core.authenticate_session(&session).is_none());
+    assert!(core.authenticate_personal_access_token(&pat).is_none());
+
+    let logged_in = core
+        .authenticate_password("jordanh", "new temporary password")
+        .unwrap();
+    assert!(logged_in.must_change_password);
+    let changed = core
+        .change_account_password(
+            "jordanh",
+            "new temporary password",
+            "permanent password value",
+        )
+        .unwrap();
+    assert!(!changed.must_change_password);
+}
+
+#[test]
+fn checked_repo_grants_require_repo_admin_access() {
+    let core = ForgeCore::new();
+    core.create_repository(
+        "jeryu",
+        CreateRepositoryRequest {
+            name: "jeryu-core".to_string(),
+            private: true,
+            description: None,
+            default_branch: Some("main".to_string()),
+        },
+    )
+    .unwrap();
+    core.create_account("jeryu-admin", "correct horse battery", UserRole::Admin)
+        .unwrap();
+    core.create_account("jordanh", "correct horse battery", UserRole::User)
+        .unwrap();
+    core.create_account("jepsont", "correct horse battery", UserRole::User)
+        .unwrap();
+    assert!(matches!(
+        core.grant_repo_access_checked(
+            "jordanh",
+            "jepsont",
+            "jeryu",
+            "jeryu-core",
+            RepoAccessLevel::Read,
+        ),
+        Err(ForgeError::BranchProtection(_))
+    ));
+    core.grant_repo_access_checked(
+        "jeryu-admin",
+        "jepsont",
+        "jeryu",
+        "jeryu-core",
+        RepoAccessLevel::Read,
+    )
+    .unwrap();
+    assert!(core.user_can_read_repo("jepsont", "jeryu", "jeryu-core"));
+}
 
 #[test]
 fn sqlite_store_round_trips_core_forge_resources() {

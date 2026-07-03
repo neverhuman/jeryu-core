@@ -22,6 +22,7 @@ use crate::webhooks::{should_deliver, sign_webhook_payload};
 
 mod accounts;
 mod audit;
+mod auth;
 mod branch_protection;
 mod check_runs;
 mod commit_status;
@@ -50,6 +51,10 @@ struct Counters {
 #[derive(Debug, Clone, Default)]
 struct State {
     users: HashMap<String, User>,
+    accounts: HashMap<String, UserAccount>,
+    sessions: HashMap<String, WebSession>,
+    personal_tokens: HashMap<Uuid, PersonalAccessToken>,
+    repo_grants: HashMap<(String, String, String), RepoAccessGrant>,
     organizations: HashMap<String, Organization>,
     teams: HashMap<(String, String), Team>,
     repos: HashMap<(String, String), Repository>,

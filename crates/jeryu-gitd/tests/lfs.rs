@@ -190,6 +190,7 @@ fn lfs_locks_verify_route_returns_empty_lock_sets() {
         headers: HashMap::new(),
         body: b"{}".to_vec(),
         is_loopback: true,
+        auth_prechecked: false,
     });
 
     assert_eq!(response.status(), 200);

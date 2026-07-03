@@ -89,7 +89,7 @@ Constraint policy:
 Rollback/backfill:
 - Before applying 0004 to a populated store, take a `VACUUM INTO` copy and
   keep it as the rollback target.
-- Backfill the existing rows to the repository full name in the same migration
+- Backfill the existing rows to the repository full name in the same
   transaction; the open helper may repeat the empty-string backfill safely and
   should be able to reopen the same database without changing already
   backfilled rows.
@@ -98,3 +98,40 @@ Rollback/backfill:
   wait indefinitely on traffic.
 - If a rollback is needed after the field has been populated, restore the
   pre-migration database copy rather than deleting source provenance in place.
+
+## 0008 Public portal auth and repo grants
+
+The eighth migration adds durable web account credentials, hashed sessions,
+hashed personal access tokens, and per-repository grants.
+
+- `user_accounts.login` references the profile `users.login` row and stores
+  Argon2id PHC password hashes only.
+- `user_accounts.must_change_password` marks bootstrap and admin-reset
+  credentials as temporary until the user changes the password through the
+  typed forge API.
+- `web_sessions.token_hash` and `personal_access_tokens.token_hash` are
+  SHA-256 hashes of high-entropy bearer values; plaintext tokens are never
+  stored.
+- `web_sessions.csrf_token` is a per-session random value required by the HTTP
+  edge for unsafe cookie-authenticated requests; legacy rows from an older 0008
+  shape receive an empty value and cannot pass CSRF validation for unsafe
+  requests.
+- `repo_access_grants` keys access by `(login, repo_id)` and cascades with both
+  the account and repository.
+- Grant values are constrained to `read`, `write`, or `admin`; global
+  administrator users are represented by `user_accounts.role = 'admin'`.
+- The full-state rewrite threads every new table through `State`, `load_state`,
+  `persist_state`, and `delete_all` so account state survives unrelated forge
+  mutations.
+
+Rollback/backfill:
+- Before applying 0008 to a populated store, take a `VACUUM INTO` copy and keep
+  it as the rollback target.
+- Reopening an existing 0008 store adds `must_change_password` and `csrf_token`
+  with safe defaults when those columns are absent. No credential material is
+  generated for existing profile-only users.
+- Admin password reset revokes that user's sessions and personal access tokens
+  in the typed forge state before persistence.
+- Rollback drops the additive auth/grant tables only for pre-production use; in
+  a populated store, restore the pre-migration database copy instead of
+  deleting account rows in place.

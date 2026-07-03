@@ -5,6 +5,7 @@
 //! crate::model::*;`) resolves exactly as it did when this was a single
 //! `model.rs`.
 
+mod auth;
 mod checks;
 mod issues;
 mod jankurai;
@@ -13,6 +14,7 @@ mod pull_requests;
 mod repo;
 mod webhooks;
 
+pub use auth::*;
 pub use checks::*;
 pub use issues::*;
 pub use jankurai::*;

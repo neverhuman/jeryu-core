@@ -131,10 +131,14 @@ fn delete_all(conn: &Connection) -> Result<()> {
         DELETE FROM reviews;
         DELETE FROM pull_requests;
         DELETE FROM issues;
+        DELETE FROM repo_access_grants;
         DELETE FROM repo_counters;
         DELETE FROM repositories;
         DELETE FROM teams;
         DELETE FROM organizations;
+        DELETE FROM personal_access_tokens;
+        DELETE FROM web_sessions;
+        DELETE FROM user_accounts;
         DELETE FROM users;
         "#,
     )
@@ -147,6 +151,60 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         conn.execute(
             "INSERT INTO users (login, user_json) VALUES (?1, ?2)",
             params![user.login, json(user)?],
+        )
+        .map_err(storage_error)?;
+    }
+    for account in state.accounts.values() {
+        conn.execute(
+            r#"
+            INSERT INTO user_accounts (
+              login, password_hash, role, must_change_password, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                account.login,
+                account.password_hash,
+                text(&account.role)?,
+                bool_int(account.must_change_password),
+                time(account.created_at),
+                time(account.updated_at),
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+    for session in state.sessions.values() {
+        conn.execute(
+            r#"
+            INSERT INTO web_sessions (
+              id, login, token_hash, csrf_token, created_at, expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                session.id.to_string(),
+                session.login,
+                session.token_hash,
+                session.csrf_token,
+                time(session.created_at),
+                time(session.expires_at),
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+    for token in state.personal_tokens.values() {
+        conn.execute(
+            r#"
+            INSERT INTO personal_access_tokens (
+              id, login, name, token_hash, created_at, expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                token.id.to_string(),
+                token.login,
+                token.name,
+                token.token_hash,
+                time(token.created_at),
+                optional_time(token.expires_at),
+            ],
         )
         .map_err(storage_error)?;
     }
@@ -188,6 +246,25 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
                 time(repo.created_at),
                 time(repo.updated_at),
                 repo.family,
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+
+    for grant in state.repo_grants.values() {
+        let repo_id = repo_id(&repo_ids, &grant.owner, &grant.repo)?;
+        conn.execute(
+            r#"
+            INSERT INTO repo_access_grants (
+              login, repo_id, access, granted_by, granted_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                grant.login,
+                repo_id,
+                text(&grant.access)?,
+                grant.granted_by,
+                time(grant.granted_at),
             ],
         )
         .map_err(storage_error)?;
@@ -502,9 +579,13 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
 fn load_state(conn: &Connection) -> Result<State> {
     let mut state = State::default();
     load_users(conn, &mut state)?;
+    load_accounts(conn, &mut state)?;
+    load_sessions(conn, &mut state)?;
+    load_personal_tokens(conn, &mut state)?;
     load_organizations(conn, &mut state)?;
     load_teams(conn, &mut state)?;
     load_repositories(conn, &mut state)?;
+    load_repo_grants(conn, &mut state)?;
     load_labels(conn, &mut state)?;
     load_issues(conn, &mut state)?;
     load_issue_comments(conn, &mut state)?;
@@ -531,6 +612,69 @@ fn load_users(conn: &Connection, state: &mut State) -> Result<()> {
     while let Some(row) = rows.next().map_err(storage_error)? {
         let user: User = parse_json(row.get(0).map_err(storage_error)?)?;
         state.users.insert(user.login.clone(), user);
+    }
+    Ok(())
+}
+
+fn load_accounts(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT login, password_hash, role, must_change_password, created_at, updated_at FROM user_accounts",
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let account = UserAccount {
+            login: row.get(0).map_err(storage_error)?,
+            password_hash: row.get(1).map_err(storage_error)?,
+            role: from_text(row.get(2).map_err(storage_error)?)?,
+            must_change_password: int_bool(row.get(3).map_err(storage_error)?),
+            created_at: parse_time(row.get(4).map_err(storage_error)?)?,
+            updated_at: parse_time(row.get(5).map_err(storage_error)?)?,
+        };
+        state.accounts.insert(account.login.clone(), account);
+    }
+    Ok(())
+}
+
+fn load_sessions(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, login, token_hash, csrf_token, created_at, expires_at FROM web_sessions",
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let session = WebSession {
+            id: parse_uuid(row.get(0).map_err(storage_error)?)?,
+            login: row.get(1).map_err(storage_error)?,
+            token_hash: row.get(2).map_err(storage_error)?,
+            csrf_token: row.get(3).map_err(storage_error)?,
+            created_at: parse_time(row.get(4).map_err(storage_error)?)?,
+            expires_at: parse_time(row.get(5).map_err(storage_error)?)?,
+        };
+        state.sessions.insert(session.token_hash.clone(), session);
+    }
+    Ok(())
+}
+
+fn load_personal_tokens(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, login, name, token_hash, created_at, expires_at FROM personal_access_tokens",
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let token = PersonalAccessToken {
+            id: parse_uuid(row.get(0).map_err(storage_error)?)?,
+            login: row.get(1).map_err(storage_error)?,
+            name: row.get(2).map_err(storage_error)?,
+            token_hash: row.get(3).map_err(storage_error)?,
+            created_at: parse_time(row.get(4).map_err(storage_error)?)?,
+            expires_at: parse_optional_time(row.get(5).map_err(storage_error)?)?,
+        };
+        state.personal_tokens.insert(token.id, token);
     }
     Ok(())
 }
@@ -592,6 +736,34 @@ fn load_repositories(conn: &Connection, state: &mut State) -> Result<()> {
         state
             .repos
             .insert((repo.owner.clone(), repo.name.clone()), repo);
+    }
+    Ok(())
+}
+
+fn load_repo_grants(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT g.login, r.owner, r.name, g.access, g.granted_by, g.granted_at
+            FROM repo_access_grants g
+            JOIN repositories r ON r.id = g.repo_id
+            "#,
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let grant = RepoAccessGrant {
+            login: row.get(0).map_err(storage_error)?,
+            owner: row.get(1).map_err(storage_error)?,
+            repo: row.get(2).map_err(storage_error)?,
+            access: from_text(row.get(3).map_err(storage_error)?)?,
+            granted_by: row.get(4).map_err(storage_error)?,
+            granted_at: parse_time(row.get(5).map_err(storage_error)?)?,
+        };
+        state.repo_grants.insert(
+            (grant.login.clone(), grant.owner.clone(), grant.repo.clone()),
+            grant,
+        );
     }
     Ok(())
 }

@@ -31,6 +31,7 @@ WHERE family IS NULL AND name LIKE 'veox-%';
 const MIGRATION_0006: &str = include_str!("../../../../../db/migrations/0006_forge_audit_log.sql");
 
 const MIGRATION_0007: &str = include_str!("../../../../../db/migrations/0007_jankurai_scores.sql");
+const MIGRATION_0008: &str = include_str!("../../../../../db/migrations/0008_user_auth_access.sql");
 
 pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_0001).map_err(storage_error)?;
@@ -38,9 +39,10 @@ pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_0003).map_err(storage_error)?;
     apply_migration_0004(conn)?;
     apply_migration_0005(conn)?;
-    // 0006 and 0007 are pure CREATE TABLE/INDEX IF NOT EXISTS: idempotent, no guard.
+    // 0006-0007 are pure CREATE TABLE/INDEX IF NOT EXISTS: idempotent, no guard.
     conn.execute_batch(MIGRATION_0006).map_err(storage_error)?;
     conn.execute_batch(MIGRATION_0007).map_err(storage_error)?;
+    apply_migration_0008(conn)?;
     Ok(())
 }
 
@@ -67,6 +69,23 @@ fn apply_migration_0005(conn: &Connection) -> Result<()> {
     seed_repository_families(conn)?;
     conn.execute_batch(MIGRATION_0005_PREFIX_SEED)
         .map_err(storage_error)?;
+    Ok(())
+}
+
+fn apply_migration_0008(conn: &Connection) -> Result<()> {
+    conn.execute_batch(MIGRATION_0008).map_err(storage_error)?;
+    if !column_exists(conn, "user_accounts", "must_change_password")? {
+        conn.execute_batch(
+            "ALTER TABLE user_accounts ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(storage_error)?;
+    }
+    if !column_exists(conn, "web_sessions", "csrf_token")? {
+        conn.execute_batch(
+            "ALTER TABLE web_sessions ADD COLUMN csrf_token TEXT NOT NULL DEFAULT '';",
+        )
+        .map_err(storage_error)?;
+    }
     Ok(())
 }
 

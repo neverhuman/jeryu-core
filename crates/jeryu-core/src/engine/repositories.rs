@@ -30,6 +30,7 @@ pub struct RepositoryDeletion {
     pub webhook_deliveries: u32,
     pub counters: u32,
     pub jankurai_scores: u32,
+    pub repo_grants: u32,
 }
 
 impl RepositoryDeletion {
@@ -52,6 +53,7 @@ impl RepositoryDeletion {
             ("webhook_deliveries", self.webhook_deliveries),
             ("counters", self.counters),
             ("jankurai_scores", self.jankurai_scores),
+            ("repo_grants", self.repo_grants),
         ]
     }
 }
@@ -237,6 +239,16 @@ impl ForgeCore {
             .jankurai_scores
             .remove(&key)
             .map_or(0, |scores| scores.len() as u32);
+        let grant_keys: Vec<_> = state
+            .repo_grants
+            .keys()
+            .filter(|(_, grant_owner, grant_repo)| grant_owner == owner && grant_repo == repo)
+            .cloned()
+            .collect();
+        let repo_grants = grant_keys.len() as u32;
+        for grant_key in grant_keys {
+            state.repo_grants.remove(&grant_key);
+        }
 
         self.persist_after_mutation(&mut state, previous)?;
         Ok(RepositoryDeletion {
@@ -256,6 +268,7 @@ impl ForgeCore {
             webhook_deliveries,
             counters,
             jankurai_scores,
+            repo_grants,
         })
     }
 
