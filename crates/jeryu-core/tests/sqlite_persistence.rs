@@ -1,6 +1,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
+use chrono::Duration;
 use jeryu_core::{
     CheckConclusion, CheckRunStatus, CommitStatusState, CreateCheckRunRequest,
     CreateCommentRequest, CreateCommitStatusRequest, CreateIssueRequest, CreateLabelRequest,
@@ -86,6 +87,36 @@ fn auth_accounts_sessions_tokens_and_grants_round_trip_sqlite() {
     let tokens = reopened.list_personal_access_tokens("jordanh").unwrap();
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens[0].name, "cli");
+}
+
+#[test]
+fn session_ttls_use_defaults_custom_values_and_reject_invalid_values() {
+    let core = ForgeCore::new();
+    core.create_account("jordanh", "correct horse battery", UserRole::User)
+        .unwrap();
+
+    let default_session = core.create_session("jordanh").unwrap();
+    assert_eq!(
+        default_session.session.expires_at - default_session.session.created_at,
+        Duration::days(14)
+    );
+
+    let remembered_session = core
+        .create_session_with_ttl("jordanh", Duration::days(30))
+        .unwrap();
+    assert_eq!(
+        remembered_session.session.expires_at - remembered_session.session.created_at,
+        Duration::days(30)
+    );
+
+    assert!(matches!(
+        core.create_session_with_ttl("jordanh", Duration::zero()),
+        Err(ForgeError::Validation(_))
+    ));
+    assert!(matches!(
+        core.create_session_with_ttl("jordanh", Duration::seconds(-1)),
+        Err(ForgeError::Validation(_))
+    ));
 }
 
 #[test]

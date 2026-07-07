@@ -178,16 +178,33 @@ impl ForgeCore {
     }
 
     pub fn create_session(&self, login: &str) -> Result<SessionReceipt> {
+        self.create_session_with_ttl(login, chrono::Duration::seconds(SESSION_TTL_SECS))
+    }
+
+    pub fn create_session_with_ttl(
+        &self,
+        login: &str,
+        ttl: chrono::Duration,
+    ) -> Result<SessionReceipt> {
+        if ttl <= chrono::Duration::zero() {
+            return Err(ForgeError::Validation(
+                "session ttl must be positive".to_string(),
+            ));
+        }
         self.get_account(login)?;
         let token = random_secret()?;
         let csrf_token = random_secret()?;
+        let created_at = Utc::now();
+        let expires_at = created_at
+            .checked_add_signed(ttl)
+            .ok_or_else(|| ForgeError::Validation("session ttl is out of range".to_string()))?;
         let session = WebSession {
             id: Uuid::new_v4(),
             login: login.to_string(),
             token_hash: token_hash(&token),
             csrf_token,
-            created_at: Utc::now(),
-            expires_at: Utc::now() + chrono::Duration::seconds(SESSION_TTL_SECS),
+            created_at,
+            expires_at,
         };
         let mut state = self.state.write();
         let previous = state.clone();
