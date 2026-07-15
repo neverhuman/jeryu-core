@@ -103,6 +103,79 @@ fn installed_pre_receive_hook_blocks_direct_wire_push_to_main() {
 }
 
 #[test]
+fn installed_hook_keeps_tags_write_once_without_gitd_on_path() {
+    if !common::git_available() {
+        return;
+    }
+    let root = common::temp_dir("jeryu-prereceive-immutable-tag-root");
+    let work = common::temp_dir("jeryu-prereceive-immutable-tag-work");
+    let manager = RepoManager::new(GitdConfig::new(&root));
+    let repo = manager
+        .create_bare(&RepoId::new("acme", "demo").unwrap_or_else(|err| panic!("id failed: {err}")))
+        .unwrap_or_else(|err| panic!("create failed: {err}"));
+    manager
+        .install_pre_receive_hook(&repo)
+        .unwrap_or_else(|err| panic!("install hook failed: {err}"));
+
+    run_git_ok(&work, &["init"], "git init");
+    run_git_ok(
+        &work,
+        &["config", "user.email", "test@example.invalid"],
+        "git config email",
+    );
+    run_git_ok(&work, &["config", "user.name", "Test"], "git config name");
+    std::fs::write(work.join("README.md"), "first\n")
+        .unwrap_or_else(|err| panic!("write failed: {err}"));
+    run_git_ok(&work, &["add", "README.md"], "git add");
+    run_git_ok(&work, &["commit", "-m", "first"], "git commit");
+    let first = git_output(&work, &["rev-parse", "HEAD"]);
+    run_git_ok(&work, &["tag", "v1.0.0"], "git tag");
+
+    let repo_path = repo.path.to_string_lossy().to_string();
+    run_git_without_gitd_ok(
+        &work,
+        &[
+            "push",
+            &repo_path,
+            "HEAD:refs/heads/topic",
+            "refs/tags/v1.0.0:refs/tags/v1.0.0",
+        ],
+        "initial branch and tag push",
+    );
+
+    std::fs::write(work.join("README.md"), "second\n")
+        .unwrap_or_else(|err| panic!("write failed: {err}"));
+    run_git_ok(&work, &["add", "README.md"], "git add second");
+    run_git_ok(&work, &["commit", "-m", "second"], "git commit second");
+    run_git_ok(&work, &["tag", "-f", "v1.0.0"], "move local tag");
+
+    let update = git_without_gitd(&work, &["push", "--force", &repo_path, "refs/tags/v1.0.0"]);
+    assert!(!update.status.success(), "immutable tag update succeeded");
+    assert!(
+        String::from_utf8_lossy(&update.stderr)
+            .contains("immutable tags cannot be updated or deleted"),
+        "unexpected update stderr: {}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+
+    let delete = git_without_gitd(&work, &["push", &repo_path, ":refs/tags/v1.0.0"]);
+    assert!(!delete.status.success(), "immutable tag deletion succeeded");
+    assert!(
+        String::from_utf8_lossy(&delete.stderr)
+            .contains("immutable tags cannot be updated or deleted"),
+        "unexpected delete stderr: {}",
+        String::from_utf8_lossy(&delete.stderr)
+    );
+
+    assert_eq!(
+        git_output(&repo.path, &["rev-parse", "refs/tags/v1.0.0"]),
+        first
+    );
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(work);
+}
+
+#[test]
 fn pre_receive_rejects_invalid_ref_name_before_accepting_change() {
     if !common::git_available() {
         return;
@@ -128,6 +201,25 @@ fn run_git_ok(work: &Path, args: &[&str], label: &str) {
         .status()
         .unwrap_or_else(|err| panic!("{label} failed to start: {err}"));
     assert!(status.success(), "{label} failed with {status}");
+}
+
+fn git_without_gitd(work: &Path, args: &[&str]) -> std::process::Output {
+    Command::new("git")
+        .args(args)
+        .current_dir(work)
+        .env("PATH", "/usr/bin:/bin")
+        .env_remove("JERYU_GITD_BIN")
+        .output()
+        .unwrap_or_else(|err| panic!("git {args:?} failed to start: {err}"))
+}
+
+fn run_git_without_gitd_ok(work: &Path, args: &[&str], label: &str) {
+    let output = git_without_gitd(work, args);
+    assert!(
+        output.status.success(),
+        "{label} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

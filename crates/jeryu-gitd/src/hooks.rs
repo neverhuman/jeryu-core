@@ -25,6 +25,17 @@ if printf '%s\n' "$input" | awk '$3 == "refs/heads/main" { found = 1 } END { exi
   exit 1
 fi
 
+# Tags are write-once even when the optional jeryu-gitd helper is not on the
+# git-http-backend PATH. Creation has an all-zero old oid; every update or
+# deletion has a non-zero old oid and must fail closed.
+if printf '%s\n' "$input" | awk '
+  $3 ~ /^refs\/tags\// && $1 != "0000000000000000000000000000000000000000" { found = 1 }
+  END { exit found ? 0 : 1 }
+'; then
+  printf '%s\n' "jeryu-gitd: immutable tags cannot be updated or deleted" >&2
+  exit 1
+fi
+
 bin=${JERYU_GITD_BIN:-jeryu-gitd}
 if command -v "$bin" >/dev/null 2>&1; then
   repo_dir=$(pwd -P)
