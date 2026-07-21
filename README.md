@@ -2,9 +2,15 @@
 
 Forge/domain truth, git storage, read models, TUI, durable DB migrations.
 
+The `jeryu-core` crate exports object-safe `ForgeReadService` domain contracts
+for repository, pull-request, check, protection, and audit reads. Transport
+adapters consume those contracts without depending on the concrete `ForgeCore`
+store or introducing HTTP types into the domain crate.
+
 This repository was seeded from Jeryu source commit `cbecf7caa0e932c76a341b2521e66e911233860d` by
-`ops/split/materialize.py`. It is part of the seven-repo Jeryu split family and keeps source
-paths stable where practical so ownership remains auditable.
+`ops/split/materialize.py`. It is part of the independent Jeryu split family and keeps source paths
+stable where practical so ownership remains auditable; family membership is derived from the
+Jeryu authority manifest rather than a count embedded here.
 
 ## Owned Cargo Packages
 

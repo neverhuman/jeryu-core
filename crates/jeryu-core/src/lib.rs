@@ -14,6 +14,7 @@ mod model;
 mod overlap;
 pub mod phase7;
 mod receipt;
+mod services;
 mod webhooks;
 
 pub use crate::branch_protection::{
@@ -32,4 +33,8 @@ pub use crate::overlap::{
     jaccard, route,
 };
 pub use crate::receipt::{Receipt, ReceiptKind};
+pub use crate::services::{
+    AuditReadService, BranchProtectionReadService, CheckReadService, ForgeReadService,
+    PullRequestReadService, RepositoryReadService,
+};
 pub use crate::webhooks::{WebhookEventEnvelope, sign_webhook_payload};
