@@ -24,7 +24,7 @@ Forbidden:
 - Generated artifact edits outside `agent/generated-zones.toml`.
 
 Proof lane:
-- `cargo run -q -p jeryu-mapcheck -- docs`
+- `cargo run --locked --manifest-path ../jeryu-release-ops/Cargo.toml -q -p jeryu-mapcheck -- docs --base .`
 - `cargo test -p jeryu-api --features web --jobs 40 workcell_run_agent`
   when workcell run-agent route docs change.
 - `cargo test -p jeryu-api --features web --jobs 40 agent_runs`
