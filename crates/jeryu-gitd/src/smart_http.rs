@@ -1,9 +1,13 @@
 //! Minimal smart HTTP server for Phase 1 Git operations.
 
 use crate::auth::{AuthDecision, AuthRegistry, extract_bearer_or_basic};
+use crate::command::StreamingCommand;
 use crate::error::{GitdError, Result};
 use crate::lfs::{LfsStore, LfsVerifyRequest, normalize_oid};
-use crate::pack::{PackService, advertise_refs, ensure_receive_pack_policy, stateless_rpc};
+use crate::pack::{
+    PackService, advertise_refs_with_protocol, ensure_receive_pack_policy,
+    read_receive_pack_prefix, spawn_stateless_rpc, stateless_rpc_with_protocol,
+};
 use crate::pktline;
 use crate::repo::RepoManager;
 use std::collections::HashMap;
@@ -79,6 +83,32 @@ impl SmartHttpServer {
             .unwrap_or(false);
         let (mut request, content_length, body_prefix) = HttpRequest::read_head(&mut stream)?;
         request.is_loopback = is_loopback;
+        let pack_service = if request.method == "POST" && request.path.ends_with("/git-upload-pack")
+        {
+            Some(PackService::UploadPack)
+        } else if request.method == "POST" && request.path.ends_with("/git-receive-pack") {
+            Some(PackService::ReceivePack)
+        } else {
+            None
+        };
+        if let Some(service) = pack_service {
+            let Some(content_length) = content_length else {
+                return HttpResponse::text(411, "Git smart HTTP RPC requires Content-Length\n")
+                    .write(&mut stream);
+            };
+            let mut input_stream = stream.try_clone()?;
+            return match self.prepare_streaming_rpc(
+                &request,
+                service,
+                content_length,
+                body_prefix,
+                &mut input_stream,
+                &mut stream,
+            ) {
+                Ok(rpc) => rpc.stream(input_stream, &mut stream),
+                Err(err) => error_response(err).write(&mut stream),
+            };
+        }
         let response = if request.method == "PUT" && is_lfs_object_transfer_path(&request.path) {
             match content_length {
                 Some(content_length) => {
@@ -99,10 +129,52 @@ impl SmartHttpServer {
         response.write(&mut stream)
     }
 
-    /// Route an HTTP request and return a response.
+    fn prepare_streaming_rpc(
+        &self,
+        request: &HttpRequest,
+        service: PackService,
+        content_length: u64,
+        body_prefix: Vec<u8>,
+        input: &mut TcpStream,
+        output: &mut TcpStream,
+    ) -> Result<PreparedRpc> {
+        let suffix = format!("/{}", service.http_name());
+        let base = request.path.trim_end_matches(&suffix);
+        let (owner, repo_name) = parse_repo_from_path(base)?;
+        self.authorize(request, &owner, service.is_write())?;
+        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        write_continue_if_requested(request, output)?;
+        let body_prefix = if service == PackService::ReceivePack {
+            read_receive_pack_prefix(input, content_length, body_prefix)?
+        } else {
+            body_prefix
+        };
+        let prefix_len = u64::try_from(body_prefix.len())
+            .map_err(|_| GitdError::Protocol("request body prefix is too large".to_string()))?;
+        let remaining = content_length.checked_sub(prefix_len).ok_or_else(|| {
+            GitdError::Protocol("request body prefix exceeds Content-Length".to_string())
+        })?;
+        let process = spawn_stateless_rpc(
+            &self.manager.config().git_bin,
+            &repo,
+            service,
+            git_protocol_header(request)?,
+        )?;
+        Ok(PreparedRpc {
+            process,
+            body_prefix,
+            remaining,
+            content_length,
+            content_type: format!("application/x-{}-result", service.http_name()),
+        })
+    }
+
+    /// Route a fully materialized synthetic HTTP request and return a response.
     ///
     /// Authentication denials are rendered as GitHub-shaped responses: a 401
     /// carrying `WWW-Authenticate: Basic realm="jeryu"`, or a 403 JSON body.
+    /// The production socket path bypasses this compatibility seam for Git pack
+    /// POSTs and streams them with backpressure.
     pub fn route(&self, request: HttpRequest) -> HttpResponse {
         match self.route_inner(request) {
             Ok(response) => response,
@@ -157,10 +229,11 @@ impl SmartHttpServer {
         let repo = self.manager.open_parts(&owner, &repo_name)?;
         let mut body = pktline::encode_str(&format!("# service={}\n", service.http_name()));
         body.extend(pktline::flush());
-        body.extend(advertise_refs(
+        body.extend(advertise_refs_with_protocol(
             &self.manager.config().git_bin,
             &repo,
             service,
+            git_protocol_header(request)?,
         )?);
         Ok(HttpResponse::bytes(
             200,
@@ -178,11 +251,12 @@ impl SmartHttpServer {
         if service == PackService::ReceivePack {
             ensure_receive_pack_policy(&request.body)?;
         }
-        let body = stateless_rpc(
+        let body = stateless_rpc_with_protocol(
             &self.manager.config().git_bin,
             &repo,
             service,
             &request.body,
+            git_protocol_header(request)?,
         )?;
         Ok(HttpResponse::bytes(
             200,
@@ -284,6 +358,22 @@ impl SmartHttpServer {
     }
 }
 
+struct PreparedRpc {
+    process: StreamingCommand,
+    body_prefix: Vec<u8>,
+    remaining: u64,
+    content_length: u64,
+    content_type: String,
+}
+
+impl PreparedRpc {
+    fn stream(self, input: TcpStream, output: &mut TcpStream) -> Result<()> {
+        HttpResponse::write_streaming_head(output, &self.content_type)?;
+        let body = Cursor::new(self.body_prefix).chain(input.take(self.remaining));
+        self.process.pump(body, output, self.content_length)
+    }
+}
+
 fn parse_repo_from_path(path: &str) -> Result<(String, String)> {
     let path = path.trim_matches('/');
     let parts: Vec<&str> = path.split('/').collect();
@@ -355,6 +445,30 @@ fn absolute_url(request: &HttpRequest, path: &str) -> String {
         .map(String::as_str)
         .unwrap_or("http");
     format!("{scheme}://{host}{path}")
+}
+
+fn git_protocol_header(request: &HttpRequest) -> Result<Option<&str>> {
+    match request.headers.get("git-protocol").map(String::as_str) {
+        None => Ok(None),
+        Some("version=2") => Ok(Some("version=2")),
+        Some(_) => Err(GitdError::Protocol(
+            "unsupported Git-Protocol header".to_string(),
+        )),
+    }
+}
+
+fn write_continue_if_requested(request: &HttpRequest, output: &mut TcpStream) -> Result<()> {
+    let Some(expectation) = request.headers.get("expect") else {
+        return Ok(());
+    };
+    if !expectation.eq_ignore_ascii_case("100-continue") {
+        return Err(GitdError::Http(
+            "unsupported Expect header for Git RPC".to_string(),
+        ));
+    }
+    output.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+    output.flush()?;
+    Ok(())
 }
 
 /// Parsed minimal HTTP request.
@@ -610,6 +724,15 @@ impl HttpResponse {
         stream.write_all(&self.body)?;
         Ok(())
     }
+
+    fn write_streaming_head(stream: &mut TcpStream, content_type: &str) -> Result<()> {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+        )?;
+        stream.flush()?;
+        Ok(())
+    }
 }
 
 fn error_response(err: GitdError) -> HttpResponse {
@@ -667,13 +790,5 @@ fn json_string(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn smart_http_splits_query() {
-        let (path, query) = split_path_query("/acme/demo.git/info/refs?service=git-upload-pack");
-        assert_eq!(path, "/acme/demo.git/info/refs");
-        assert_eq!(query.get("service"), Some(&"git-upload-pack".to_string()));
-    }
-}
+#[path = "smart_http_tests.rs"]
+mod tests;

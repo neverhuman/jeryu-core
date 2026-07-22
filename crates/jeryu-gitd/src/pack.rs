@@ -1,10 +1,14 @@
 //! Pack protocol adapters.
 
-use crate::command::{run_capture, run_with_stdin};
+use crate::command::{
+    StreamingCommand, run_capture_with_env, run_with_stdin_with_env, spawn_streaming_with_env,
+};
 use crate::error::{GitdError, Result};
 use crate::repo::Repository;
+use std::io::Read;
 
 const MAIN_REF: &str = "refs/heads/main";
+const MAX_RECEIVE_PACK_PRELUDE_BYTES: usize = 1024 * 1024;
 
 /// Git pack service.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,12 +57,24 @@ impl PackService {
 
 /// Advertise refs for smart HTTP.
 pub fn advertise_refs(git_bin: &str, repo: &Repository, service: PackService) -> Result<Vec<u8>> {
+    advertise_refs_with_protocol(git_bin, repo, service, None)
+}
+
+/// Advertise refs using the optional validated smart-HTTP protocol version.
+pub(crate) fn advertise_refs_with_protocol(
+    git_bin: &str,
+    repo: &Repository,
+    service: PackService,
+    git_protocol: Option<&str>,
+) -> Result<Vec<u8>> {
     let path = repo.path.to_string_lossy().to_string();
     let command = service.git_subcommand();
-    let out = run_capture(
+    let env = git_protocol.map(|value| [("GIT_PROTOCOL", value)]);
+    let out = run_capture_with_env(
         git_bin,
         &[command, "--stateless-rpc", "--advertise-refs", &path],
         None,
+        env.as_ref().map_or(&[], |values| values.as_slice()),
     )?;
     Ok(out.stdout)
 }
@@ -70,10 +86,49 @@ pub fn stateless_rpc(
     service: PackService,
     body: &[u8],
 ) -> Result<Vec<u8>> {
+    stateless_rpc_with_protocol(git_bin, repo, service, body, None)
+}
+
+/// Execute a materialized stateless RPC using the optional validated protocol
+/// version. Production pack traffic uses [`spawn_stateless_rpc`] instead.
+pub(crate) fn stateless_rpc_with_protocol(
+    git_bin: &str,
+    repo: &Repository,
+    service: PackService,
+    body: &[u8],
+    git_protocol: Option<&str>,
+) -> Result<Vec<u8>> {
     let path = repo.path.to_string_lossy().to_string();
     let command = service.git_subcommand();
-    let out = run_with_stdin(git_bin, &[command, "--stateless-rpc", &path], body, None)?;
+    let env = git_protocol.map(|value| [("GIT_PROTOCOL", value)]);
+    let out = run_with_stdin_with_env(
+        git_bin,
+        &[command, "--stateless-rpc", &path],
+        body,
+        None,
+        env.as_ref().map_or(&[], |values| values.as_slice()),
+    )?;
     Ok(out.stdout)
+}
+
+/// Spawn a stateless Git RPC whose stdin/stdout will be pumped by the caller.
+///
+/// This is the production smart-HTTP path. Unlike [`stateless_rpc`], it does
+/// not accept or return an in-memory pack buffer.
+pub(crate) fn spawn_stateless_rpc(
+    git_bin: &str,
+    repo: &Repository,
+    service: PackService,
+    git_protocol: Option<&str>,
+) -> Result<StreamingCommand> {
+    let path = repo.path.to_string_lossy().to_string();
+    let env = git_protocol.map(|value| [("GIT_PROTOCOL", value)]);
+    spawn_streaming_with_env(
+        git_bin,
+        &[service.git_subcommand(), "--stateless-rpc", &path],
+        None,
+        env.as_ref().map_or(&[], |values| values.as_slice()),
+    )
 }
 
 /// A receive-pack ref update command from the request prelude.
@@ -170,6 +225,95 @@ pub fn ensure_receive_pack_policy(body: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Read only the bounded receive-pack command prelude needed for protected-ref
+/// policy. Any bytes already read beyond the flush packet are retained so the
+/// child receives the request byte-for-byte.
+pub(crate) fn read_receive_pack_prefix(
+    reader: &mut impl Read,
+    content_length: u64,
+    mut prefix: Vec<u8>,
+) -> Result<Vec<u8>> {
+    let prefix_len = u64::try_from(prefix.len())
+        .map_err(|_| GitdError::Protocol("receive-pack prefix is too large".to_string()))?;
+    if prefix_len > content_length {
+        return Err(GitdError::Protocol(
+            "receive-pack prefix exceeds Content-Length".to_string(),
+        ));
+    }
+
+    loop {
+        match receive_pack_prelude_state(&prefix)? {
+            PreludeState::Complete(prelude_len) => {
+                if prelude_len > MAX_RECEIVE_PACK_PRELUDE_BYTES {
+                    return Err(GitdError::Protocol(
+                        "receive-pack command prelude exceeds limit".to_string(),
+                    ));
+                }
+                ensure_receive_pack_policy(&prefix[..prelude_len])?;
+                return Ok(prefix);
+            }
+            PreludeState::Need(needed) => {
+                let next_len = prefix.len().checked_add(needed).ok_or_else(|| {
+                    GitdError::Protocol("receive-pack prelude length overflow".to_string())
+                })?;
+                if next_len > MAX_RECEIVE_PACK_PRELUDE_BYTES {
+                    return Err(GitdError::Protocol(
+                        "receive-pack command prelude exceeds limit".to_string(),
+                    ));
+                }
+                if u64::try_from(next_len).unwrap_or(u64::MAX) > content_length {
+                    return Err(GitdError::Protocol(
+                        "receive-pack command prelude is truncated".to_string(),
+                    ));
+                }
+                let current = prefix.len();
+                prefix.resize(next_len, 0);
+                reader.read_exact(&mut prefix[current..]).map_err(|err| {
+                    GitdError::Protocol(format!("receive-pack command prelude is truncated: {err}"))
+                })?;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreludeState {
+    Complete(usize),
+    Need(usize),
+}
+
+fn receive_pack_prelude_state(input: &[u8]) -> Result<PreludeState> {
+    let mut offset = 0usize;
+    loop {
+        let remaining = input.len().saturating_sub(offset);
+        if remaining < 4 {
+            return Ok(PreludeState::Need(4 - remaining));
+        }
+        let hdr = std::str::from_utf8(&input[offset..offset + 4])
+            .map_err(|_| GitdError::Protocol("pkt-line length is not utf8".to_string()))?;
+        let len = usize::from_str_radix(hdr, 16)
+            .map_err(|_| GitdError::Protocol(format!("invalid pkt-line length: {hdr}")))?;
+        match len {
+            0 => return Ok(PreludeState::Complete(offset + 4)),
+            1 | 2 => offset += 4,
+            3 => {
+                return Err(GitdError::Protocol(
+                    "reserved pkt-line length 0003".to_string(),
+                ));
+            }
+            n => {
+                if n < 4 {
+                    return Err(GitdError::Protocol("pkt-line underflow".to_string()));
+                }
+                if remaining < n {
+                    return Ok(PreludeState::Need(n - remaining));
+                }
+                offset += n;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +349,92 @@ mod tests {
         assert_eq!(commands[0].ref_name, "refs/heads/feature");
         assert_eq!(commands[1].ref_name, "refs/heads/topic");
         ensure_receive_pack_policy(&body).expect("non-main updates are allowed");
+    }
+
+    #[test]
+    fn receive_pack_prefix_reads_fragmented_prelude_without_pack_payload() {
+        let mut body = pktline::encode_str(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/feature\0 report-status\n",
+        );
+        body.extend(pktline::flush());
+        let prelude_len = body.len();
+        body.extend(b"PACK payload remains in the reader");
+        let mut reader = OneByteReader::new(&body);
+
+        let prefix = read_receive_pack_prefix(&mut reader, body.len() as u64, Vec::new())
+            .unwrap_or_else(|err| panic!("read prelude: {err}"));
+
+        assert_eq!(prefix, body[..prelude_len]);
+        assert_eq!(reader.remaining(), &body[prelude_len..]);
+    }
+
+    #[test]
+    fn receive_pack_prefix_denies_main_before_spawn() {
+        let mut body = pktline::encode_str(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/main\0 report-status\n",
+        );
+        body.extend(pktline::flush());
+        body.extend(b"PACK");
+        let mut reader = OneByteReader::new(&body);
+
+        let err = read_receive_pack_prefix(&mut reader, body.len() as u64, Vec::new())
+            .expect_err("main update must be denied");
+
+        assert!(err.to_string().contains("direct pushes to refs/heads/main"));
+    }
+
+    #[test]
+    fn receive_pack_prefix_rejects_unbounded_command_section() {
+        let packet = std::iter::repeat_n(b'x', 65_531).collect::<Vec<_>>();
+        let mut body = Vec::new();
+        for _ in 0..17 {
+            body.extend(b"ffff");
+            body.extend(&packet);
+        }
+        let mut reader = &body[..];
+
+        let err = read_receive_pack_prefix(&mut reader, body.len() as u64, Vec::new())
+            .expect_err("oversized prelude must be rejected");
+
+        assert!(err.to_string().contains("prelude exceeds limit"));
+    }
+
+    #[test]
+    fn receive_pack_prefix_rejects_truncated_command_section() {
+        let body = pktline::encode_str(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/feature\n",
+        );
+        let mut reader = &body[..];
+
+        let err = read_receive_pack_prefix(&mut reader, body.len() as u64, Vec::new())
+            .expect_err("missing flush packet must be rejected");
+
+        assert!(err.to_string().contains("prelude is truncated"));
+    }
+
+    struct OneByteReader<'a> {
+        input: &'a [u8],
+        offset: usize,
+    }
+
+    impl<'a> OneByteReader<'a> {
+        fn new(input: &'a [u8]) -> Self {
+            Self { input, offset: 0 }
+        }
+
+        fn remaining(&self) -> &'a [u8] {
+            &self.input[self.offset..]
+        }
+    }
+
+    impl Read for OneByteReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.offset == self.input.len() || buffer.is_empty() {
+                return Ok(0);
+            }
+            buffer[0] = self.input[self.offset];
+            self.offset += 1;
+            Ok(1)
+        }
     }
 }
