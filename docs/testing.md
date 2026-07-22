@@ -153,7 +153,7 @@ CI parity checks:
   Additional source-root retired-CI sweeps run only when
   `JERYU_CI_SOURCE_ROOTS` is set.
 - `ops/ci/ensure-jankurai.sh` is the single local/hosted bootstrap for pinned
-  Jankurai 1.6.10.
+  Jankurai 1.6.11.
 - `agent/ci-lanes.toml` is the committed CI lane manifest. `cargo run -q -p
   jeryu-repogate -- ci-lanes-check` fails if a workflow adds hosted-only `run:`
   commands or stops calling the manifest-declared local lane.
