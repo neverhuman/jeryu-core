@@ -3,7 +3,7 @@
 use crate::error::{GitdError, Result};
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 
 const MAX_STREAM_STDERR_BYTES: usize = 64 * 1024;
 
@@ -33,13 +33,15 @@ impl StreamingCommand {
     /// concurrently copying child stdout into `output`.
     ///
     /// Concurrent pumping prevents the child and client from deadlocking when
-    /// both sides apply backpressure. Stderr is fully drained but only a
+    /// both sides apply backpressure. `cancel_input` must interrupt an input
+    /// read if the output peer disconnects. Stderr is fully drained but only a
     /// bounded prefix is retained for a failure diagnostic.
-    pub(crate) fn pump<R: Read + Send, W: Write>(
+    pub(crate) fn pump<R: Read + Send, W: Write, C: FnOnce() -> io::Result<()>>(
         mut self,
         mut input: R,
         mut output: W,
         expected_stdin_bytes: u64,
+        cancel_input: C,
     ) -> Result<()> {
         let mut stdin = self
             .stdin
@@ -58,20 +60,35 @@ impl StreamingCommand {
             let stdin_thread = scope.spawn(move || io::copy(&mut input, &mut stdin));
             let stderr_thread = scope.spawn(move || read_bounded_stderr(stderr));
             let stdout_result = io::copy(&mut stdout, &mut output);
+            drop(stdout);
+            let terminated_status = if stdout_result.is_err() {
+                let _ = cancel_input();
+                Some(terminate_and_wait(&mut self.child))
+            } else {
+                None
+            };
             let stdin_result = stdin_thread
                 .join()
                 .map_err(|_| io::Error::other("streaming stdin pump panicked"))?;
             let stderr_result = stderr_thread
                 .join()
                 .map_err(|_| io::Error::other("streaming stderr pump panicked"))?;
-            Ok::<_, io::Error>((stdin_result, stdout_result, stderr_result))
+            Ok::<_, io::Error>((
+                stdin_result,
+                stdout_result,
+                stderr_result,
+                terminated_status,
+            ))
         });
 
-        let status = self.child.wait()?;
+        let (stdin_result, stdout_result, stderr_result, terminated_status) = pump_result?;
+        let status = match terminated_status {
+            Some(status) => status?,
+            None => self.child.wait()?,
+        };
         self.finished = true;
-        let (stdin_result, stdout_result, stderr_result) = pump_result?;
-        let stdin_bytes = stdin_result?;
         stdout_result?;
+        let stdin_bytes = stdin_result?;
         let stderr = stderr_result?;
         if stdin_bytes != expected_stdin_bytes {
             return Err(GitdError::Protocol(format!(
@@ -87,6 +104,19 @@ impl StreamingCommand {
         }
         Ok(())
     }
+}
+
+fn terminate_and_wait(child: &mut Child) -> io::Result<ExitStatus> {
+    if let Some(status) = child.try_wait()? {
+        return Ok(status);
+    }
+    if let Err(kill_error) = child.kill() {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        return Err(kill_error);
+    }
+    child.wait()
 }
 
 impl Drop for StreamingCommand {
@@ -266,6 +296,28 @@ mod tests {
         max_chunk: usize,
     }
 
+    struct DisconnectingWriter {
+        remaining: usize,
+    }
+
+    impl Write for DisconnectingWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "client disconnected",
+                ));
+            }
+            let count = buffer.len().min(self.remaining);
+            self.remaining -= count;
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     impl Write for FragmentedWriter {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
             let count = buffer.len().min(self.max_chunk);
@@ -291,7 +343,7 @@ mod tests {
         let mut output = Vec::new();
 
         process
-            .pump(input, &mut output, input_bytes as u64)
+            .pump(input, &mut output, input_bytes as u64, || Ok(()))
             .unwrap_or_else(|err| panic!("stream git hash-object: {err}"));
 
         assert_eq!(output.len(), 41);
@@ -305,7 +357,7 @@ mod tests {
         let mut output = Vec::new();
 
         let err = process
-            .pump(&b"short"[..], &mut output, 99)
+            .pump(&b"short"[..], &mut output, 99, || Ok(()))
             .expect_err("short input must be rejected");
 
         assert!(err.to_string().contains("request body truncated"));
@@ -327,9 +379,59 @@ mod tests {
         };
 
         process
-            .pump(input, &mut output, input_bytes as u64)
+            .pump(input, &mut output, input_bytes as u64, || Ok(()))
             .unwrap_or_else(|err| panic!("stream cat: {err}"));
 
         assert_eq!(output.bytes, input_bytes as u64);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn streaming_command_cancels_and_reaps_after_client_disconnect() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const BYTES_BEFORE_DISCONNECT: usize = 2 * 1024 * 1024;
+        let process = spawn_streaming_with_env("yes", &[], None, &[])
+            .unwrap_or_else(|err| panic!("spawn unbounded output producer: {err}"));
+        let child_pid = process.child.id();
+        let input_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|err| panic!("bind blocking input fixture: {err}"));
+        let input_client = std::net::TcpStream::connect(
+            input_listener
+                .local_addr()
+                .unwrap_or_else(|err| panic!("resolve input fixture address: {err}")),
+        )
+        .unwrap_or_else(|err| panic!("connect blocking input fixture: {err}"));
+        let (input, _) = input_listener
+            .accept()
+            .unwrap_or_else(|err| panic!("accept blocking input fixture: {err}"));
+        let cancel_input = input
+            .try_clone()
+            .unwrap_or_else(|err| panic!("clone input cancellation handle: {err}"));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let pump_thread = std::thread::spawn(move || {
+            let result = process.pump(
+                input,
+                DisconnectingWriter {
+                    remaining: BYTES_BEFORE_DISCONNECT,
+                },
+                u64::MAX,
+                || cancel_input.shutdown(std::net::Shutdown::Read),
+            );
+            sender.send(result).expect("disconnect result receiver");
+        });
+
+        let result = receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("client disconnect must cancel the child promptly");
+        let err = result.expect_err("client disconnect must fail the stream");
+        assert!(err.to_string().contains("client disconnected"));
+        pump_thread.join().expect("streaming pump thread must exit");
+        drop(input_client);
+        assert!(
+            !Path::new(&format!("/proc/{child_pid}")).exists(),
+            "streaming child {child_pid} was not reaped"
+        );
     }
 }

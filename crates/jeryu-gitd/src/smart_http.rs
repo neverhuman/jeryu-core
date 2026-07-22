@@ -12,7 +12,7 @@ use crate::pktline;
 use crate::repo::RepoManager;
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 
 /// Realm advertised in `WWW-Authenticate` challenges.
 const AUTH_REALM: &str = "jeryu";
@@ -385,9 +385,12 @@ struct PreparedRpc {
 
 impl PreparedRpc {
     fn stream(self, input: TcpStream, output: &mut TcpStream) -> Result<()> {
+        let cancel_input = input.try_clone()?;
         HttpResponse::write_streaming_head(output, &self.content_type)?;
         let body = Cursor::new(self.body_prefix).chain(input.take(self.remaining));
-        self.process.pump(body, output, self.content_length)
+        self.process.pump(body, output, self.content_length, || {
+            cancel_input.shutdown(Shutdown::Read)
+        })
     }
 }
 
