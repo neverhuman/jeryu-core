@@ -61,8 +61,12 @@ impl StreamingCommand {
             let stderr_thread = scope.spawn(move || read_bounded_stderr(stderr));
             let stdout_result = io::copy(&mut stdout, &mut output);
             drop(stdout);
+            // Once the child closes its output there can be no further
+            // response progress. Interrupt a request reader that is still
+            // waiting for declared body bytes so the scoped stdin pump can
+            // finish and drop the child's stdin before we reap the child.
+            let _ = cancel_input();
             let terminated_status = if stdout_result.is_err() {
-                let _ = cancel_input();
                 Some(terminate_and_wait(&mut self.child))
             } else {
                 None
@@ -88,7 +92,11 @@ impl StreamingCommand {
         };
         self.finished = true;
         stdout_result?;
-        let stdin_bytes = stdin_result?;
+        let stdin_bytes = stdin_result.map_err(|err| {
+            GitdError::Protocol(format!(
+                "request body truncated: expected {expected_stdin_bytes} bytes; input ended with {err}"
+            ))
+        })?;
         let stderr = stderr_result?;
         if stdin_bytes != expected_stdin_bytes {
             return Err(GitdError::Protocol(format!(
@@ -432,6 +440,50 @@ mod tests {
         assert!(
             !Path::new(&format!("/proc/{child_pid}")).exists(),
             "streaming child {child_pid} was not reaped"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn streaming_command_cancels_open_input_after_early_child_exit() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let process = spawn_streaming_with_env("true", &[], None, &[])
+            .unwrap_or_else(|err| panic!("spawn early-exit child: {err}"));
+        let child_pid = process.child.id();
+        let input_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap_or_else(|err| panic!("bind blocking input fixture: {err}"));
+        let input_client = std::net::TcpStream::connect(
+            input_listener
+                .local_addr()
+                .unwrap_or_else(|err| panic!("resolve input fixture address: {err}")),
+        )
+        .unwrap_or_else(|err| panic!("connect blocking input fixture: {err}"));
+        let (input, _) = input_listener
+            .accept()
+            .unwrap_or_else(|err| panic!("accept blocking input fixture: {err}"));
+        let cancel_input = input
+            .try_clone()
+            .unwrap_or_else(|err| panic!("clone input cancellation handle: {err}"));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let pump_thread = std::thread::spawn(move || {
+            let result = process.pump(input, io::sink(), 1, || {
+                cancel_input.shutdown(std::net::Shutdown::Read)
+            });
+            sender.send(result).expect("early-exit result receiver");
+        });
+
+        let result = receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("early child exit must cancel open request input promptly");
+        let err = result.expect_err("unconsumed declared input must fail the stream");
+        assert!(err.to_string().contains("request body truncated"));
+        pump_thread.join().expect("streaming pump thread must exit");
+        drop(input_client);
+        assert!(
+            !Path::new(&format!("/proc/{child_pid}")).exists(),
+            "early-exit child {child_pid} was not reaped"
         );
     }
 }
