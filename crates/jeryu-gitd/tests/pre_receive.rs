@@ -79,15 +79,16 @@ fn installed_pre_receive_hook_blocks_direct_wire_push_to_main() {
     run_git_ok(&work, &["add", "README.md"], "git add");
     run_git_ok(&work, &["commit", "-m", "seed"], "git commit");
 
-    let output = Command::new("git")
-        .args([
+    let output = git_with_installed_hook(
+        &work,
+        &repo.path,
+        &[
             "push",
             repo.path.to_str().unwrap_or_default(),
             "HEAD:refs/heads/main",
-        ])
-        .current_dir(&work)
-        .output()
-        .unwrap_or_else(|err| panic!("git push failed to start: {err}"));
+        ],
+        false,
+    );
 
     assert!(
         !output.status.success(),
@@ -132,8 +133,9 @@ fn installed_hook_keeps_tags_write_once_without_gitd_on_path() {
     run_git_ok(&work, &["tag", "v1.0.0"], "git tag");
 
     let repo_path = repo.path.to_string_lossy().to_string();
-    run_git_without_gitd_ok(
+    run_git_with_installed_hook_ok(
         &work,
+        &repo.path,
         &[
             "push",
             &repo_path,
@@ -149,7 +151,12 @@ fn installed_hook_keeps_tags_write_once_without_gitd_on_path() {
     run_git_ok(&work, &["commit", "-m", "second"], "git commit second");
     run_git_ok(&work, &["tag", "-f", "v1.0.0"], "move local tag");
 
-    let update = git_without_gitd(&work, &["push", "--force", &repo_path, "refs/tags/v1.0.0"]);
+    let update = git_with_installed_hook(
+        &work,
+        &repo.path,
+        &["push", "--force", &repo_path, "refs/tags/v1.0.0"],
+        true,
+    );
     assert!(!update.status.success(), "immutable tag update succeeded");
     assert!(
         String::from_utf8_lossy(&update.stderr)
@@ -158,7 +165,12 @@ fn installed_hook_keeps_tags_write_once_without_gitd_on_path() {
         String::from_utf8_lossy(&update.stderr)
     );
 
-    let delete = git_without_gitd(&work, &["push", &repo_path, ":refs/tags/v1.0.0"]);
+    let delete = git_with_installed_hook(
+        &work,
+        &repo.path,
+        &["push", &repo_path, ":refs/tags/v1.0.0"],
+        true,
+    );
     assert!(!delete.status.success(), "immutable tag deletion succeeded");
     assert!(
         String::from_utf8_lossy(&delete.stderr)
@@ -203,18 +215,38 @@ fn run_git_ok(work: &Path, args: &[&str], label: &str) {
     assert!(status.success(), "{label} failed with {status}");
 }
 
-fn git_without_gitd(work: &Path, args: &[&str]) -> std::process::Output {
-    Command::new("git")
+fn git_with_installed_hook(
+    work: &Path,
+    repo: &Path,
+    args: &[&str],
+    without_gitd: bool,
+) -> std::process::Output {
+    let hooks = repo.join("hooks");
+    let mut command = Command::new("git");
+    // Release workers suppress checkout hooks with command-scoped Git config.
+    // Reproduce that hostile setting, then bind only this fixture's installed hook.
+    command
         .args(args)
         .current_dir(work)
-        .env("PATH", "/usr/bin:/bin")
-        .env_remove("JERYU_GITD_BIN")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_COUNT", "2")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", "/dev/null")
+        .env("GIT_CONFIG_KEY_1", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_1", hooks);
+    if without_gitd {
+        command
+            .env("PATH", "/usr/bin:/bin")
+            .env_remove("JERYU_GITD_BIN");
+    }
+    command
         .output()
         .unwrap_or_else(|err| panic!("git {args:?} failed to start: {err}"))
 }
 
-fn run_git_without_gitd_ok(work: &Path, args: &[&str], label: &str) {
-    let output = git_without_gitd(work, args);
+fn run_git_with_installed_hook_ok(work: &Path, repo: &Path, args: &[&str], label: &str) {
+    let output = git_with_installed_hook(work, repo, args, true);
     assert!(
         output.status.success(),
         "{label} failed: {}",
