@@ -15,9 +15,13 @@ The production `jeryu-gitd` TCP edge streams smart-HTTP upload-pack and
 receive-pack bodies concurrently between the authenticated client socket and
 stock Git child pipes. Request and response packs are never accumulated in a
 `Vec`; socket and pipe backpressure bound memory, while receive-pack buffers
-only a capped command prelude for protected-ref policy. The public
+only a capped command prelude for protected-ref policy. The same production edge
+streams authenticated Git LFS object downloads directly from an opened regular
+object file to the client socket with an exact `Content-Length`; it never
+materializes the object in a response `Vec`. The public
 `SmartHttpServer::route(HttpRequest)` API remains a fully materialized synthetic
-compatibility seam for unit adapters and is not the production pack transport.
+compatibility seam for unit adapters and is neither the production pack nor
+large-object transport.
 
 The shared workcell control plane is part of the runner/CI stack, not a separate subsystem. `jeryu-runnerd` owns warm-pool claims, epoch-fenced release/heartbeat handling, startup rebase enforcement, and quarantine-first tar validation on top of the existing runner fabric.
 

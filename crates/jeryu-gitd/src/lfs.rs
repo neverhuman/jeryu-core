@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -155,6 +155,43 @@ impl LfsStore {
         }
     }
 
+    /// Open a stored object and bind the exact byte length used for an HTTP
+    /// `Content-Length` response without reading the object into memory.
+    pub(crate) fn open_reader(&self, oid: &str) -> Result<Option<(fs::File, u64)>> {
+        let path = self.object_path(oid)?;
+        let link_metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(GitdError::Io(err)),
+        };
+        if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+            return Err(GitdError::Lfs(format!(
+                "LFS object path is not a regular file: {}",
+                path.display()
+            )));
+        }
+        let file = fs::File::open(path)?;
+        let opened_metadata = file.metadata()?;
+        if !opened_metadata.is_file() {
+            return Err(GitdError::Lfs(
+                "opened LFS object is not a regular file".to_string(),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if link_metadata.dev() != opened_metadata.dev()
+                || link_metadata.ino() != opened_metadata.ino()
+            {
+                return Err(GitdError::Lfs(
+                    "LFS object path changed while opening".to_string(),
+                ));
+            }
+        }
+        let size = opened_metadata.len();
+        Ok(Some((file, size)))
+    }
+
     /// Confirm that an object exists and has the expected size.
     pub fn verify(&self, oid: &str, expected_size: u64) -> Result<()> {
         let oid = normalize_oid(oid)?;
@@ -171,8 +208,16 @@ impl LfsStore {
 
     /// Write object to a writer.
     pub fn write_to(&self, oid: &str, mut writer: impl Write) -> Result<()> {
-        let bytes = self.get(oid)?;
-        writer.write_all(&bytes)?;
+        let Some((mut file, size)) = self.open_reader(oid)? else {
+            return Err(GitdError::Lfs(format!("LFS object not found: {oid}")));
+        };
+        let mut limited = Read::take(&mut file, size);
+        let copied = io::copy(&mut limited, &mut writer)?;
+        if copied != size {
+            return Err(GitdError::Lfs(format!(
+                "LFS object changed while streaming: expected {size} bytes, copied {copied}"
+            )));
+        }
         Ok(())
     }
 
@@ -487,5 +532,80 @@ mod tests {
             data
         );
         let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn lfs_write_to_streams_through_fragmented_writer() {
+        let base = std::env::temp_dir().join(format!(
+            "jeryu-lfs-stream-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let store = LfsStore::new(&base);
+        let data = vec![b'x'; 2 * 1024 * 1024];
+        let oid = sha256_hex(&data);
+        store
+            .put_bytes(&oid, &data)
+            .unwrap_or_else(|err| panic!("put failed: {err}"));
+        let mut writer = FragmentedWriter {
+            bytes: 0,
+            max_chunk: 127,
+        };
+
+        store
+            .write_to(&oid, &mut writer)
+            .unwrap_or_else(|err| panic!("stream failed: {err}"));
+
+        assert_eq!(writer.bytes, data.len() as u64);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lfs_open_reader_rejects_symlink_object() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!(
+            "jeryu-lfs-symlink-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let store = LfsStore::new(&base);
+        let data = b"not an object link target";
+        let oid = sha256_hex(data);
+        let object_path = store.object_path(&oid).expect("object path");
+        fs::create_dir_all(object_path.parent().expect("object parent"))
+            .expect("create object parent");
+        let target = base.join("target");
+        fs::write(&target, data).expect("write link target");
+        symlink(&target, &object_path).expect("create object symlink");
+
+        let err = store
+            .open_reader(&oid)
+            .expect_err("symlink object must be rejected");
+
+        assert!(err.to_string().contains("not a regular file"));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    struct FragmentedWriter {
+        bytes: u64,
+        max_chunk: usize,
+    }
+
+    impl Write for FragmentedWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            let count = buffer.len().min(self.max_chunk);
+            self.bytes += count as u64;
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 }

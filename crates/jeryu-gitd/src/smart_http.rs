@@ -11,7 +11,7 @@ use crate::pack::{
 use crate::pktline;
 use crate::repo::RepoManager;
 use std::collections::HashMap;
-use std::io::{Cursor, Read, Write};
+use std::io::{self, Cursor, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 /// Realm advertised in `WWW-Authenticate` challenges.
@@ -109,6 +109,13 @@ impl SmartHttpServer {
                 Err(err) => error_response(err).write(&mut stream),
             };
         }
+        if request.method == "GET" && is_lfs_object_transfer_path(&request.path) {
+            return match self.prepare_lfs_download(&request) {
+                Ok(Some(download)) => download.stream(&mut stream),
+                Ok(None) => lfs_error_response(404, "object not found").write(&mut stream),
+                Err(err) => error_response(err).write(&mut stream),
+            };
+        }
         let response = if request.method == "PUT" && is_lfs_object_transfer_path(&request.path) {
             match content_length {
                 Some(content_length) => {
@@ -167,6 +174,16 @@ impl SmartHttpServer {
             content_length,
             content_type: format!("application/x-{}-result", service.http_name()),
         })
+    }
+
+    fn prepare_lfs_download(&self, request: &HttpRequest) -> Result<Option<PreparedLfsDownload>> {
+        let (owner, repo_name, oid) = lfs_object_path_parts(&request.path)?;
+        self.authorize(request, &owner, false)?;
+        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        let Some((file, size)) = LfsStore::for_repo(&repo.path).open_reader(&oid)? else {
+            return Ok(None);
+        };
+        Ok(Some(PreparedLfsDownload { file, size }))
     }
 
     /// Route a fully materialized synthetic HTTP request and return a response.
@@ -371,6 +388,26 @@ impl PreparedRpc {
         HttpResponse::write_streaming_head(output, &self.content_type)?;
         let body = Cursor::new(self.body_prefix).chain(input.take(self.remaining));
         self.process.pump(body, output, self.content_length)
+    }
+}
+
+struct PreparedLfsDownload {
+    file: std::fs::File,
+    size: u64,
+}
+
+impl PreparedLfsDownload {
+    fn stream(mut self, output: &mut TcpStream) -> Result<()> {
+        HttpResponse::write_sized_streaming_head(output, "application/octet-stream", self.size)?;
+        let mut limited = Read::take(&mut self.file, self.size);
+        let copied = io::copy(&mut limited, output)?;
+        if copied != self.size {
+            return Err(GitdError::Lfs(format!(
+                "LFS object changed while streaming: expected {} bytes, copied {copied}",
+                self.size
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -733,6 +770,19 @@ impl HttpResponse {
         stream.flush()?;
         Ok(())
     }
+
+    fn write_sized_streaming_head(
+        stream: &mut TcpStream,
+        content_type: &str,
+        content_length: u64,
+    ) -> Result<()> {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {content_length}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+        )?;
+        stream.flush()?;
+        Ok(())
+    }
 }
 
 fn error_response(err: GitdError) -> HttpResponse {
@@ -792,3 +842,7 @@ fn json_string(value: &str) -> String {
 #[cfg(test)]
 #[path = "smart_http_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "lfs_stream_tests.rs"]
+mod lfs_stream_tests;
