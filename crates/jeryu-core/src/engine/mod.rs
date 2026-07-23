@@ -31,6 +31,8 @@ mod jankurai;
 mod pull_requests;
 mod readmes;
 mod repositories;
+mod repository_transfer;
+mod repository_transfer_state;
 mod reviews;
 mod storage;
 mod webhooks;
@@ -73,6 +75,8 @@ struct State {
     webhook_deliveries: Vec<WebhookDelivery>,
     counters: HashMap<(String, String), Counters>,
     jankurai_scores: HashMap<(String, String), Vec<JankuraiScore>>,
+    repository_aliases: HashMap<(String, String), RepositoryAlias>,
+    repository_transfers: HashMap<String, RepositoryTransferJournal>,
 }
 
 fn default_branch_protection_rule(owner: &str, repo: &str, branch: &str) -> BranchProtectionRule {

@@ -35,7 +35,8 @@ pub use repository::{
     CreateRepositoryPreview, CreateRepositoryRequest, DeleteRepositoryReceipt,
     DeleteRepositoryRequest, DeletedCount, JankuraiScoreListResponse, JankuraiScoreSummary,
     RepositoryFacets, RepositoryHostKind, RepositoryId, RepositoryListResponse,
-    RepositoryMirrorStatus, RepositoryRole, RepositorySummary, RepositoryVisibility,
+    RepositoryMirrorStatus, RepositoryRole, RepositorySummary, RepositoryTransferAlias,
+    RepositoryTransferReceipt, RepositoryTransferRequest, RepositoryVisibility,
 };
 pub use review::{
     CreateReviewCommentRequest, ReviewComment, ReviewEvidence, ReviewSuggestion, ReviewThread,
@@ -146,6 +147,9 @@ contract_exports!(
     RepositoryRole,
     RepositorySettings,
     RepositorySummary,
+    RepositoryTransferAlias,
+    RepositoryTransferReceipt,
+    RepositoryTransferRequest,
     RepositoryVisibility,
     RetentionSettings,
     ReviewComment,

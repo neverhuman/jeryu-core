@@ -119,6 +119,8 @@ fn delete_all(conn: &Connection) -> Result<()> {
         DELETE FROM review_comments;
         DELETE FROM issue_comments;
         DELETE FROM commit_statuses;
+        DELETE FROM repository_aliases;
+        DELETE FROM repository_transfer_journal;
         DELETE FROM codeowners;
         DELETE FROM repository_readmes;
         DELETE FROM labels;
@@ -246,6 +248,54 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
                 time(repo.created_at),
                 time(repo.updated_at),
                 repo.family,
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+
+    for journal in state.repository_transfers.values() {
+        conn.execute(
+            r#"
+            INSERT INTO repository_transfer_journal (
+              transaction_id, idempotency_key, request_fingerprint, repository_id,
+              source_owner, source_name, destination_owner, destination_name,
+              status, prepared_at, completed_at, failure, receipt_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "#,
+            params![
+                journal.transaction_id.to_string(),
+                journal.idempotency_key,
+                journal.request_fingerprint,
+                journal.repository_id.to_string(),
+                journal.source_owner,
+                journal.source_name,
+                journal.destination_owner,
+                journal.destination_name,
+                text(&journal.status)?,
+                time(journal.prepared_at),
+                optional_time(journal.completed_at),
+                journal.failure,
+                optional_json(&journal.receipt)?,
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+    for alias in state.repository_aliases.values() {
+        conn.execute(
+            r#"
+            INSERT INTO repository_aliases (
+              old_owner, old_name, repository_id, canonical_owner, canonical_name,
+              created_at, transaction_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                alias.owner,
+                alias.name,
+                alias.repository_id.to_string(),
+                alias.canonical_owner,
+                alias.canonical_name,
+                time(alias.created_at),
+                alias.transaction_id.to_string(),
             ],
         )
         .map_err(storage_error)?;
@@ -585,6 +635,8 @@ fn load_state(conn: &Connection) -> Result<State> {
     load_organizations(conn, &mut state)?;
     load_teams(conn, &mut state)?;
     load_repositories(conn, &mut state)?;
+    load_repository_transfers(conn, &mut state)?;
+    load_repository_aliases(conn, &mut state)?;
     load_repo_grants(conn, &mut state)?;
     load_labels(conn, &mut state)?;
     load_issues(conn, &mut state)?;
@@ -736,6 +788,69 @@ fn load_repositories(conn: &Connection, state: &mut State) -> Result<()> {
         state
             .repos
             .insert((repo.owner.clone(), repo.name.clone()), repo);
+    }
+    Ok(())
+}
+
+fn load_repository_transfers(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT transaction_id, idempotency_key, request_fingerprint, repository_id,
+                   source_owner, source_name, destination_owner, destination_name,
+                   status, prepared_at, completed_at, failure, receipt_json
+            FROM repository_transfer_journal
+            "#,
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let journal = RepositoryTransferJournal {
+            transaction_id: parse_uuid(row.get(0).map_err(storage_error)?)?,
+            idempotency_key: row.get(1).map_err(storage_error)?,
+            request_fingerprint: row.get(2).map_err(storage_error)?,
+            repository_id: parse_uuid(row.get(3).map_err(storage_error)?)?,
+            source_owner: row.get(4).map_err(storage_error)?,
+            source_name: row.get(5).map_err(storage_error)?,
+            destination_owner: row.get(6).map_err(storage_error)?,
+            destination_name: row.get(7).map_err(storage_error)?,
+            status: from_text(row.get(8).map_err(storage_error)?)?,
+            prepared_at: parse_time(row.get(9).map_err(storage_error)?)?,
+            completed_at: parse_optional_time(row.get(10).map_err(storage_error)?)?,
+            failure: row.get(11).map_err(storage_error)?,
+            receipt: parse_optional_json(row.get(12).map_err(storage_error)?)?,
+        };
+        state
+            .repository_transfers
+            .insert(journal.idempotency_key.clone(), journal);
+    }
+    Ok(())
+}
+
+fn load_repository_aliases(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT old_owner, old_name, repository_id, canonical_owner, canonical_name,
+                   created_at, transaction_id
+            FROM repository_aliases
+            "#,
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let alias = RepositoryAlias {
+            owner: row.get(0).map_err(storage_error)?,
+            name: row.get(1).map_err(storage_error)?,
+            repository_id: parse_uuid(row.get(2).map_err(storage_error)?)?,
+            canonical_owner: row.get(3).map_err(storage_error)?,
+            canonical_name: row.get(4).map_err(storage_error)?,
+            created_at: parse_time(row.get(5).map_err(storage_error)?)?,
+            transaction_id: parse_uuid(row.get(6).map_err(storage_error)?)?,
+        };
+        state
+            .repository_aliases
+            .insert((alias.owner.clone(), alias.name.clone()), alias);
     }
     Ok(())
 }

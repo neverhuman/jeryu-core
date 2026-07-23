@@ -204,6 +204,54 @@ pub struct DeleteRepositoryReceipt {
     pub audit_id: String,
 }
 
+/// Body of `POST /api/v1/repos/{repository_uuid}/transfer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryTransferRequest {
+    pub destination_owner: String,
+    pub expected_source_owner: String,
+    pub expected_source_slug: String,
+    pub expected_main_sha: String,
+    pub compliance_receipt_digest: String,
+    pub source_cap_receipt_digest: String,
+    pub snapshot_id: String,
+    pub idempotency_key: String,
+}
+
+/// Read-only old-slug routing recorded by a successful transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RepositoryTransferAlias {
+    pub slug: String,
+    pub canonical_slug: String,
+    pub git_fetch: bool,
+    pub lfs_download: bool,
+    pub mutations: bool,
+}
+
+/// Receipt returned by a successful or idempotently replayed transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RepositoryTransferReceipt {
+    pub schema_version: String,
+    pub repository_id: String,
+    pub old_canonical_slug: String,
+    pub new_canonical_slug: String,
+    pub main_sha: String,
+    pub ref_inventory_digest: String,
+    pub tag_inventory_digest: String,
+    pub protection_digest: String,
+    pub lfs_inventory_digest: String,
+    pub visibility: RepositoryVisibility,
+    pub alias: RepositoryTransferAlias,
+    pub compliance_receipt_digest: String,
+    pub source_cap_receipt_digest: String,
+    pub snapshot_id: String,
+    pub idempotency_key: String,
+    pub journal_transaction_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CreateRepositoryPreview {
