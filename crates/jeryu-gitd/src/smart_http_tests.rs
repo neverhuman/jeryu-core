@@ -107,6 +107,7 @@ fn production_socket_honors_expect_continue_before_reading_rpc_body() {
 fn production_socket_streams_clone_fetch_and_push_v0_and_v2() {
     for protocol in ["0", "2"] {
         exercise_streaming_protocol(protocol);
+        exercise_shallow_push(protocol);
     }
 }
 
@@ -195,6 +196,115 @@ fn exercise_streaming_protocol(protocol: &str) {
     assert_eq!(
         git_output(&repo.path, &["rev-parse", "refs/heads/main"]),
         git_output(&clone, &["rev-parse", "FETCH_HEAD"])
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(seed);
+    let _ = std::fs::remove_dir_all(clone);
+}
+
+fn exercise_shallow_push(protocol: &str) {
+    if Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| !output.status.success())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let root = temp_dir("jeryu-shallow-http-root");
+    let seed = temp_dir("jeryu-shallow-http-seed");
+    let clone = temp_dir("jeryu-shallow-http-clone");
+    let manager = RepoManager::new(GitdConfig::new(&root));
+    let repo = manager
+        .create_bare(&RepoId::new("acme", "shallow").expect("valid repo id"))
+        .expect("create bare repository");
+    seed_repository(&seed, &repo.path);
+    for revision in 1..=2 {
+        std::fs::write(seed.join("history.txt"), format!("revision {revision}\n"))
+            .expect("write history");
+        run_git(&seed, &["add", "history.txt"], "history add");
+        run_git(
+            &seed,
+            &["commit", "-m", &format!("history {revision}")],
+            "history commit",
+        );
+        run_git(
+            &seed,
+            &[
+                "push",
+                repo.path.to_str().unwrap_or_default(),
+                "HEAD:refs/heads/main",
+            ],
+            "history direct push",
+        );
+    }
+    let protected_main = git_output(&repo.path, &["rev-parse", "refs/heads/main"]);
+
+    let (base_url, stop, server_thread) = start_test_server(SmartHttpServer::new(manager));
+    let remote = format!("{base_url}/acme/shallow.git");
+    let protocol_config = format!("protocol.version={protocol}");
+    run_command(
+        Command::new("git")
+            .args([
+                "-c",
+                &protocol_config,
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                "main",
+            ])
+            .arg(&remote)
+            .arg(&clone),
+        "shallow HTTP clone",
+    );
+    assert_eq!(
+        git_output(&clone, &["rev-parse", "--is-shallow-repository"]),
+        "true"
+    );
+    run_git(
+        &clone,
+        &["config", "user.email", "shallow@example.invalid"],
+        "shallow clone email",
+    );
+    run_git(
+        &clone,
+        &["config", "user.name", "Shallow Test"],
+        "shallow clone name",
+    );
+    run_git(
+        &clone,
+        &["checkout", "-b", "shallow-topic"],
+        "topic checkout",
+    );
+    std::fs::write(clone.join("topic.txt"), "shallow push\n").expect("write topic");
+    run_git(&clone, &["add", "topic.txt"], "topic add");
+    run_git(&clone, &["commit", "-m", "shallow topic"], "topic commit");
+    run_command(
+        Command::new("git")
+            .args([
+                "-c",
+                &protocol_config,
+                "-c",
+                "http.postBuffer=10485760",
+                "push",
+                "origin",
+                "HEAD:refs/heads/shallow-topic",
+            ])
+            .current_dir(&clone),
+        "shallow HTTP push",
+    );
+
+    stop.store(true, Ordering::Release);
+    server_thread.join().expect("server thread joins");
+    assert_eq!(
+        git_output(&repo.path, &["rev-parse", "refs/heads/shallow-topic"]),
+        git_output(&clone, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        git_output(&repo.path, &["rev-parse", "refs/heads/main"]),
+        protected_main
     );
 
     let _ = std::fs::remove_dir_all(root);

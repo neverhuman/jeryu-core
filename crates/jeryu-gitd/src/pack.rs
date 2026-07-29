@@ -5,10 +5,12 @@ use crate::command::{
 };
 use crate::error::{GitdError, Result};
 use crate::repo::Repository;
+use std::collections::BTreeSet;
 use std::io::Read;
 
 const MAIN_REF: &str = "refs/heads/main";
 const MAX_RECEIVE_PACK_PRELUDE_BYTES: usize = 1024 * 1024;
+const SHA1_HEX_LEN: usize = 40;
 
 /// Git pack service.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -144,12 +146,15 @@ pub struct ReceivePackCommand {
 
 /// Parse receive-pack update commands from a stateless request body.
 ///
-/// The receive-pack request starts with pkt-line command records, then a flush,
-/// then raw packfile bytes. This parser deliberately stops at the first flush so
-/// it never attempts to pkt-line decode the packfile payload.
+/// A shallow client may prefix the command records with `shallow <oid>`
+/// declarations. The declarations remain in the original request body for Git;
+/// this parser validates and skips them only for protected-ref evaluation. It
+/// deliberately stops at the first flush so it never attempts to pkt-line
+/// decode the packfile payload.
 pub fn receive_pack_commands(mut input: &[u8]) -> Result<Vec<ReceivePackCommand>> {
     let mut commands = Vec::new();
     let mut first_command = true;
+    let mut shallow_oids = BTreeSet::new();
     while !input.is_empty() {
         if input.len() < 4 {
             return Err(GitdError::Protocol("pkt-line missing length".to_string()));
@@ -161,7 +166,11 @@ pub fn receive_pack_commands(mut input: &[u8]) -> Result<Vec<ReceivePackCommand>
         input = &input[4..];
         match len {
             0 => break,
-            1 | 2 => continue,
+            1 | 2 => {
+                return Err(GitdError::Protocol(
+                    "unexpected control packet in receive-pack prelude".to_string(),
+                ));
+            }
             3 => {
                 return Err(GitdError::Protocol(
                     "reserved pkt-line length 0003".to_string(),
@@ -176,17 +185,44 @@ pub fn receive_pack_commands(mut input: &[u8]) -> Result<Vec<ReceivePackCommand>
                         "pkt-line payload truncated".to_string(),
                     ));
                 }
-                let mut payload = &input[..payload_len];
+                let payload = &input[..payload_len];
                 input = &input[payload_len..];
-                if first_command {
-                    if let Some(capabilities) = payload.iter().position(|b| *b == 0) {
-                        payload = &payload[..capabilities];
+
+                let line = std::str::from_utf8(payload).map_err(|_| {
+                    GitdError::Protocol("receive-pack prelude record is not valid utf8".to_string())
+                })?;
+                let line = line.strip_suffix('\n').unwrap_or(line);
+
+                if let Some(shallow_oid) = line.strip_prefix("shallow ") {
+                    if !first_command {
+                        return Err(GitdError::Protocol(
+                            "shallow declaration follows receive-pack command".to_string(),
+                        ));
                     }
-                    first_command = false;
+                    if !is_lowercase_sha1(shallow_oid) {
+                        return Err(GitdError::Protocol(
+                            "invalid shallow declaration oid".to_string(),
+                        ));
+                    }
+                    if !shallow_oids.insert(shallow_oid.to_string()) {
+                        return Err(GitdError::Protocol(
+                            "duplicate shallow declaration".to_string(),
+                        ));
+                    }
+                    continue;
                 }
-                let line = String::from_utf8_lossy(payload);
-                let line = line.trim_end_matches('\n');
-                let mut parts = line.split_whitespace();
+
+                let command = if first_command {
+                    line.split_once('\0').map_or(line, |(command, _)| command)
+                } else {
+                    if line.contains('\0') {
+                        return Err(GitdError::Protocol(
+                            "capabilities appear after first receive-pack command".to_string(),
+                        ));
+                    }
+                    line
+                };
+                let mut parts = command.split(' ');
                 let Some(old_oid) = parts.next() else {
                     return Err(GitdError::Protocol(
                         "receive-pack command missing old oid".to_string(),
@@ -202,6 +238,17 @@ pub fn receive_pack_commands(mut input: &[u8]) -> Result<Vec<ReceivePackCommand>
                         "receive-pack command missing ref name".to_string(),
                     ));
                 };
+                if parts.next().is_some()
+                    || !is_lowercase_sha1(old_oid)
+                    || !is_lowercase_sha1(new_oid)
+                    || !ref_name.starts_with("refs/")
+                    || ref_name.len() == "refs/".len()
+                {
+                    return Err(GitdError::Protocol(
+                        "invalid receive-pack command record".to_string(),
+                    ));
+                }
+                first_command = false;
                 commands.push(ReceivePackCommand {
                     old_oid: old_oid.to_string(),
                     new_oid: new_oid.to_string(),
@@ -211,6 +258,13 @@ pub fn receive_pack_commands(mut input: &[u8]) -> Result<Vec<ReceivePackCommand>
         }
     }
     Ok(commands)
+}
+
+fn is_lowercase_sha1(value: &str) -> bool {
+    value.len() == SHA1_HEX_LEN
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Enforce the PR-only trunk policy before invoking Git receive-pack.
@@ -349,6 +403,109 @@ mod tests {
         assert_eq!(commands[0].ref_name, "refs/heads/feature");
         assert_eq!(commands[1].ref_name, "refs/heads/topic");
         ensure_receive_pack_policy(&body).expect("non-main updates are allowed");
+    }
+
+    #[test]
+    fn receive_pack_parser_accepts_leading_shallow_declarations() {
+        let mut body = pktline::encode_str("shallow aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n");
+        body.extend(pktline::encode_str(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/feature\0 report-status\n",
+        ));
+        body.extend(pktline::flush());
+        body.extend(b"PACK");
+
+        let commands = receive_pack_commands(&body).expect("parse shallow receive-pack");
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].ref_name, "refs/heads/feature");
+        ensure_receive_pack_policy(&body).expect("shallow topic update is allowed");
+    }
+
+    #[test]
+    fn receive_pack_policy_rejects_main_after_shallow_declaration() {
+        let mut body = pktline::encode_str("shallow aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n");
+        body.extend(pktline::encode_str(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/main\0 report-status\n",
+        ));
+        body.extend(pktline::flush());
+
+        let err = ensure_receive_pack_policy(&body).expect_err("main update must be denied");
+
+        assert!(err.to_string().contains("direct pushes to refs/heads/main"));
+    }
+
+    #[test]
+    fn receive_pack_parser_rejects_hostile_shallow_declarations() {
+        for (label, declarations) in [
+            (
+                "short",
+                vec!["shallow aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"],
+            ),
+            (
+                "uppercase",
+                vec!["shallow AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"],
+            ),
+            (
+                "extra field",
+                vec!["shallow aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa extra\n"],
+            ),
+            (
+                "duplicate",
+                vec![
+                    "shallow aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+                    "shallow aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+                ],
+            ),
+        ] {
+            let mut body = Vec::new();
+            for declaration in declarations {
+                body.extend(pktline::encode_str(declaration));
+            }
+            body.extend(pktline::encode_str(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/topic\0 report-status\n",
+            ));
+            body.extend(pktline::flush());
+
+            assert!(
+                receive_pack_commands(&body).is_err(),
+                "{label} declaration must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn receive_pack_parser_rejects_late_or_unknown_prelude_records() {
+        let command = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/topic\0 report-status\n";
+        let mut late = pktline::encode_str(command);
+        late.extend(pktline::encode_str(
+            "shallow cccccccccccccccccccccccccccccccccccccccc\n",
+        ));
+        late.extend(pktline::flush());
+
+        let mut unknown = pktline::encode_str("deepen 1\n");
+        unknown.extend(pktline::encode_str(command));
+        unknown.extend(pktline::flush());
+
+        assert!(receive_pack_commands(&late).is_err());
+        assert!(receive_pack_commands(&unknown).is_err());
+    }
+
+    #[test]
+    fn receive_pack_prefix_preserves_shallow_declaration_bytes() {
+        let mut body = pktline::encode_str("shallow aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n");
+        body.extend(pktline::encode_str(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/feature\0 report-status\n",
+        ));
+        body.extend(pktline::flush());
+        let prelude_len = body.len();
+        body.extend(b"PACK payload remains in the reader");
+        let mut reader = OneByteReader::new(&body);
+
+        let prefix = read_receive_pack_prefix(&mut reader, body.len() as u64, Vec::new())
+            .unwrap_or_else(|err| panic!("read shallow prelude: {err}"));
+
+        assert_eq!(prefix, body[..prelude_len]);
+        assert_eq!(reader.remaining(), &body[prelude_len..]);
     }
 
     #[test]
