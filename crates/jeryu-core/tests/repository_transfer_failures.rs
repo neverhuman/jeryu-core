@@ -77,3 +77,47 @@ fn commit_rechecks_destination_without_losing_either_repository() {
         jeryu_core::RepositoryTransferStatus::Prepared
     );
 }
+
+#[test]
+fn failed_transfer_is_terminal_across_sqlite_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("forge.sqlite");
+
+    let first_failure = {
+        let core = ForgeCore::open_sqlite(&database).unwrap();
+        let repository_id = create_repo(&core, "jeryu", "redline");
+        let prepared = core
+            .prepare_repository_transfer(transfer(repository_id, "redline"))
+            .unwrap();
+        core.fail_repository_transfer(prepared.transaction_id, "storage rename failed")
+            .unwrap()
+    };
+
+    {
+        let core = ForgeCore::open_sqlite(&database).unwrap();
+        let replay = core
+            .fail_repository_transfer(
+                first_failure.transaction_id,
+                first_failure.failure.as_deref().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(replay, first_failure);
+        assert!(matches!(
+            core.fail_repository_transfer(
+                first_failure.transaction_id,
+                "replacement failure reason"
+            ),
+            Err(ForgeError::Conflict(_))
+        ));
+        assert_eq!(
+            core.get_repository_transfer(&first_failure.idempotency_key),
+            Some(first_failure.clone())
+        );
+    }
+
+    let reopened = ForgeCore::open_sqlite(&database).unwrap();
+    assert_eq!(
+        reopened.get_repository_transfer(&first_failure.idempotency_key),
+        Some(first_failure)
+    );
+}

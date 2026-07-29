@@ -135,3 +135,39 @@ Rollback/backfill:
 - Rollback drops the additive auth/grant tables only for pre-production use; in
   a populated store, restore the pre-migration database copy instead of
   deleting account rows in place.
+
+## 0009 Repository transfer journals and aliases
+
+The ninth migration adds durable two-phase repository-transfer journals and
+read-only old-slug aliases. The application prepares a journal before moving
+storage, then records exactly one terminal `committed` or `failed` result.
+
+Constraint policy:
+- `repository_transfer_journal.transaction_id` is the primary key and each
+  `idempotency_key` is unique. Both identify one immutable transfer attempt.
+- Every journal references `repositories.id` with `ON DELETE CASCADE`.
+  `status` is closed to `prepared`, `committed`, or `failed`; `receipt_json`,
+  when present, must be valid JSON.
+- `repository_aliases` is keyed by the old `(owner, name)` slug, references
+  both the immutable repository UUID and its transfer transaction, and rejects
+  duplicate repository/old-slug triples.
+- Preparation rejects a destination that collides with either a canonical
+  repository slug or an existing alias. Commit rechecks the destination inside
+  the same locked state transition before re-keying any repository-owned row.
+- `repository_transfer_journal` and `repository_aliases` are threaded through
+  `State`, `load_state`, `persist_state`, and `delete_all`; unrelated full-state
+  rewrites must preserve both tables.
+- A failed journal is terminal. Replaying the exact failure reason returns the
+  original record unchanged; a different reason is a conflict and cannot
+  replace the original completion timestamp or cause.
+
+Rollback/backfill:
+- The migration is additive and requires no backfill. Both tables start empty
+  and are populated only by explicit transfer operations.
+- Before applying 0009 to a populated store, take a `VACUUM INTO` copy while
+  holding the application migration lock and retain it as the restoration
+  target.
+- The staged rollback is non-destructive: disable new transfer operations,
+  retain both recovery tables, and roll forward after repair. If schema removal
+  is unavoidable, restore the pre-migration copy instead of dropping live
+  journals or aliases.

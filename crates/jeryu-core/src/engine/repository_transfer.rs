@@ -193,16 +193,33 @@ impl ForgeCore {
         require_name("transfer failure reason", reason)?;
         let mut state = self.state.write();
         let idempotency_key = transfer_key_for_id(&state, transaction_id)?;
+        let existing = state
+            .repository_transfers
+            .get(&idempotency_key)
+            .cloned()
+            .expect("transfer key was found above");
+        match existing.status {
+            RepositoryTransferStatus::Committed => {
+                return Err(ForgeError::Conflict(format!(
+                    "repository transfer {transaction_id} is already committed"
+                )));
+            }
+            RepositoryTransferStatus::Failed => {
+                if existing.failure.as_deref() == Some(reason) {
+                    return Ok(existing);
+                }
+                return Err(ForgeError::Conflict(format!(
+                    "repository transfer {transaction_id} already failed with a different reason"
+                )));
+            }
+            RepositoryTransferStatus::Prepared => {}
+        }
+
         let previous = state.clone();
         let journal = state
             .repository_transfers
             .get_mut(&idempotency_key)
             .expect("transfer key was found above");
-        if journal.status == RepositoryTransferStatus::Committed {
-            return Err(ForgeError::Conflict(format!(
-                "repository transfer {transaction_id} is already committed"
-            )));
-        }
         journal.status = RepositoryTransferStatus::Failed;
         journal.completed_at = Some(Utc::now());
         journal.failure = Some(reason.to_string());
