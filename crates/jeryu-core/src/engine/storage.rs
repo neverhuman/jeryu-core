@@ -138,6 +138,9 @@ fn delete_all(conn: &Connection) -> Result<()> {
         DELETE FROM repositories;
         DELETE FROM teams;
         DELETE FROM organizations;
+        DELETE FROM account_activation_challenges;
+        DELETE FROM account_invitations;
+        DELETE FROM owner_bootstrap_state;
         DELETE FROM personal_access_tokens;
         DELETE FROM web_sessions;
         DELETE FROM user_accounts;
@@ -160,13 +163,17 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         conn.execute(
             r#"
             INSERT INTO user_accounts (
-              login, password_hash, role, must_change_password, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+              login, display_name, password_hash, role, status, auth_epoch,
+              must_change_password, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
             params![
-                account.login,
+                account.canonical_login,
+                account.display_name,
                 account.password_hash,
                 text(&account.role)?,
+                text(&account.status)?,
+                account.auth_epoch,
                 bool_int(account.must_change_password),
                 time(account.created_at),
                 time(account.updated_at),
@@ -178,12 +185,13 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         conn.execute(
             r#"
             INSERT INTO web_sessions (
-              id, login, token_hash, csrf_token, created_at, expires_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+              id, login, auth_epoch, token_hash, csrf_token, created_at, expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
             params![
                 session.id.to_string(),
                 session.login,
+                session.auth_epoch,
                 session.token_hash,
                 session.csrf_token,
                 time(session.created_at),
@@ -196,12 +204,13 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         conn.execute(
             r#"
             INSERT INTO personal_access_tokens (
-              id, login, name, token_hash, created_at, expires_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+              id, login, auth_epoch, name, token_hash, created_at, expires_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
             params![
                 token.id.to_string(),
                 token.login,
+                token.auth_epoch,
                 token.name,
                 token.token_hash,
                 time(token.created_at),
@@ -210,6 +219,56 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         )
         .map_err(storage_error)?;
     }
+    for invitation in state.invitations.values() {
+        conn.execute(
+            r#"
+            INSERT INTO account_invitations (
+              id, canonical_login, display_name, activation_secret_hash,
+              issuer_principal, intended_role, intended_teams_json, created_at,
+              expires_at, consumed_at, revoked_at, attempt_count, bootstrap_owner
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "#,
+            params![
+                invitation.id.to_string(),
+                invitation.canonical_login,
+                invitation.display_name,
+                invitation.activation_secret_hash,
+                invitation.issuer_principal,
+                text(&invitation.intended_bindings.role)?,
+                json(&invitation.intended_bindings.teams)?,
+                time(invitation.created_at),
+                time(invitation.expires_at),
+                optional_time(invitation.consumed_at),
+                optional_time(invitation.revoked_at),
+                invitation.attempt_count,
+                bool_int(invitation.bootstrap_owner),
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+    for challenge in state.activation_challenges.values() {
+        conn.execute(
+            r#"
+            INSERT INTO account_activation_challenges (
+              id, invitation_id, challenge_hash, created_at, expires_at, consumed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                challenge.id.to_string(),
+                challenge.invitation_id.to_string(),
+                challenge.challenge_hash,
+                time(challenge.created_at),
+                time(challenge.expires_at),
+                optional_time(challenge.consumed_at),
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+    conn.execute(
+        "INSERT INTO owner_bootstrap_state (singleton, consumed) VALUES (1, ?1)",
+        params![bool_int(state.bootstrap_owner_consumed)],
+    )
+    .map_err(storage_error)?;
     for organization in state.organizations.values() {
         conn.execute(
             "INSERT INTO organizations (login, organization_json) VALUES (?1, ?2)",
@@ -632,6 +691,9 @@ fn load_state(conn: &Connection) -> Result<State> {
     load_accounts(conn, &mut state)?;
     load_sessions(conn, &mut state)?;
     load_personal_tokens(conn, &mut state)?;
+    load_invitations(conn, &mut state)?;
+    load_activation_challenges(conn, &mut state)?;
+    load_bootstrap_state(conn, &mut state)?;
     load_organizations(conn, &mut state)?;
     load_teams(conn, &mut state)?;
     load_repositories(conn, &mut state)?;
@@ -671,20 +733,25 @@ fn load_users(conn: &Connection, state: &mut State) -> Result<()> {
 fn load_accounts(conn: &Connection, state: &mut State) -> Result<()> {
     let mut stmt = conn
         .prepare(
-            "SELECT login, password_hash, role, must_change_password, created_at, updated_at FROM user_accounts",
+            "SELECT login, display_name, password_hash, role, status, auth_epoch, must_change_password, created_at, updated_at FROM user_accounts",
         )
         .map_err(storage_error)?;
     let mut rows = stmt.query([]).map_err(storage_error)?;
     while let Some(row) = rows.next().map_err(storage_error)? {
         let account = UserAccount {
-            login: row.get(0).map_err(storage_error)?,
-            password_hash: row.get(1).map_err(storage_error)?,
-            role: from_text(row.get(2).map_err(storage_error)?)?,
-            must_change_password: int_bool(row.get(3).map_err(storage_error)?),
-            created_at: parse_time(row.get(4).map_err(storage_error)?)?,
-            updated_at: parse_time(row.get(5).map_err(storage_error)?)?,
+            canonical_login: row.get(0).map_err(storage_error)?,
+            display_name: row.get(1).map_err(storage_error)?,
+            password_hash: row.get(2).map_err(storage_error)?,
+            role: from_text(row.get(3).map_err(storage_error)?)?,
+            status: from_text(row.get(4).map_err(storage_error)?)?,
+            auth_epoch: row.get(5).map_err(storage_error)?,
+            must_change_password: int_bool(row.get(6).map_err(storage_error)?),
+            created_at: parse_time(row.get(7).map_err(storage_error)?)?,
+            updated_at: parse_time(row.get(8).map_err(storage_error)?)?,
         };
-        state.accounts.insert(account.login.clone(), account);
+        state
+            .accounts
+            .insert(account.canonical_login.clone(), account);
     }
     Ok(())
 }
@@ -692,7 +759,7 @@ fn load_accounts(conn: &Connection, state: &mut State) -> Result<()> {
 fn load_sessions(conn: &Connection, state: &mut State) -> Result<()> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, login, token_hash, csrf_token, created_at, expires_at FROM web_sessions",
+            "SELECT id, login, auth_epoch, token_hash, csrf_token, created_at, expires_at FROM web_sessions",
         )
         .map_err(storage_error)?;
     let mut rows = stmt.query([]).map_err(storage_error)?;
@@ -700,10 +767,11 @@ fn load_sessions(conn: &Connection, state: &mut State) -> Result<()> {
         let session = WebSession {
             id: parse_uuid(row.get(0).map_err(storage_error)?)?,
             login: row.get(1).map_err(storage_error)?,
-            token_hash: row.get(2).map_err(storage_error)?,
-            csrf_token: row.get(3).map_err(storage_error)?,
-            created_at: parse_time(row.get(4).map_err(storage_error)?)?,
-            expires_at: parse_time(row.get(5).map_err(storage_error)?)?,
+            auth_epoch: row.get(2).map_err(storage_error)?,
+            token_hash: row.get(3).map_err(storage_error)?,
+            csrf_token: row.get(4).map_err(storage_error)?,
+            created_at: parse_time(row.get(5).map_err(storage_error)?)?,
+            expires_at: parse_time(row.get(6).map_err(storage_error)?)?,
         };
         state.sessions.insert(session.token_hash.clone(), session);
     }
@@ -713,7 +781,7 @@ fn load_sessions(conn: &Connection, state: &mut State) -> Result<()> {
 fn load_personal_tokens(conn: &Connection, state: &mut State) -> Result<()> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, login, name, token_hash, created_at, expires_at FROM personal_access_tokens",
+            "SELECT id, login, auth_epoch, name, token_hash, created_at, expires_at FROM personal_access_tokens",
         )
         .map_err(storage_error)?;
     let mut rows = stmt.query([]).map_err(storage_error)?;
@@ -721,13 +789,79 @@ fn load_personal_tokens(conn: &Connection, state: &mut State) -> Result<()> {
         let token = PersonalAccessToken {
             id: parse_uuid(row.get(0).map_err(storage_error)?)?,
             login: row.get(1).map_err(storage_error)?,
-            name: row.get(2).map_err(storage_error)?,
-            token_hash: row.get(3).map_err(storage_error)?,
-            created_at: parse_time(row.get(4).map_err(storage_error)?)?,
-            expires_at: parse_optional_time(row.get(5).map_err(storage_error)?)?,
+            auth_epoch: row.get(2).map_err(storage_error)?,
+            name: row.get(3).map_err(storage_error)?,
+            token_hash: row.get(4).map_err(storage_error)?,
+            created_at: parse_time(row.get(5).map_err(storage_error)?)?,
+            expires_at: parse_optional_time(row.get(6).map_err(storage_error)?)?,
         };
         state.personal_tokens.insert(token.id, token);
     }
+    Ok(())
+}
+
+fn load_invitations(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, canonical_login, display_name, activation_secret_hash, issuer_principal, intended_role, intended_teams_json, created_at, expires_at, consumed_at, revoked_at, attempt_count, bootstrap_owner FROM account_invitations",
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let invitation = AccountInvitation {
+            id: parse_uuid(row.get(0).map_err(storage_error)?)?,
+            canonical_login: row.get(1).map_err(storage_error)?,
+            display_name: row.get(2).map_err(storage_error)?,
+            activation_secret_hash: row.get(3).map_err(storage_error)?,
+            issuer_principal: row.get(4).map_err(storage_error)?,
+            intended_bindings: InvitationBindings {
+                role: from_text(row.get(5).map_err(storage_error)?)?,
+                teams: parse_json(row.get(6).map_err(storage_error)?)?,
+            },
+            created_at: parse_time(row.get(7).map_err(storage_error)?)?,
+            expires_at: parse_time(row.get(8).map_err(storage_error)?)?,
+            consumed_at: parse_optional_time(row.get(9).map_err(storage_error)?)?,
+            revoked_at: parse_optional_time(row.get(10).map_err(storage_error)?)?,
+            attempt_count: row.get(11).map_err(storage_error)?,
+            bootstrap_owner: int_bool(row.get(12).map_err(storage_error)?),
+        };
+        state.invitations.insert(invitation.id, invitation);
+    }
+    Ok(())
+}
+
+fn load_activation_challenges(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, invitation_id, challenge_hash, created_at, expires_at, consumed_at FROM account_activation_challenges",
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let challenge = ActivationChallenge {
+            id: parse_uuid(row.get(0).map_err(storage_error)?)?,
+            invitation_id: parse_uuid(row.get(1).map_err(storage_error)?)?,
+            challenge_hash: row.get(2).map_err(storage_error)?,
+            created_at: parse_time(row.get(3).map_err(storage_error)?)?,
+            expires_at: parse_time(row.get(4).map_err(storage_error)?)?,
+            consumed_at: parse_optional_time(row.get(5).map_err(storage_error)?)?,
+        };
+        state
+            .activation_challenges
+            .insert(challenge.challenge_hash.clone(), challenge);
+    }
+    Ok(())
+}
+
+fn load_bootstrap_state(conn: &Connection, state: &mut State) -> Result<()> {
+    state.bootstrap_owner_consumed = conn
+        .query_row(
+            "SELECT consumed FROM owner_bootstrap_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(int_bool)
+        .map_err(storage_error)?;
     Ok(())
 }
 

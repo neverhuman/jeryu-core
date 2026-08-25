@@ -34,6 +34,8 @@ const MIGRATION_0007: &str = include_str!("../../../../../db/migrations/0007_jan
 const MIGRATION_0008: &str = include_str!("../../../../../db/migrations/0008_user_auth_access.sql");
 const MIGRATION_0009: &str =
     include_str!("../../../../../db/migrations/0009_repository_transfers.sql");
+const MIGRATION_0010: &str =
+    include_str!("../../../../../db/migrations/0010_account_lifecycle.sql");
 
 pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_0001).map_err(storage_error)?;
@@ -46,6 +48,7 @@ pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_0007).map_err(storage_error)?;
     apply_migration_0008(conn)?;
     conn.execute_batch(MIGRATION_0009).map_err(storage_error)?;
+    apply_migration_0010(conn)?;
     Ok(())
 }
 
@@ -88,6 +91,91 @@ fn apply_migration_0008(conn: &Connection) -> Result<()> {
             "ALTER TABLE web_sessions ADD COLUMN csrf_token TEXT NOT NULL DEFAULT '';",
         )
         .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+fn apply_migration_0010(conn: &Connection) -> Result<()> {
+    validate_canonical_account_logins(conn)?;
+    add_column_if_missing(
+        conn,
+        "user_accounts",
+        "display_name",
+        "ALTER TABLE user_accounts ADD COLUMN display_name TEXT NOT NULL DEFAULT '';",
+    )?;
+    conn.execute(
+        "UPDATE user_accounts SET display_name = login WHERE display_name = ''",
+        [],
+    )
+    .map_err(storage_error)?;
+    add_column_if_missing(
+        conn,
+        "user_accounts",
+        "status",
+        "ALTER TABLE user_accounts ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('pending_activation', 'pending_mfa', 'active', 'disabled', 'locked'));",
+    )?;
+    add_column_if_missing(
+        conn,
+        "user_accounts",
+        "auth_epoch",
+        "ALTER TABLE user_accounts ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 0 CHECK (auth_epoch >= 0);",
+    )?;
+    add_column_if_missing(
+        conn,
+        "web_sessions",
+        "auth_epoch",
+        "ALTER TABLE web_sessions ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 0 CHECK (auth_epoch >= 0);",
+    )?;
+    add_column_if_missing(
+        conn,
+        "personal_access_tokens",
+        "auth_epoch",
+        "ALTER TABLE personal_access_tokens ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 0 CHECK (auth_epoch >= 0);",
+    )?;
+    conn.execute_batch(MIGRATION_0010).map_err(storage_error)?;
+    Ok(())
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    statement: &str,
+) -> Result<()> {
+    if !column_exists(conn, table, column)? {
+        conn.execute_batch(statement).map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+fn validate_canonical_account_logins(conn: &Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare("SELECT login FROM user_accounts ORDER BY login")
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    let mut seen = std::collections::BTreeMap::<String, String>::new();
+    let mut logins = Vec::new();
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let login: String = row.get(0).map_err(storage_error)?;
+        let folded = login.to_ascii_lowercase();
+        if let Some(previous) = seen.insert(folded.clone(), login.clone()) {
+            return Err(super::ForgeError::Storage(format!(
+                "account login case-fold collision: {previous} and {login}"
+            )));
+        }
+        logins.push((login, folded));
+    }
+    for (login, folded) in logins {
+        let canonical = login == folded
+            && !login.is_empty()
+            && login.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            });
+        if !canonical {
+            return Err(super::ForgeError::Storage(format!(
+                "account login is not canonical lowercase ASCII: {login}"
+            )));
+        }
     }
     Ok(())
 }

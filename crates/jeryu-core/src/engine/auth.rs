@@ -5,6 +5,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use chrono::{DateTime, Utc};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use super::{ForgeCore, require_name};
@@ -14,6 +15,10 @@ use crate::model::*;
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 14;
 const PAT_DEFAULT_TTL_DAYS: i64 = 90;
 const PAT_MAX_TTL_DAYS: i64 = 365;
+const INVITATION_MAX_TTL_HOURS: i64 = 24;
+const ACTIVATION_CHALLENGE_TTL_MINUTES: i64 = 10;
+const ACTIVATION_MAX_ATTEMPTS: u32 = 5;
+const ACTIVATION_ERROR: &str = "activation could not be completed";
 
 impl ForgeCore {
     pub fn generate_one_time_password(&self) -> Result<String> {
@@ -36,9 +41,12 @@ impl ForgeCore {
         let previous = state.clone();
         let now = Utc::now();
         let account = UserAccount {
-            login: login.to_string(),
+            canonical_login: login.to_string(),
+            display_name: login.to_string(),
             password_hash: hash_password(password)?,
             role,
+            status: AccountStatus::Active,
+            auth_epoch: 0,
             must_change_password: false,
             created_at: now,
             updated_at: now,
@@ -100,6 +108,11 @@ impl ForgeCore {
             .get(login)
             .cloned()
             .ok_or_else(|| ForgeError::Validation("invalid login or password".to_string()))?;
+        if !account.status.permits_authentication() {
+            return Err(ForgeError::Validation(
+                "invalid login or password".to_string(),
+            ));
+        }
         verify_password(password, &account.password_hash)?;
         Ok(account.into())
     }
@@ -121,6 +134,7 @@ impl ForgeCore {
             .expect("presence checked above");
         account.password_hash = hash_password(new_password)?;
         account.must_change_password = true;
+        account.auth_epoch = next_auth_epoch(account.auth_epoch)?;
         account.updated_at = Utc::now();
         let updated = account.clone();
         state.sessions.retain(|_, session| session.login != login);
@@ -145,6 +159,11 @@ impl ForgeCore {
             .get(login)
             .cloned()
             .ok_or_else(|| ForgeError::NotFound(format!("account {login}")))?;
+        if !account.status.permits_authentication() {
+            return Err(ForgeError::Validation(
+                "invalid login or password".to_string(),
+            ));
+        }
         verify_password(current_password, &account.password_hash)?;
         let mut state = self.state.write();
         let previous = state.clone();
@@ -154,8 +173,13 @@ impl ForgeCore {
             .expect("account was read before write lock");
         account.password_hash = hash_password(new_password)?;
         account.must_change_password = false;
+        account.auth_epoch = next_auth_epoch(account.auth_epoch)?;
         account.updated_at = Utc::now();
         let updated = account.clone();
+        state.sessions.retain(|_, session| session.login != login);
+        state
+            .personal_tokens
+            .retain(|_, token| token.login != login);
         self.persist_after_mutation(&mut state, previous)?;
         Ok(updated.into())
     }
@@ -171,8 +195,17 @@ impl ForgeCore {
             .get_mut(login)
             .expect("presence checked above");
         account.must_change_password = forced;
+        if forced {
+            account.auth_epoch = next_auth_epoch(account.auth_epoch)?;
+        }
         account.updated_at = Utc::now();
         let updated = account.clone();
+        if forced {
+            state.sessions.retain(|_, session| session.login != login);
+            state
+                .personal_tokens
+                .retain(|_, token| token.login != login);
+        }
         self.persist_after_mutation(&mut state, previous)?;
         Ok(updated.into())
     }
@@ -191,7 +224,7 @@ impl ForgeCore {
                 "session ttl must be positive".to_string(),
             ));
         }
-        self.get_account(login)?;
+        let account = self.require_active_account(login)?;
         let token = random_secret()?;
         let csrf_token = random_secret()?;
         let created_at = Utc::now();
@@ -201,6 +234,7 @@ impl ForgeCore {
         let session = WebSession {
             id: Uuid::new_v4(),
             login: login.to_string(),
+            auth_epoch: account.auth_epoch,
             token_hash: token_hash(&token),
             csrf_token,
             created_at,
@@ -226,11 +260,11 @@ impl ForgeCore {
         if session.expires_at <= Utc::now() {
             return None;
         }
-        let account = state
-            .accounts
-            .get(&session.login)
-            .cloned()
-            .map(AccountSummary::from)?;
+        let account = state.accounts.get(&session.login).cloned()?;
+        if !account.status.permits_authentication() || account.auth_epoch != session.auth_epoch {
+            return None;
+        }
+        let account = AccountSummary::from(account);
         Some((account, session.clone()))
     }
 
@@ -254,13 +288,14 @@ impl ForgeCore {
         name: &str,
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<PersonalAccessTokenReceipt> {
-        self.get_account(login)?;
+        let account = self.require_active_account(login)?;
         require_name("token name", name)?;
         let expires_at = validate_pat_expiry(expires_at)?;
         let secret = format!("jpat_{}", random_secret()?);
         let token = PersonalAccessToken {
             id: Uuid::new_v4(),
             login: login.to_string(),
+            auth_epoch: account.auth_epoch,
             name: name.trim().to_string(),
             token_hash: token_hash(&secret),
             created_at: Utc::now(),
@@ -317,11 +352,438 @@ impl ForgeCore {
         let token = state.personal_tokens.values().find(|record| {
             record.token_hash == hash && record.expires_at.is_none_or(|expires| expires > now)
         })?;
+        let account = state.accounts.get(&token.login)?.clone();
+        if !account.status.permits_authentication() || account.auth_epoch != token.auth_epoch {
+            return None;
+        }
+        Some(AccountSummary::from(account))
+    }
+
+    /// Reserve a canonical login with a single-use, hash-only activation secret.
+    pub fn create_account_invitation(
+        &self,
+        issuer_principal: &str,
+        canonical_login: &str,
+        display_name: &str,
+        intended_bindings: InvitationBindings,
+        expires_at: DateTime<Utc>,
+    ) -> Result<AccountInvitationReceipt> {
+        self.create_account_invitation_inner(
+            issuer_principal,
+            canonical_login,
+            display_name,
+            intended_bindings,
+            expires_at,
+            false,
+        )
+    }
+
+    /// Create the only permitted first-owner bootstrap invitation.
+    pub fn create_bootstrap_owner_invitation(
+        &self,
+        canonical_login: &str,
+        display_name: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<AccountInvitationReceipt> {
+        self.create_account_invitation_inner(
+            "local-operator",
+            canonical_login,
+            display_name,
+            InvitationBindings {
+                role: UserRole::Admin,
+                teams: Vec::new(),
+            },
+            expires_at,
+            true,
+        )
+    }
+
+    fn create_account_invitation_inner(
+        &self,
+        issuer_principal: &str,
+        canonical_login: &str,
+        display_name: &str,
+        mut intended_bindings: InvitationBindings,
+        expires_at: DateTime<Utc>,
+        bootstrap_owner: bool,
+    ) -> Result<AccountInvitationReceipt> {
+        require_login(canonical_login)?;
+        require_name("display name", display_name)?;
+        require_name("issuer principal", issuer_principal)?;
+        intended_bindings.teams = normalize_team_bindings(&intended_bindings.teams)?;
+        let now = Utc::now();
+        if expires_at <= now {
+            return Err(ForgeError::Validation(
+                "invitation expiry must be in the future".to_string(),
+            ));
+        }
+        if expires_at > now + chrono::Duration::hours(INVITATION_MAX_TTL_HOURS) {
+            return Err(ForgeError::Validation(format!(
+                "invitation expiry may not exceed {INVITATION_MAX_TTL_HOURS} hours"
+            )));
+        }
+        let activation_secret = random_secret()?;
+        let mut state = self.state.write();
+        if state.accounts.contains_key(canonical_login) {
+            return Err(ForgeError::Conflict(format!("account {canonical_login}")));
+        }
+        if bootstrap_owner
+            && (state.bootstrap_owner_consumed
+                || state
+                    .accounts
+                    .values()
+                    .any(|account| account.role == UserRole::Admin))
+        {
+            return Err(ForgeError::Conflict(
+                "owner bootstrap has already been consumed".to_string(),
+            ));
+        }
+        for team_binding in &intended_bindings.teams {
+            let (organization, team) = split_team_binding(team_binding)?;
+            if !state
+                .teams
+                .contains_key(&(organization.to_string(), team.to_string()))
+            {
+                return Err(ForgeError::NotFound(format!("team {team_binding}")));
+            }
+        }
+        let expired_ids: BTreeSet<_> = state
+            .invitations
+            .values()
+            .filter(|invitation| {
+                invitation.consumed_at.is_none()
+                    && invitation.revoked_at.is_none()
+                    && invitation.expires_at <= now
+            })
+            .map(|invitation| invitation.id)
+            .collect();
+        if state.invitations.values().any(|invitation| {
+            invitation.canonical_login == canonical_login
+                && invitation.consumed_at.is_none()
+                && invitation.revoked_at.is_none()
+                && !expired_ids.contains(&invitation.id)
+        }) {
+            return Err(ForgeError::Conflict(format!(
+                "active invitation for {canonical_login}"
+            )));
+        }
+        if bootstrap_owner
+            && state.invitations.values().any(|invitation| {
+                invitation.bootstrap_owner
+                    && invitation.consumed_at.is_none()
+                    && invitation.revoked_at.is_none()
+                    && !expired_ids.contains(&invitation.id)
+            })
+        {
+            return Err(ForgeError::Conflict(
+                "active owner bootstrap invitation".to_string(),
+            ));
+        }
+        let previous = state.clone();
+        for id in expired_ids {
+            state
+                .invitations
+                .get_mut(&id)
+                .expect("expired invitation id came from the same map")
+                .revoked_at = Some(now);
+        }
+        let invitation = AccountInvitation {
+            id: Uuid::new_v4(),
+            canonical_login: canonical_login.to_string(),
+            display_name: display_name.trim().to_string(),
+            activation_secret_hash: token_hash(&activation_secret),
+            issuer_principal: issuer_principal.trim().to_string(),
+            intended_bindings,
+            created_at: now,
+            expires_at,
+            consumed_at: None,
+            revoked_at: None,
+            attempt_count: 0,
+            bootstrap_owner,
+        };
+        state.invitations.insert(invitation.id, invitation.clone());
+        self.persist_after_mutation(&mut state, previous)?;
+        Ok(AccountInvitationReceipt {
+            invitation: invitation.into(),
+            activation_secret,
+        })
+    }
+
+    pub fn list_account_invitations(&self) -> Vec<AccountInvitationSummary> {
+        let mut invitations: Vec<_> = self
+            .state
+            .read()
+            .invitations
+            .values()
+            .cloned()
+            .map(AccountInvitationSummary::from)
+            .collect();
+        invitations.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| left.canonical_login.cmp(&right.canonical_login))
+        });
+        invitations
+    }
+
+    pub fn revoke_account_invitation(&self, id: Uuid) -> Result<bool> {
+        let mut state = self.state.write();
+        let previous = state.clone();
+        let revoked = if let Some(invitation) = state.invitations.get_mut(&id) {
+            if invitation.consumed_at.is_none() && invitation.revoked_at.is_none() {
+                invitation.revoked_at = Some(Utc::now());
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        self.persist_after_mutation(&mut state, previous)?;
+        Ok(revoked)
+    }
+
+    /// Exchange a valid invitation secret for a short-lived one-time challenge.
+    pub fn start_account_activation(
+        &self,
+        canonical_login: &str,
+        activation_secret: &str,
+    ) -> Result<ActivationStartReceipt> {
+        if require_login(canonical_login).is_err() {
+            return Err(activation_error());
+        }
+        let challenge = random_secret()?;
+        let now = Utc::now();
+        let mut state = self.state.write();
+        let invitation_id = state
+            .invitations
+            .values()
+            .find(|invitation| {
+                invitation.canonical_login == canonical_login
+                    && invitation.consumed_at.is_none()
+                    && invitation.revoked_at.is_none()
+                    && invitation.expires_at > now
+            })
+            .map(|invitation| invitation.id)
+            .ok_or_else(activation_error)?;
+        let previous = state.clone();
+        let invitation = state
+            .invitations
+            .get_mut(&invitation_id)
+            .expect("invitation id was selected from the same map");
+        if invitation.attempt_count >= ACTIVATION_MAX_ATTEMPTS {
+            return Err(activation_error());
+        }
+        invitation.attempt_count += 1;
+        let supplied_hash = token_hash(activation_secret);
+        if !constant_time_eq(
+            supplied_hash.as_bytes(),
+            invitation.activation_secret_hash.as_bytes(),
+        ) {
+            self.persist_after_mutation(&mut state, previous)?;
+            return Err(activation_error());
+        }
+        let expires_at = now + chrono::Duration::minutes(ACTIVATION_CHALLENGE_TTL_MINUTES);
+        let record = ActivationChallenge {
+            id: Uuid::new_v4(),
+            invitation_id,
+            challenge_hash: token_hash(&challenge),
+            created_at: now,
+            expires_at,
+            consumed_at: None,
+        };
+        state
+            .activation_challenges
+            .insert(record.challenge_hash.clone(), record);
+        self.persist_after_mutation(&mut state, previous)?;
+        Ok(ActivationStartReceipt {
+            challenge,
+            expires_at,
+        })
+    }
+
+    /// Complete activation exactly once and leave the new account MFA-pending.
+    pub fn complete_account_activation(
+        &self,
+        challenge: &str,
+        password: &str,
+    ) -> Result<AccountSummary> {
+        require_password(password)?;
+        let password_hash = hash_password(password)?;
+        let challenge_hash = token_hash(challenge);
+        let now = Utc::now();
+        let mut state = self.state.write();
+        let challenge_record = state
+            .activation_challenges
+            .get(&challenge_hash)
+            .filter(|record| record.consumed_at.is_none() && record.expires_at > now)
+            .cloned()
+            .ok_or_else(activation_error)?;
+        let invitation = state
+            .invitations
+            .get(&challenge_record.invitation_id)
+            .filter(|invitation| {
+                invitation.consumed_at.is_none()
+                    && invitation.revoked_at.is_none()
+                    && invitation.expires_at > now
+                    && invitation.attempt_count <= ACTIVATION_MAX_ATTEMPTS
+            })
+            .cloned()
+            .ok_or_else(activation_error)?;
+        if state.accounts.contains_key(&invitation.canonical_login) {
+            return Err(activation_error());
+        }
+        for team_binding in &invitation.intended_bindings.teams {
+            let (organization, team) = split_team_binding(team_binding)?;
+            if !state
+                .teams
+                .contains_key(&(organization.to_string(), team.to_string()))
+            {
+                return Err(activation_error());
+            }
+        }
+        if invitation.bootstrap_owner
+            && (state.bootstrap_owner_consumed
+                || state
+                    .accounts
+                    .values()
+                    .any(|account| account.role == UserRole::Admin))
+        {
+            return Err(activation_error());
+        }
+        let previous = state.clone();
+        let account = UserAccount {
+            canonical_login: invitation.canonical_login.clone(),
+            display_name: invitation.display_name.clone(),
+            password_hash,
+            role: invitation.intended_bindings.role.clone(),
+            status: AccountStatus::PendingMfa,
+            auth_epoch: 0,
+            must_change_password: false,
+            created_at: now,
+            updated_at: now,
+        };
+        state
+            .activation_challenges
+            .get_mut(&challenge_hash)
+            .expect("challenge was validated under the same lock")
+            .consumed_at = Some(now);
+        state
+            .invitations
+            .get_mut(&invitation.id)
+            .expect("invitation was validated under the same lock")
+            .consumed_at = Some(now);
+        state
+            .users
+            .entry(account.canonical_login.clone())
+            .or_insert_with(|| User {
+                id: Uuid::new_v4(),
+                login: account.canonical_login.clone(),
+                name: Some(account.display_name.clone()),
+                email: None,
+                created_at: now,
+            });
+        for team_binding in &invitation.intended_bindings.teams {
+            let (organization, team) = split_team_binding(team_binding)?;
+            let members = &mut state
+                .teams
+                .get_mut(&(organization.to_string(), team.to_string()))
+                .expect("team binding was validated under the same lock")
+                .members;
+            if !members.contains(&account.canonical_login) {
+                members.push(account.canonical_login.clone());
+                members.sort();
+            }
+        }
+        if invitation.bootstrap_owner {
+            state.bootstrap_owner_consumed = true;
+        }
         state
             .accounts
-            .get(&token.login)
-            .cloned()
-            .map(AccountSummary::from)
+            .insert(account.canonical_login.clone(), account.clone());
+        self.persist_after_mutation(&mut state, previous)?;
+        Ok(account.into())
+    }
+
+    pub fn disable_account(&self, login: &str) -> Result<AccountSummary> {
+        self.transition_account_status(login, AccountStatus::Disabled, None)
+    }
+
+    pub fn lock_account(&self, login: &str) -> Result<AccountSummary> {
+        self.transition_account_status(login, AccountStatus::Locked, None)
+    }
+
+    /// Reactivation deliberately returns to MFA enrollment, never directly active.
+    pub fn reactivate_account(&self, login: &str) -> Result<AccountSummary> {
+        self.transition_account_status(
+            login,
+            AccountStatus::PendingMfa,
+            Some(&[AccountStatus::Disabled, AccountStatus::Locked]),
+        )
+    }
+
+    /// H3 calls this only after a successful first MFA enrollment.
+    pub fn mark_account_mfa_active(&self, login: &str) -> Result<AccountSummary> {
+        self.transition_account_status(
+            login,
+            AccountStatus::Active,
+            Some(&[AccountStatus::PendingMfa]),
+        )
+    }
+
+    #[must_use]
+    pub fn bootstrap_owner_consumed(&self) -> bool {
+        self.state.read().bootstrap_owner_consumed
+    }
+
+    fn transition_account_status(
+        &self,
+        login: &str,
+        status: AccountStatus,
+        allowed_current: Option<&[AccountStatus]>,
+    ) -> Result<AccountSummary> {
+        let mut state = self.state.write();
+        if !state.accounts.contains_key(login) {
+            return Err(ForgeError::NotFound(format!("account {login}")));
+        }
+        let previous = state.clone();
+        let account = state
+            .accounts
+            .get_mut(login)
+            .expect("presence checked above");
+        if let Some(allowed) = allowed_current
+            && !allowed.contains(&account.status)
+        {
+            return Err(ForgeError::Validation(match status {
+                AccountStatus::PendingMfa => {
+                    "only disabled or locked accounts may be reactivated".to_string()
+                }
+                AccountStatus::Active => "account is not pending MFA enrollment".to_string(),
+                _ => "account status transition is not allowed".to_string(),
+            }));
+        }
+        if account.status == status {
+            return Ok(account.clone().into());
+        }
+        account.status = status;
+        account.auth_epoch = next_auth_epoch(account.auth_epoch)?;
+        account.updated_at = Utc::now();
+        let updated = account.clone();
+        state.sessions.retain(|_, session| session.login != login);
+        state
+            .personal_tokens
+            .retain(|_, token| token.login != login);
+        self.persist_after_mutation(&mut state, previous)?;
+        Ok(updated.into())
+    }
+
+    fn require_active_account(&self, login: &str) -> Result<AccountSummary> {
+        let account = self.get_account(login)?;
+        if !account.status.permits_authentication() {
+            return Err(ForgeError::Validation("account is not active".to_string()));
+        }
+        Ok(account)
     }
 
     pub fn grant_repo_access(
@@ -426,11 +888,11 @@ impl ForgeCore {
 
     pub fn repo_access_for(&self, login: &str, owner: &str, repo: &str) -> Option<RepoAccessLevel> {
         let state = self.state.read();
-        if state
-            .accounts
-            .get(login)
-            .is_some_and(|account| account.role == UserRole::Admin)
-        {
+        let account = state.accounts.get(login)?;
+        if !account.status.permits_authentication() {
+            return None;
+        }
+        if account.role == UserRole::Admin {
             return Some(RepoAccessLevel::Admin);
         }
         state
@@ -457,15 +919,51 @@ impl ForgeCore {
 
 fn require_login(login: &str) -> Result<()> {
     require_name("login", login)?;
-    if !login
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    if login.trim() != login
+        || !login.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
     {
         return Err(ForgeError::Validation(
-            "login may contain only ASCII letters, numbers, hyphen, or underscore".to_string(),
+            "login must be canonical lowercase ASCII using letters, numbers, hyphen, or underscore"
+                .to_string(),
         ));
     }
     Ok(())
+}
+
+fn normalize_team_bindings(bindings: &[String]) -> Result<Vec<String>> {
+    let mut normalized = BTreeSet::new();
+    for binding in bindings {
+        let binding = binding.trim();
+        let (organization, team) = split_team_binding(binding)?;
+        require_login(organization)?;
+        require_login(team)?;
+        normalized.insert(format!("{organization}/{team}"));
+    }
+    Ok(normalized.into_iter().collect())
+}
+
+fn split_team_binding(binding: &str) -> Result<(&str, &str)> {
+    let (organization, team) = binding.split_once('/').ok_or_else(|| {
+        ForgeError::Validation("team binding must be canonical organization/team".to_string())
+    })?;
+    if organization.is_empty() || team.is_empty() || team.contains('/') {
+        return Err(ForgeError::Validation(
+            "team binding must be canonical organization/team".to_string(),
+        ));
+    }
+    Ok((organization, team))
+}
+
+fn activation_error() -> ForgeError {
+    ForgeError::Validation(ACTIVATION_ERROR.to_string())
+}
+
+fn next_auth_epoch(current: u64) -> Result<u64> {
+    current
+        .checked_add(1)
+        .ok_or_else(|| ForgeError::Storage("account auth epoch overflow".to_string()))
 }
 
 fn require_password(password: &str) -> Result<()> {
