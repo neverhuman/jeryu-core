@@ -11,6 +11,12 @@ import type { PullRequestSummary } from "./PullRequestSummary";
  */
 export type PullRequestDetail = { summary: PullRequestSummary, description: string | null, 
 /**
+ * Authoritative Git tree identities resolved by the repository manager.
+ * `None` means the transport could not resolve the object and must not
+ * infer a tree from a commit string.
+ */
+head_tree_sha: string | null, base_tree_sha: string | null, 
+/**
  * Complete review audit history. Only rows marked `effective` contribute
  * to the current-head posture; stale rows remain visible.
  */

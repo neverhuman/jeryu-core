@@ -159,6 +159,11 @@ pub struct PullRequestReview {
 pub struct PullRequestDetail {
     pub summary: PullRequestSummary,
     pub description: Option<String>,
+    /// Authoritative Git tree identities resolved by the repository manager.
+    /// `None` means the transport could not resolve the object and must not
+    /// infer a tree from a commit string.
+    pub head_tree_sha: Option<String>,
+    pub base_tree_sha: Option<String>,
     /// Complete review audit history. Only rows marked `effective` contribute
     /// to the current-head posture; stale rows remain visible.
     pub reviews: Vec<PullRequestReview>,
