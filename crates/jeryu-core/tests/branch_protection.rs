@@ -117,6 +117,7 @@ fn approve(core: &ForgeCore, number: u64, who: &str) {
             body: None,
             event: ReviewState::Approved,
             comments: vec![],
+            expected_head_sha: None,
         },
     )
     .unwrap();
@@ -266,6 +267,7 @@ fn partial_approvals_reported_in_blocker_counts() {
                 body: None,
                 event: ReviewState::Approved,
                 comments: vec![],
+                expected_head_sha: None,
             },
         )
         .unwrap();

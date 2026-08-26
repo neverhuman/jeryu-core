@@ -223,3 +223,30 @@ Rollback/backfill:
   verified pre-0010 copy, and verify its refs and metadata before restarting;
   do not drop invitation or bootstrap tables in place because that could
   re-enable consumed bootstrap authority or lose revocation evidence.
+
+## 0011 Review exact-head binding
+
+The eleventh migration adds nullable `reviews.head_sha` so review audit history
+is distinct from current-head merge authority.
+
+Constraint policy:
+- Existing rows remain `NULL`; they are retained as audit history but are stale
+  for every current pull-request head.
+- Every newly created review captures the pull request's exact head while Core
+  holds the state write lock. HTTP callers also supply that head as an
+  optimistic-concurrency guard, and a moved head rejects the review.
+- At most one review per reviewer is effective: the latest non-dismissed row at
+  the current head. A later approval supersedes that reviewer's earlier changes
+  request at the same head; another reviewer's current changes request remains a
+  merge blocker.
+- Head movement invalidates approvals and changes requests without deleting or
+  rewriting any review row.
+
+Rollback/backfill:
+- Before applying 0011 to a populated store, hold the application migration lock
+  and retain a verified `VACUUM INTO` copy.
+- There is deliberately no backfill. Inferring historical review heads would
+  turn unauditable guesses into merge authority.
+- The additive column remains during an application rollback. If schema removal
+  is unavoidable, restore the verified pre-0011 copy rather than rebuilding the
+  live reviews table in place.

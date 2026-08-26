@@ -36,8 +36,15 @@ const MIGRATION_0009: &str =
     include_str!("../../../../../db/migrations/0009_repository_transfers.sql");
 const MIGRATION_0010: &str =
     include_str!("../../../../../db/migrations/0010_account_lifecycle.sql");
+const MIGRATION_0011: &str = include_str!("../../../../../db/migrations/0011_review_head_sha.sql");
 
 pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
+    apply_migrations_through_0010(conn)?;
+    apply_migration_0011(conn)?;
+    Ok(())
+}
+
+fn apply_migrations_through_0010(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_0001).map_err(storage_error)?;
     conn.execute_batch(MIGRATION_0002).map_err(storage_error)?;
     conn.execute_batch(MIGRATION_0003).map_err(storage_error)?;
@@ -134,6 +141,10 @@ fn apply_migration_0010(conn: &Connection) -> Result<()> {
     )?;
     conn.execute_batch(MIGRATION_0010).map_err(storage_error)?;
     Ok(())
+}
+
+fn apply_migration_0011(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "reviews", "head_sha", MIGRATION_0011)
 }
 
 fn add_column_if_missing(
@@ -246,6 +257,74 @@ mod tests {
         conn.execute_batch(MIGRATION_0003).expect("0003");
         apply_migration_0004(&conn).expect("0004");
         conn
+    }
+
+    #[test]
+    fn migration_0011_preserves_historical_reviews_as_stale() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        apply_migrations_through_0010(&conn).expect("migrate through 0010");
+        assert!(!column_exists(&conn, "reviews", "head_sha").expect("inspect old shape"));
+        conn.execute_batch(
+            r#"
+            INSERT INTO repositories (
+              id, owner, name, full_name, private, default_branch, created_at, updated_at
+            ) VALUES (
+              '00000000-0000-0000-0000-000000000001', 'alice', 'demo', 'alice/demo', 1, 'main',
+              '2026-08-26T00:00:00Z', '2026-08-26T00:00:00Z'
+            );
+            INSERT INTO issues (
+              id, repo_id, number, title, state, author, created_at, updated_at
+            ) VALUES (
+              '00000000-0000-0000-0000-000000000002',
+              '00000000-0000-0000-0000-000000000001',
+              1, 'change', 'open', 'author',
+              '2026-08-26T00:00:00Z', '2026-08-26T00:00:00Z'
+            );
+            INSERT INTO pull_requests (
+              id, repo_id, number, issue_number, title, state, draft, author,
+              head_json, base_json, mergeable, mergeable_state, merged,
+              created_at, updated_at
+            ) VALUES (
+              '00000000-0000-0000-0000-000000000003',
+              '00000000-0000-0000-0000-000000000001',
+              1, 1, 'change', 'open', 0, 'author',
+              '{"label":"feature","ref":"feature","sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}',
+              '{"label":"main","ref":"main","sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}',
+              0, 'blocked', 0, '2026-08-26T00:00:00Z', '2026-08-26T00:00:00Z'
+            );
+            INSERT INTO reviews (
+              id, repo_id, pull_number, author, state, submitted_at
+            ) VALUES (
+              '00000000-0000-0000-0000-000000000004',
+              '00000000-0000-0000-0000-000000000001',
+              1, 'reviewer', 'APPROVED',
+              '2026-08-26T00:00:00Z'
+            );
+            "#,
+        )
+        .expect("insert production-shape historical review");
+
+        apply_migration_0011(&conn).expect("apply 0011");
+        apply_migration_0011(&conn).expect("reapply 0011");
+        let head_sha: Option<String> = conn
+            .query_row(
+                "SELECT head_sha FROM reviews WHERE id = '00000000-0000-0000-0000-000000000004'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated review");
+        assert_eq!(head_sha, None);
+        let state = super::super::load_state(&conn).expect("load migrated production shape");
+        let reviews = state
+            .reviews
+            .get(&("alice".to_string(), "demo".to_string(), 1))
+            .expect("historical review retained");
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].head_sha, None);
+        assert!(
+            crate::effective_reviews_for_head(reviews, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .is_empty()
+        );
     }
 
     fn insert_repo(conn: &Connection, id: &str, name: &str, description: Option<&str>) {

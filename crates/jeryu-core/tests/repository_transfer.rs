@@ -136,6 +136,7 @@ fn seed_full_repo(core: &ForgeCore) -> uuid::Uuid {
                 line: Some(1),
                 body: "preserve".to_string(),
             }],
+            expected_head_sha: None,
         },
     )
     .unwrap();

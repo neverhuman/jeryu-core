@@ -28,8 +28,8 @@ pub use action::AvailableAction;
 pub use entity::EntityHandle;
 pub use pulls::{
     AgentPosture, CheckPosture, IssueState, IssueSummary, MergePassport, MergePassportBlocker,
-    MergePassportStatus, Mergeability, PullRequestDetail, PullRequestState, PullRequestSummary,
-    ReviewPosture,
+    MergePassportStatus, Mergeability, PullRequestDetail, PullRequestReview, PullRequestState,
+    PullRequestSummary, ReviewPosture,
 };
 pub use repository::{
     CreateRepositoryPreview, CreateRepositoryRequest, DeleteRepositoryReceipt,
@@ -134,6 +134,7 @@ contract_exports!(
     Mergeability,
     NotificationSettings,
     PullRequestDetail,
+    PullRequestReview,
     PullRequestState,
     PullRequestSummary,
     RefKind,

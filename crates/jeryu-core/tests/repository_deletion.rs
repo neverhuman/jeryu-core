@@ -144,6 +144,7 @@ fn seed_full_repo(core: &ForgeCore, owner: &str, repo: &str) -> String {
                 line: Some(1),
                 body: "nice".to_string(),
             }],
+            expected_head_sha: None,
         },
     )
     .unwrap();

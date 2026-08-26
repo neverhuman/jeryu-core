@@ -2,9 +2,11 @@
 
 mod codeowners;
 mod evaluate;
+mod reviews;
 mod types;
 
 pub use evaluate::{evaluate_branch_protection_with, evaluate_ref_operation};
+pub use reviews::effective_reviews_for_head;
 pub use types::{
     BranchProtectionEvaluation, EvaluationContext, MergeBlocker, RefOperation, RefOperationBlocker,
     RefOperationEvaluation,

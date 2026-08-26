@@ -21,14 +21,26 @@ impl ForgeCore {
         self.ensure_user(author);
         let mut state = self.state.write();
         let previous = state.clone();
-        if !state
-            .pulls
-            .contains_key(&(owner.to_string(), repo.to_string(), number))
-        {
-            return Err(ForgeError::NotFound(format!(
-                "pull request {owner}/{repo}#{number}"
-            )));
-        }
+        let key = (owner.to_string(), repo.to_string(), number);
+        let head_sha = match state.pulls.get(&key) {
+            Some(pr) => {
+                if request
+                    .expected_head_sha
+                    .as_deref()
+                    .is_some_and(|expected| expected != pr.head.sha)
+                {
+                    return Err(ForgeError::Conflict(format!(
+                        "pull request {owner}/{repo}#{number} head changed"
+                    )));
+                }
+                pr.head.sha.clone()
+            }
+            None => {
+                return Err(ForgeError::NotFound(format!(
+                    "pull request {owner}/{repo}#{number}"
+                )));
+            }
+        };
         let review_id = Uuid::new_v4();
         let review = Review {
             id: review_id,
@@ -38,6 +50,7 @@ impl ForgeCore {
             author: author.to_string(),
             state: request.event,
             body: request.body,
+            head_sha: Some(head_sha),
             submitted_at: Utc::now(),
         };
         let comments: Vec<_> = request

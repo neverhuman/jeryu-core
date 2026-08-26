@@ -8,7 +8,7 @@ use jeryu_core::{
     CreateOrganizationRequest, CreatePullRequestRequest, CreateRepositoryRequest,
     CreateReviewRequest, CreateTeamRequest, CreateUserRequest, CreateWebhookRequest, ForgeCore,
     ForgeError, PullRequestCommit, RepoAccessLevel, ReviewCommentInput, ReviewState,
-    SetBranchProtectionRequest, UserRole, WebhookConfig,
+    SetBranchProtectionRequest, UserRole, WebhookConfig, effective_reviews_for_head,
 };
 use rusqlite::Connection;
 
@@ -367,6 +367,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
                     line: Some(7),
                     body: "nice".to_string(),
                 }],
+                expected_head_sha: None,
             },
         )
         .unwrap();
@@ -456,6 +457,14 @@ fn sqlite_store_round_trips_core_forge_resources() {
         )
         .unwrap();
     assert!(issue_pull_request_json.is_none());
+    let stored_review_head: Option<String> = raw
+        .query_row(
+            "SELECT head_sha FROM reviews WHERE pull_number = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_review_head.as_deref(), Some("abc123"));
 
     let reopened = ForgeCore::open_sqlite(&db).unwrap();
     assert_eq!(
@@ -490,7 +499,9 @@ fn sqlite_store_round_trips_core_forge_resources() {
             .source_repository,
         "fork-owner/jeryu"
     );
-    assert_eq!(reopened.list_reviews("alice", "jeryu", 1).unwrap().len(), 1);
+    let reopened_reviews = reopened.list_reviews("alice", "jeryu", 1).unwrap();
+    assert_eq!(reopened_reviews.len(), 1);
+    assert_eq!(reopened_reviews[0].head_sha.as_deref(), Some("abc123"));
     assert_eq!(
         reopened.list_review_comments("alice", "jeryu", 1).unwrap()[0].path,
         "src/lib.rs"
@@ -568,6 +579,83 @@ fn sqlite_store_round_trips_core_forge_resources() {
         .unwrap();
     assert_eq!(next_pr.number, 2);
     assert_eq!(next_pr.source_repository, "fork-owner/jeryu");
+}
+
+#[test]
+fn review_head_and_latest_reviewer_state_survive_sqlite_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("forge.sqlite");
+    let number;
+    {
+        let core = ForgeCore::open_sqlite(&db).unwrap();
+        core.create_repository(
+            "alice",
+            CreateRepositoryRequest {
+                name: "demo".to_string(),
+                default_branch: Some("main".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        core.set_branch_protection(
+            "alice",
+            "demo",
+            "main",
+            SetBranchProtectionRequest {
+                required_approving_review_count: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        number = core
+            .create_pull_request(
+                "alice",
+                "demo",
+                "author",
+                CreatePullRequestRequest {
+                    title: "change".to_string(),
+                    head: "feature".to_string(),
+                    base: "main".to_string(),
+                    head_sha: Some("exact-head".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .number;
+        for event in [ReviewState::ChangesRequested, ReviewState::Approved] {
+            core.create_review(
+                "alice",
+                "demo",
+                number,
+                "reviewer",
+                CreateReviewRequest {
+                    body: None,
+                    event,
+                    comments: vec![],
+                    expected_head_sha: Some("exact-head".to_string()),
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    let reopened = ForgeCore::open_sqlite(&db).unwrap();
+    let reviews = reopened.list_reviews("alice", "demo", number).unwrap();
+    assert_eq!(reviews.len(), 2);
+    assert!(
+        reviews
+            .iter()
+            .all(|review| review.head_sha.as_deref() == Some("exact-head"))
+    );
+    let effective = effective_reviews_for_head(&reviews, "exact-head");
+    assert_eq!(effective.len(), 1);
+    assert_eq!(effective[0].state, ReviewState::Approved);
+    assert!(
+        reopened
+            .get_pull_request("alice", "demo", number)
+            .unwrap()
+            .mergeable
+    );
 }
 
 #[test]

@@ -6,6 +6,7 @@ use crate::model::{
 };
 
 use super::codeowners::CodeOwners;
+use super::reviews::effective_reviews_for_head;
 use super::types::{
     BranchProtectionEvaluation, EvaluationContext, MergeBlocker, RefOperation, RefOperationBlocker,
     RefOperationEvaluation,
@@ -22,6 +23,7 @@ pub fn evaluate_branch_protection_with(
     context: EvaluationContext<'_>,
 ) -> BranchProtectionEvaluation {
     let mut blockers = Vec::new();
+    let effective_reviews = effective_reviews_for_head(reviews, &pr.head.sha);
 
     // Intrinsic gates apply regardless of any protection rule (and even to
     // admins): a drifted SHA and a draft PR are never mergeable on GitHub.
@@ -36,6 +38,17 @@ pub fn evaluate_branch_protection_with(
 
     if pr.draft {
         blockers.push(MergeBlocker::DraftPullRequest);
+    }
+
+    let changes_requested = effective_reviews
+        .iter()
+        .filter(|review| review.state == ReviewState::ChangesRequested)
+        .map(|review| review.author.clone())
+        .collect::<Vec<_>>();
+    if !changes_requested.is_empty() {
+        blockers.push(MergeBlocker::ChangesRequested {
+            reviewers: changes_requested,
+        });
     }
 
     // Intrinsic jankurai-proof gate: when jeryu enforces scoring family-wide, a
@@ -65,7 +78,7 @@ pub fn evaluate_branch_protection_with(
     }
 
     if rule.required_approving_review_count > 0 {
-        let approved = reviews
+        let approved = effective_reviews
             .iter()
             .filter(|review| review.state == ReviewState::Approved)
             .count() as u64;
@@ -122,7 +135,7 @@ pub fn evaluate_branch_protection_with(
 
     if let Some(codeowners) = context.codeowners {
         let owners = CodeOwners::parse(codeowners);
-        let approvers: std::collections::BTreeSet<&str> = reviews
+        let approvers: std::collections::BTreeSet<&str> = effective_reviews
             .iter()
             .filter(|review| review.state == ReviewState::Approved)
             .map(|review| review.author.as_str())

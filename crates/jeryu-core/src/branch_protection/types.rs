@@ -7,6 +7,9 @@ pub enum MergeBlocker {
         required: u64,
         approved: u64,
     },
+    ChangesRequested {
+        reviewers: Vec<String>,
+    },
     MissingStatusCheck {
         context: String,
     },

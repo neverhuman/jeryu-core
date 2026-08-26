@@ -136,6 +136,20 @@ pub struct PullRequestSummary {
     pub available_actions: Vec<AvailableAction>,
 }
 
+/// One immutable review audit row annotated for the PR's current head.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PullRequestReview {
+    pub id: String,
+    pub author: String,
+    pub state: String,
+    pub body_markdown: Option<String>,
+    pub submitted_at: String,
+    pub head_sha: Option<String>,
+    pub effective: bool,
+    pub stale: bool,
+}
+
 /// Full PR view returned by `GET /api/v1/repos/{repo_id}/pulls/{number}`.
 ///
 /// Carries the same posture summary fields plus the Merge Passport verdict
@@ -145,6 +159,9 @@ pub struct PullRequestSummary {
 pub struct PullRequestDetail {
     pub summary: PullRequestSummary,
     pub description: Option<String>,
+    /// Complete review audit history. Only rows marked `effective` contribute
+    /// to the current-head posture; stale rows remain visible.
+    pub reviews: Vec<PullRequestReview>,
     pub merge_passport: MergePassport,
     /// `passport_hash` mirrors `summary.passport_hash` for ergonomics so the
     /// UI doesn't need to dive into `summary` to display the verdict identity.

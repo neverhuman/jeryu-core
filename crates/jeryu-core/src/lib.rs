@@ -19,7 +19,7 @@ mod webhooks;
 
 pub use crate::branch_protection::{
     BranchProtectionEvaluation, EvaluationContext, MergeBlocker, RefOperation, RefOperationBlocker,
-    RefOperationEvaluation,
+    RefOperationEvaluation, effective_reviews_for_head,
 };
 pub use crate::core::{
     AuditEntry, ForgeCore, MergeReadiness, RepoMaterializer, RepositoryDeletion,

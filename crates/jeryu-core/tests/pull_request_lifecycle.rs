@@ -87,6 +87,7 @@ fn approve(core: &ForgeCore, number: u64, who: &str) {
             body: None,
             event: ReviewState::Approved,
             comments: vec![],
+            expected_head_sha: None,
         },
     )
     .unwrap();
@@ -429,6 +430,7 @@ fn changes_requested_review_does_not_count_as_approval() {
             body: Some("please fix".to_string()),
             event: ReviewState::ChangesRequested,
             comments: vec![],
+            expected_head_sha: None,
         },
     )
     .unwrap();
@@ -437,6 +439,166 @@ fn changes_requested_review_does_not_count_as_approval() {
     assert!(
         !pr.mergeable,
         "changes-requested must not satisfy review gate"
+    );
+}
+
+#[test]
+fn latest_current_head_review_per_reviewer_controls_mergeability() {
+    let core = core_with_repo();
+    protect_main(&core, 1, &[]);
+    let number = open_pr(&core, "abc", false);
+
+    core.create_review(
+        "alice",
+        "jeryu",
+        number,
+        "reviewer",
+        CreateReviewRequest {
+            body: Some("please fix".to_string()),
+            event: ReviewState::ChangesRequested,
+            comments: vec![],
+            expected_head_sha: Some("abc".to_string()),
+        },
+    )
+    .unwrap();
+    let requested = core
+        .evaluate_pull_request("alice", "jeryu", number, Some("abc"))
+        .unwrap();
+    assert!(requested.blockers.iter().any(|blocker| matches!(
+        blocker,
+        MergeBlocker::ChangesRequested { reviewers } if reviewers == &["reviewer"]
+    )));
+
+    core.create_review(
+        "alice",
+        "jeryu",
+        number,
+        "reviewer",
+        CreateReviewRequest {
+            body: Some("fixed".to_string()),
+            event: ReviewState::Approved,
+            comments: vec![],
+            expected_head_sha: Some("abc".to_string()),
+        },
+    )
+    .unwrap();
+    assert!(
+        core.evaluate_pull_request("alice", "jeryu", number, Some("abc"))
+            .unwrap()
+            .mergeable,
+        "a later same-reviewer approval must supersede changes requested"
+    );
+
+    core.create_review(
+        "alice",
+        "jeryu",
+        number,
+        "second-reviewer",
+        CreateReviewRequest {
+            body: Some("separate blocker".to_string()),
+            event: ReviewState::ChangesRequested,
+            comments: vec![],
+            expected_head_sha: Some("abc".to_string()),
+        },
+    )
+    .unwrap();
+    let blocked = core
+        .evaluate_pull_request("alice", "jeryu", number, Some("abc"))
+        .unwrap();
+    assert!(blocked.blockers.iter().any(|blocker| matches!(
+        blocker,
+        MergeBlocker::ChangesRequested { reviewers } if reviewers == &["second-reviewer"]
+    )));
+}
+
+#[test]
+fn head_movement_stales_approvals_and_changes_requests_but_retains_history() {
+    let core = core_with_repo();
+    protect_main(&core, 1, &[]);
+    let number = open_pr(&core, "abc", false);
+    approve(&core, number, "reviewer");
+    assert!(
+        core.evaluate_pull_request("alice", "jeryu", number, Some("abc"))
+            .unwrap()
+            .mergeable
+    );
+
+    core.refresh_pull_request_heads_for_ref("alice", "jeryu", "feature", "def")
+        .unwrap();
+    let moved = core
+        .evaluate_pull_request("alice", "jeryu", number, Some("def"))
+        .unwrap();
+    assert!(
+        moved
+            .blockers
+            .iter()
+            .any(|blocker| matches!(blocker, MergeBlocker::MissingReview { approved: 0, .. }))
+    );
+
+    core.create_review(
+        "alice",
+        "jeryu",
+        number,
+        "reviewer",
+        CreateReviewRequest {
+            body: Some("new-head blocker".to_string()),
+            event: ReviewState::ChangesRequested,
+            comments: vec![],
+            expected_head_sha: Some("def".to_string()),
+        },
+    )
+    .unwrap();
+    let requested = core
+        .evaluate_pull_request("alice", "jeryu", number, Some("def"))
+        .unwrap();
+    assert!(requested.blockers.iter().any(|blocker| matches!(
+        blocker,
+        MergeBlocker::ChangesRequested { reviewers } if reviewers == &["reviewer"]
+    )));
+
+    core.refresh_pull_request_heads_for_ref("alice", "jeryu", "feature", "ghi")
+        .unwrap();
+    let moved_again = core
+        .evaluate_pull_request("alice", "jeryu", number, Some("ghi"))
+        .unwrap();
+    assert!(
+        !moved_again
+            .blockers
+            .iter()
+            .any(|blocker| matches!(blocker, MergeBlocker::ChangesRequested { .. }))
+    );
+    let history = core.list_reviews("alice", "jeryu", number).unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].head_sha.as_deref(), Some("abc"));
+    assert_eq!(history[1].head_sha.as_deref(), Some("def"));
+}
+
+#[test]
+fn stale_expected_head_is_rejected_inside_review_write_lock() {
+    let core = core_with_repo();
+    let number = open_pr(&core, "abc", false);
+    core.refresh_pull_request_heads_for_ref("alice", "jeryu", "feature", "def")
+        .unwrap();
+
+    let error = core
+        .create_review(
+            "alice",
+            "jeryu",
+            number,
+            "reviewer",
+            CreateReviewRequest {
+                body: None,
+                event: ReviewState::Approved,
+                comments: vec![],
+                expected_head_sha: Some("abc".to_string()),
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, ForgeError::Conflict(_)));
+    assert!(
+        core.list_reviews("alice", "jeryu", number)
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -703,6 +865,7 @@ fn review_with_inline_comments_is_recorded_and_associated() {
                         body: "thanks".to_string(),
                     },
                 ],
+                expected_head_sha: None,
             },
         )
         .unwrap();
@@ -735,6 +898,7 @@ fn review_on_unknown_pr_is_not_found() {
                 body: None,
                 event: ReviewState::Approved,
                 comments: vec![],
+                expected_head_sha: None,
             },
         )
         .unwrap_err();

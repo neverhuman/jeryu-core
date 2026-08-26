@@ -116,6 +116,7 @@ fn branch_protection_blocks_merge_until_review_and_status_pass() {
             body: None,
             event: ReviewState::Approved,
             comments: Vec::new(),
+            expected_head_sha: None,
         },
     )
     .unwrap();

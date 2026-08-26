@@ -158,6 +158,11 @@ pub struct Review {
     pub author: String,
     pub state: ReviewState,
     pub body: Option<String>,
+    /// Exact pull-request head observed while this review was created.
+    /// Historical rows migrated from the pre-0011 schema remain `None` and
+    /// are audit history only; they never satisfy current-head protection.
+    #[serde(default)]
+    pub head_sha: Option<String>,
     pub submitted_at: DateTime<Utc>,
 }
 
@@ -190,6 +195,10 @@ pub struct CreateReviewRequest {
     pub event: ReviewState,
     #[serde(default)]
     pub comments: Vec<ReviewCommentInput>,
+    /// Optional optimistic-concurrency guard checked while Core holds the
+    /// state write lock. HTTP callers set this from their exact-head request.
+    #[serde(default)]
+    pub expected_head_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
