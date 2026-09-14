@@ -19,3 +19,7 @@ artifact-support:
 
 profile:
   printf '%s\n' "rust-workspace"
+
+# Entry point for the protected jeryu-core/required check: the existing lane, unchanged.
+required:
+  bash ops/ci/pr-ci.sh
