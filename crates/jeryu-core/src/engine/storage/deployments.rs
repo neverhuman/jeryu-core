@@ -1,4 +1,4 @@
-//! Durable deployment history: one append per write, outside the full-state
+//! Durable deployment history: atomic append batches outside the full-state
 //! rewrite.
 //!
 //! `SqliteStore::persist` deletes and reinserts every state table on each
@@ -42,36 +42,43 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub(in super::super) fn append_deployment_status(
+    pub(in super::super) fn append_deployment_statuses(
         &self,
-        status: &DeploymentStatus,
+        statuses: &[DeploymentStatus],
     ) -> Result<()> {
-        let conn = self.connect()?;
-        conn.execute(
-            r#"
-            INSERT INTO deployment_statuses (id, deployment_id, state, status_json, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)
-            "#,
-            params![
-                status.id,
-                status.deployment_id,
-                status.state.as_str(),
-                json(status)?,
-                time(status.created_at),
-            ],
-        )
-        .map_err(storage_error)?;
+        let mut conn = self.connect()?;
+        let transaction = conn.transaction().map_err(storage_error)?;
+        for status in statuses {
+            transaction
+                .execute(
+                    r#"
+                INSERT INTO deployment_statuses (id, deployment_id, state, status_json, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+                    params![
+                        status.id,
+                        status.deployment_id,
+                        status.state.as_str(),
+                        json(status)?,
+                        time(status.created_at)
+                    ],
+                )
+                .map_err(storage_error)?;
+        }
+        transaction.commit().map_err(storage_error)?;
         Ok(())
     }
 }
 
 pub(super) fn load_deployments(conn: &Connection, state: &mut State) -> Result<()> {
     let mut stmt = conn
-        .prepare("SELECT deployment_json FROM deployments ORDER BY id")
+        .prepare("SELECT repo_id, deployment_json FROM deployments ORDER BY id")
         .map_err(storage_error)?;
     let mut rows = stmt.query([]).map_err(storage_error)?;
     while let Some(row) = rows.next().map_err(storage_error)? {
-        let deployment: Deployment = parse_json(row.get(0).map_err(storage_error)?)?;
+        let mut deployment: Deployment = parse_json(row.get(1).map_err(storage_error)?)?;
+        let repository_id: String = row.get(0).map_err(storage_error)?;
+        deployment.repository_id = uuid::Uuid::parse_str(&repository_id).map_err(storage_error)?;
         state.deployments.insert(deployment.id, deployment);
     }
 

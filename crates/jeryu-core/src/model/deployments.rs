@@ -9,6 +9,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 /// GitHub's deployment status states, in wire spelling.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -42,6 +43,9 @@ impl DeploymentState {
 pub struct Deployment {
     /// Forge-wide, monotonically increasing (GitHub deployment ids are integers).
     pub id: u64,
+    /// Immutable repository identity; restored from SQL for earlier stored rows.
+    #[serde(default)]
+    pub repository_id: Uuid,
     pub owner: String,
     pub repo: String,
     /// The exact 40-hex commit deployed.
@@ -127,7 +131,7 @@ pub struct EnvironmentSummary {
     pub environment: String,
     /// The newest deployment of the environment, whatever its outcome.
     pub latest: Option<DeploymentWithStatus>,
-    /// The newest deployment that reached `success`: what is live.
+    /// The deployment with the newest still-effective success: what is live.
     pub current: Option<DeploymentWithStatus>,
     /// The successful deployment `current` replaced: the rollback target.
     pub previous: Option<DeploymentWithStatus>,

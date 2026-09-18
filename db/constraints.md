@@ -265,7 +265,7 @@ Constraint policy:
   erase the whole history on any forge write. Rows carry the repository's stable
   id plus a denormalized owner/name, like `forge_audit_log` (0006).
 - Neither table is in `delete_all` or `persist_state`; writes go through
-  `append_deployment` / `append_deployment_status` and reads are loaded on open.
+  `append_deployment` / `append_deployment_statuses` and reads are loaded on open.
 - `sha` is a full 40-character lowercase hex id; `state` is one of GitHub's
   seven deployment states.
 
@@ -273,3 +273,14 @@ Rollback/backfill:
 - No backfill; both tables start empty.
 - `db/rollbacks/0012_deployments.sql` drops them. Deploy history is not
   re-derivable, so keep the pre-apply `.backup` snapshot.
+
+Deployment read identity and transition invariants:
+- Read and status-write scopes use immutable repository IDs. Recreating a deleted
+  namespace never grants access to that prior repository’s retained history.
+  Repository lookup and history access share the same state lock, so a concurrent
+  namespace replacement cannot split identity validation from the operation.
+- Existing deployment JSON is rebound to the stored SQL repo_id when loaded.
+- A success and all its auto-inactive rows commit in one SQLite transaction before
+  memory changes. Any failed row rolls the entire transition back.
+- Current environment state requires an effective success. Historical successes
+  remain available as rollback candidates after inactivation.

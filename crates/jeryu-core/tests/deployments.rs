@@ -403,3 +403,168 @@ fn sqlite_store_keeps_deployments_across_unrelated_writes() {
     let third = deploy(&reopened, SHA_C, "production");
     assert_eq!(third, second + 1, "ids continue after a reopen");
 }
+#[test]
+fn inactive_deployment_is_not_current_live() {
+    let core = core_with_repo();
+    let id = deploy(&core, SHA_A, "production");
+    set_state(&core, id, DeploymentState::Success);
+    set_state(&core, id, DeploymentState::Inactive);
+    let environments = core.deployment_environments("alice", "jeryu").unwrap();
+    assert!(
+        environments[0].current.is_none(),
+        "inactive history must not be reported as live: {:?}",
+        environments[0].current
+    );
+}
+
+#[test]
+fn recreated_repository_cannot_read_prior_identity_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("forge.sqlite");
+    let id;
+    {
+        let core = ForgeCore::open_sqlite(&database).unwrap();
+        seed(&core);
+        let previous = core.get_repository("alice", "jeryu").unwrap().id;
+        id = deploy(&core, SHA_A, "production");
+        set_state(&core, id, DeploymentState::Success);
+        core.delete_repository("alice", "jeryu").unwrap();
+        let replacement = core
+            .create_repository(
+                "alice",
+                CreateRepositoryRequest {
+                    name: "jeryu".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_ne!(previous, replacement.id);
+    }
+    let core = ForgeCore::open_sqlite(&database).unwrap();
+    assert!(
+        core.get_deployment("alice", "jeryu", id).is_err(),
+        "new repository identity inherited deleted repository's deployment payload"
+    );
+    assert!(
+        core.list_deployments("alice", "jeryu", &DeploymentFilter::default())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(core.list_deployment_statuses("alice", "jeryu", id).is_err());
+    assert!(
+        core.deployment_environments("alice", "jeryu")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        core.create_deployment_status(
+            "alice",
+            "jeryu",
+            id,
+            "deployer",
+            CreateDeploymentStatusRequest {
+                state: DeploymentState::Failure,
+                description: None,
+                environment_url: None,
+                log_url: None,
+                auto_inactive: true,
+            }
+        )
+        .is_err()
+    );
+    let new = deploy(&core, SHA_B, "production");
+    set_state(&core, new, DeploymentState::Success);
+    let conn = rusqlite::Connection::open(&database).unwrap();
+    let retained: String = conn.query_row("SELECT state FROM deployment_statuses WHERE deployment_id = ?1 ORDER BY id DESC LIMIT 1", [id], |row| row.get(0)).unwrap();
+    assert_eq!(
+        retained, "success",
+        "replacement repository must not mutate preserved history"
+    );
+}
+
+#[test]
+fn failed_auto_inactive_is_atomic_after_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("forge.sqlite");
+    let (old, new);
+    {
+        let core = ForgeCore::open_sqlite(&database).unwrap();
+        seed(&core);
+        old = deploy(&core, SHA_A, "production");
+        set_state(&core, old, DeploymentState::Success);
+        new = deploy(&core, SHA_B, "production");
+        rusqlite::Connection::open(&database).unwrap().execute_batch(
+            "CREATE TRIGGER review_fail_inactive BEFORE INSERT ON deployment_statuses WHEN NEW.state = 'inactive' BEGIN SELECT RAISE(ABORT, 'fixture storage refusal'); END;"
+        ).unwrap();
+        let result = core.create_deployment_status(
+            "alice",
+            "jeryu",
+            new,
+            "deployer",
+            CreateDeploymentStatusRequest {
+                state: DeploymentState::Success,
+                description: None,
+                environment_url: None,
+                log_url: None,
+                auto_inactive: true,
+            },
+        );
+        assert!(result.is_err(), "fixture must exercise storage failure");
+        assert!(
+            states(&core, new).is_empty(),
+            "failed transition changed memory"
+        );
+        assert_eq!(states(&core, old), vec![DeploymentState::Success]);
+    }
+    let core = ForgeCore::open_sqlite(&database).unwrap();
+    assert_eq!(states(&core, old), vec![DeploymentState::Success]);
+    assert!(
+        states(&core, new).is_empty(),
+        "failed operation left durable success after restart: {:?}",
+        states(&core, new)
+    );
+}
+
+#[test]
+fn reactivation_of_earlier_deployment_becomes_current() {
+    let core = core_with_repo();
+    let first = deploy(&core, SHA_A, "production");
+    set_state(&core, first, DeploymentState::Success);
+    let second = deploy(&core, SHA_B, "production");
+    set_state(&core, second, DeploymentState::Success);
+    set_state(&core, first, DeploymentState::Success);
+    assert_eq!(states(&core, second)[0], DeploymentState::Inactive);
+    let environments = core.deployment_environments("alice", "jeryu").unwrap();
+    assert_eq!(
+        environments[0].current.as_ref().unwrap().deployment.id,
+        first
+    );
+    assert_eq!(
+        environments[0].previous.as_ref().unwrap().deployment.id,
+        second
+    );
+}
+
+#[test]
+fn repository_identity_backfills_from_durable_column() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("forge.sqlite");
+    let (deployment_id, repository_id) = {
+        let core = ForgeCore::open_sqlite(&database).unwrap();
+        seed(&core);
+        (
+            deploy(&core, SHA_A, "production"),
+            core.get_repository("alice", "jeryu").unwrap().id,
+        )
+    };
+    rusqlite::Connection::open(&database).unwrap().execute_batch(
+        "UPDATE deployments SET deployment_json = json_remove(deployment_json, '$.repository_id');"
+    ).unwrap();
+    let core = ForgeCore::open_sqlite(&database).unwrap();
+    assert_eq!(
+        core.get_deployment("alice", "jeryu", deployment_id)
+            .unwrap()
+            .repository_id,
+        repository_id
+    );
+}
