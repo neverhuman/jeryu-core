@@ -1,5 +1,7 @@
 //! Commit statuses and combined status rollups.
 
+use std::collections::BTreeMap;
+
 use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
@@ -66,19 +68,29 @@ impl ForgeCore {
             Some(statuses) => statuses.clone(),
             None => Vec::new(),
         };
-        let state = if statuses
-            .iter()
+        // Keep the append-only history in the response, but aggregate one current
+        // row per context, just as branch protection does. Equal timestamps pick
+        // the later appended row; SQLite restores this order using cs.rowid.
+        let mut current = BTreeMap::<&str, &CommitStatus>::new();
+        for status in &statuses {
+            let entry = current.entry(&status.context).or_insert(status);
+            if status.updated_at >= entry.updated_at {
+                *entry = status;
+            }
+        }
+        let state = if current
+            .values()
             .any(|status| status.state == CommitStatusState::Error)
         {
             CommitStatusState::Error
-        } else if statuses
-            .iter()
+        } else if current
+            .values()
             .any(|status| status.state == CommitStatusState::Failure)
         {
             CommitStatusState::Failure
-        } else if statuses.is_empty()
-            || statuses
-                .iter()
+        } else if current.is_empty()
+            || current
+                .values()
                 .any(|status| status.state == CommitStatusState::Pending)
         {
             CommitStatusState::Pending

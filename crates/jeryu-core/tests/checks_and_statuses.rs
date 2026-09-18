@@ -337,3 +337,150 @@ fn app_installations_is_empty_by_default() {
     assert_eq!(list.total_count, 0);
     assert!(list.installations.is_empty());
 }
+
+#[test]
+fn combined_status_recovers_without_discarding_history() {
+    let core = core_with_repo();
+    for state in [
+        CommitStatusState::Pending,
+        CommitStatusState::Failure,
+        CommitStatusState::Error,
+        CommitStatusState::Success,
+    ] {
+        status(&core, "abc", "ci/a", state.clone());
+        let combined = core.combined_status("alice", "jeryu", "abc").unwrap();
+        assert_eq!(combined.state, state);
+    }
+    let combined = core.combined_status("alice", "jeryu", "abc").unwrap();
+    assert_eq!(combined.total_count, 4);
+    assert_eq!(combined.statuses.len(), 4);
+    assert_eq!(combined.statuses[0].state, CommitStatusState::Pending);
+    assert_eq!(combined.statuses[1].state, CommitStatusState::Failure);
+    assert_eq!(combined.statuses[2].state, CommitStatusState::Error);
+}
+
+#[test]
+fn combined_status_newer_failure_and_pending_replace_success() {
+    let core = core_with_repo();
+    for state in [
+        CommitStatusState::Success,
+        CommitStatusState::Failure,
+        CommitStatusState::Success,
+        CommitStatusState::Pending,
+    ] {
+        status(&core, "abc", "ci/a", state.clone());
+        assert_eq!(
+            core.combined_status("alice", "jeryu", "abc").unwrap().state,
+            state
+        );
+    }
+}
+
+#[test]
+fn combined_status_keeps_contexts_and_heads_independent() {
+    let core = core_with_repo();
+    status(&core, "abc", "ci/a", CommitStatusState::Failure);
+    status(&core, "abc", "ci/b", CommitStatusState::Pending);
+    status(&core, "abc", "ci/a", CommitStatusState::Success);
+    assert_eq!(
+        core.combined_status("alice", "jeryu", "abc").unwrap().state,
+        CommitStatusState::Pending
+    );
+    status(&core, "abc", "ci/b", CommitStatusState::Success);
+    status(&core, "def", "ci/a", CommitStatusState::Failure);
+    assert_eq!(
+        core.combined_status("alice", "jeryu", "abc").unwrap().state,
+        CommitStatusState::Success
+    );
+    assert_eq!(
+        core.combined_status("alice", "jeryu", "def").unwrap().state,
+        CommitStatusState::Failure
+    );
+    status(&core, "abc", "ci/b", CommitStatusState::Error);
+    assert_eq!(
+        core.combined_status("alice", "jeryu", "abc").unwrap().state,
+        CommitStatusState::Error
+    );
+}
+
+#[test]
+fn combined_status_and_merge_readiness_use_the_same_current_rows() {
+    use jeryu_core::{CreatePullRequestRequest, SetBranchProtectionRequest};
+    let core = core_with_repo();
+    core.set_branch_protection(
+        "alice",
+        "jeryu",
+        "main",
+        SetBranchProtectionRequest {
+            required_status_checks: vec!["ci/a".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let pr = core
+        .create_pull_request(
+            "alice",
+            "jeryu",
+            "alice",
+            CreatePullRequestRequest {
+                title: "change".into(),
+                head: "topic".into(),
+                base: "main".into(),
+                head_sha: Some("abc".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    for state in [
+        CommitStatusState::Pending,
+        CommitStatusState::Success,
+        CommitStatusState::Failure,
+        CommitStatusState::Success,
+    ] {
+        status(&core, "abc", "ci/a", state.clone());
+        let combined = core.combined_status("alice", "jeryu", "abc").unwrap();
+        let readiness = core
+            .evaluate_pull_request("alice", "jeryu", pr.number, None)
+            .unwrap();
+        assert_eq!(combined.state, state);
+        assert_eq!(readiness.mergeable, state == CommitStatusState::Success);
+    }
+}
+
+#[test]
+fn combined_status_restart_preserves_equal_timestamp_order_and_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("forge.sqlite");
+    {
+        let core = ForgeCore::open_sqlite(&database).unwrap();
+        core.create_repository(
+            "alice",
+            CreateRepositoryRequest {
+                name: "jeryu".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        status(&core, "abc", "ci/a", CommitStatusState::Pending);
+        status(&core, "abc", "ci/a", CommitStatusState::Failure);
+        status(&core, "abc", "ci/a", CommitStatusState::Success);
+    }
+    // Equal timestamps can occur with a coarse clock. Persistence must retain
+    // append order rather than choosing a random UUID as the newest status.
+    {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        conn.execute("UPDATE commit_statuses SET status_json = json_set(status_json, '$.updated_at', '2026-01-01T00:00:00Z')", []).unwrap();
+    }
+    {
+        let core = ForgeCore::open_sqlite(&database).unwrap();
+        let combined = core.combined_status("alice", "jeryu", "abc").unwrap();
+        assert_eq!(combined.state, CommitStatusState::Success);
+        assert_eq!(combined.total_count, 3);
+        assert_eq!(combined.statuses[0].state, CommitStatusState::Pending);
+        status(&core, "abc", "ci/a", CommitStatusState::Failure);
+    }
+    let core = ForgeCore::open_sqlite(&database).unwrap();
+    let combined = core.combined_status("alice", "jeryu", "abc").unwrap();
+    assert_eq!(combined.state, CommitStatusState::Failure);
+    assert_eq!(combined.total_count, 4);
+}
