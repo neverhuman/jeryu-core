@@ -37,10 +37,13 @@ const MIGRATION_0009: &str =
 const MIGRATION_0010: &str =
     include_str!("../../../../../db/migrations/0010_account_lifecycle.sql");
 const MIGRATION_0011: &str = include_str!("../../../../../db/migrations/0011_review_head_sha.sql");
+const MIGRATION_0012: &str = include_str!("../../../../../db/migrations/0012_deployments.sql");
 
 pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     apply_migrations_through_0010(conn)?;
     apply_migration_0011(conn)?;
+    // 0012 is pure CREATE TABLE/INDEX IF NOT EXISTS: idempotent, no guard.
+    conn.execute_batch(MIGRATION_0012).map_err(storage_error)?;
     Ok(())
 }
 

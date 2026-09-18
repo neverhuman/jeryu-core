@@ -1,0 +1,17 @@
+# jankurai:migration v1
+id = "0012_deployments"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "old_app_new_db,new_app_old_db"
+rollback = "db/rollbacks/0012_deployments.sql"
+backfill = "none; tables start empty and are appended to by the deployments API"
+data_classification = "internal"
+tenant_impact = "none"
+tests = ["db-migration-analyze", "sqlite_store_keeps_deployments_across_unrelated_writes"]

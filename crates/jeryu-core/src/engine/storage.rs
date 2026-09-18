@@ -9,6 +9,7 @@ use crate::errors::{ForgeError, Result};
 use crate::model::*;
 
 mod codec;
+mod deployments;
 mod migrations;
 
 use self::codec::*;
@@ -31,6 +32,9 @@ impl SqliteStore {
         let conn = store.connect()?;
         apply_migrations(&conn)?;
         let mut state = load_state(&conn)?;
+        // The deploy history is not part of the snapshot `load_state` reads; it
+        // has its own append-only tables (see `storage::deployments`).
+        deployments::load_deployments(&conn, &mut state)?;
         let mut backfilled = backfill_missing_counters(&mut state);
         backfilled += super::backfill_default_branch_protections(&mut state);
         drop(conn);

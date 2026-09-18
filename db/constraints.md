@@ -250,3 +250,26 @@ Rollback/backfill:
 - The additive column remains during an application rollback. If schema removal
   is unavoidable, restore the verified pre-0011 copy rather than rebuilding the
   live reviews table in place.
+
+## 0012 Deployments
+
+`deployments` and `deployment_statuses` hold the deploy history in the GitHub
+Deployments API shape.
+
+Constraint policy:
+- Append-only. The forge has no update or delete path for either table; a
+  deployment's outcome changes only by appending a `deployment_statuses` row,
+  and GitHub's `auto_inactive` appends an `inactive` row rather than editing.
+- No foreign key to `repositories`. `SqliteStore::persist` deletes and
+  reinserts `repositories` on every mutation, so an `ON DELETE CASCADE` would
+  erase the whole history on any forge write. Rows carry the repository's stable
+  id plus a denormalized owner/name, like `forge_audit_log` (0006).
+- Neither table is in `delete_all` or `persist_state`; writes go through
+  `append_deployment` / `append_deployment_status` and reads are loaded on open.
+- `sha` is a full 40-character lowercase hex id; `state` is one of GitHub's
+  seven deployment states.
+
+Rollback/backfill:
+- No backfill; both tables start empty.
+- `db/rollbacks/0012_deployments.sql` drops them. Deploy history is not
+  re-derivable, so keep the pre-apply `.backup` snapshot.

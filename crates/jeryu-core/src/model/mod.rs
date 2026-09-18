@@ -7,6 +7,7 @@
 
 mod auth;
 mod checks;
+mod deployments;
 mod issues;
 mod jankurai;
 mod policy;
@@ -17,6 +18,7 @@ mod webhooks;
 
 pub use auth::*;
 pub use checks::*;
+pub use deployments::*;
 pub use issues::*;
 pub use jankurai::*;
 pub use policy::*;

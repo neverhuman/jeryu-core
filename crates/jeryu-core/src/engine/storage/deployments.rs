@@ -1,0 +1,91 @@
+//! Durable deployment history: one append per write, outside the full-state
+//! rewrite.
+//!
+//! `SqliteStore::persist` deletes and reinserts every state table on each
+//! mutation. `deployments` and `deployment_statuses` are deliberately not in
+//! that path (nor in `delete_all`), exactly like `forge_audit_log`, so an
+//! unrelated forge write can never touch the deploy history. They are read back
+//! into memory on open by [`load_deployments`].
+
+use rusqlite::{Connection, params};
+
+use super::codec::{json, parse_json, time};
+use super::{SqliteStore, State, storage_error};
+use crate::errors::Result;
+use crate::model::{Deployment, DeploymentStatus};
+
+impl SqliteStore {
+    pub(in super::super) fn append_deployment(
+        &self,
+        repo_id: &str,
+        deployment: &Deployment,
+    ) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            INSERT INTO deployments (
+              id, repo_id, owner, repo, environment, sha, deployment_json, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                deployment.id,
+                repo_id,
+                deployment.owner,
+                deployment.repo,
+                deployment.environment,
+                deployment.sha,
+                json(deployment)?,
+                time(deployment.created_at),
+            ],
+        )
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub(in super::super) fn append_deployment_status(
+        &self,
+        status: &DeploymentStatus,
+    ) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            r#"
+            INSERT INTO deployment_statuses (id, deployment_id, state, status_json, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                status.id,
+                status.deployment_id,
+                status.state.as_str(),
+                json(status)?,
+                time(status.created_at),
+            ],
+        )
+        .map_err(storage_error)?;
+        Ok(())
+    }
+}
+
+pub(super) fn load_deployments(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare("SELECT deployment_json FROM deployments ORDER BY id")
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let deployment: Deployment = parse_json(row.get(0).map_err(storage_error)?)?;
+        state.deployments.insert(deployment.id, deployment);
+    }
+
+    let mut stmt = conn
+        .prepare("SELECT status_json FROM deployment_statuses ORDER BY id")
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let status: DeploymentStatus = parse_json(row.get(0).map_err(storage_error)?)?;
+        state
+            .deployment_statuses
+            .entry(status.deployment_id)
+            .or_default()
+            .push(status);
+    }
+    Ok(())
+}

@@ -6,7 +6,7 @@
 //! method signature resolve exactly as before this file was split out of a
 //! single `core.rs`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -26,6 +26,7 @@ mod auth;
 mod branch_protection;
 mod check_runs;
 mod commit_status;
+mod deployments;
 mod issues;
 mod jankurai;
 mod pull_requests;
@@ -80,6 +81,11 @@ struct State {
     jankurai_scores: HashMap<(String, String), Vec<JankuraiScore>>,
     repository_aliases: HashMap<(String, String), RepositoryAlias>,
     repository_transfers: HashMap<String, RepositoryTransferJournal>,
+    /// Keyed by id, so iteration is creation order. Durable only through the
+    /// dedicated append path, never the full-state rewrite.
+    deployments: BTreeMap<u64, Deployment>,
+    /// Append-only, oldest first per deployment.
+    deployment_statuses: BTreeMap<u64, Vec<DeploymentStatus>>,
 }
 
 fn default_branch_protection_rule(owner: &str, repo: &str, branch: &str) -> BranchProtectionRule {
