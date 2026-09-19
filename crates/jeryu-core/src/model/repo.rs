@@ -92,6 +92,12 @@ pub struct Repository {
     /// a ref). `None` until a push is observed or git history is backfilled.
     #[serde(default)]
     pub pushed_at: Option<DateTime<Utc>>,
+    /// Global-admin opt-out from the automatic PR-only rule on the default
+    /// branch (todo queue repositories push straight to `queue`). Off by
+    /// default; never honoured while the repository requires a status context.
+    /// Edited only via `set_default_branch_protection_opt_out`.
+    #[serde(default)]
+    pub default_branch_protection_opt_out: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

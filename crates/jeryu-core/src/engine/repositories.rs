@@ -6,7 +6,7 @@ use std::hash::Hash;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::{Counters, ForgeCore, RepoPushHistory, require_name};
+use super::{Counters, ForgeCore, RepoBranches, RepoPushHistory, require_name};
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
 
@@ -127,6 +127,7 @@ impl ForgeCore {
             created_at: now,
             updated_at: now,
             pushed_at: None,
+            default_branch_protection_opt_out: false,
         };
         state.counters.insert(key.clone(), Counters::default());
         state.repos.insert(key, repo.clone());
@@ -191,6 +192,122 @@ impl ForgeCore {
         entry.updated_at = Utc::now();
         let updated = entry.clone();
         self.persist_after_mutation(&mut state, previous)?;
+        Ok(updated)
+    }
+
+    /// Change the repository's default branch to an existing `branch`.
+    ///
+    /// The branch must exist in git storage (`branches`); a missing branch is
+    /// `NotFound`, a blank or unchanged one is `Validation`. The new default
+    /// branch receives the same automatic protection as on create (unless the
+    /// repository has opted out); rules on the previous default stay as-is.
+    pub fn set_repository_default_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+        branches: &dyn RepoBranches,
+    ) -> Result<Repository> {
+        require_name("branch", branch)?;
+        if branch.trim() != branch {
+            return Err(ForgeError::Validation(
+                "branch must not have surrounding whitespace".to_string(),
+            ));
+        }
+        let current = self.get_repository(owner, repo)?;
+        if current.default_branch == branch {
+            return Ok(current);
+        }
+        if !branches.branch_exists(owner, repo, branch)? {
+            return Err(ForgeError::NotFound(format!(
+                "branch {branch} in repository {owner}/{repo}"
+            )));
+        }
+        let mut state = self.state.write();
+        let key = (owner.to_string(), repo.to_string());
+        if !state.repos.contains_key(&key) {
+            return Err(ForgeError::NotFound(format!("repository {owner}/{repo}")));
+        }
+        let previous = state.clone();
+        let entry = state.repos.get_mut(&key).expect("presence checked above");
+        entry.default_branch = branch.to_string();
+        entry.updated_at = Utc::now();
+        let updated = entry.clone();
+        super::ensure_default_branch_protection(&mut state, &updated);
+        self.persist_after_mutation(&mut state, previous)?;
+        Ok(updated)
+    }
+
+    /// Opt `owner/repo` in or out of automatic default-branch protection.
+    ///
+    /// Only an active global admin (`actor`) may change it; anyone else gets
+    /// `BranchProtection("global admin required")`. Opting out is refused
+    /// with `Validation` while any branch protection rule of the repository
+    /// requires a status context. Opting out removes the default branch's
+    /// rule only when it is still exactly the automatic one; a rule an admin
+    /// customised stays. Opting back in restores the automatic rule. Every
+    /// change is audited as `repository.default_branch_protection_opt_out`.
+    pub fn set_default_branch_protection_opt_out(
+        &self,
+        actor: &str,
+        owner: &str,
+        repo: &str,
+        opt_out: bool,
+    ) -> Result<Repository> {
+        let current = self.get_repository(owner, repo)?;
+        if !self.is_global_admin(actor) {
+            return Err(ForgeError::BranchProtection(
+                "global admin required".to_string(),
+            ));
+        }
+        let subject = format!("{owner}/{repo}");
+        let action = "repository.default_branch_protection_opt_out";
+        let detail = serde_json::json!({
+            "actor": actor,
+            "opt_out": opt_out,
+            "default_branch": current.default_branch,
+        });
+        let mut state = self.state.write();
+        let key = (owner.to_string(), repo.to_string());
+        if opt_out && super::repo_requires_status_context(&state, owner, repo) {
+            drop(state);
+            self.append_audit(action, &subject, "failed", detail)?;
+            return Err(ForgeError::Validation(format!(
+                "repository {owner}/{repo} requires a status context; its default branch cannot opt out of protection"
+            )));
+        }
+        let Some(entry) = state.repos.get(&key) else {
+            return Err(ForgeError::NotFound(format!("repository {owner}/{repo}")));
+        };
+        if entry.default_branch_protection_opt_out == opt_out {
+            return Ok(entry.clone());
+        }
+        let previous = state.clone();
+        let entry = state.repos.get_mut(&key).expect("presence checked above");
+        entry.default_branch_protection_opt_out = opt_out;
+        entry.updated_at = Utc::now();
+        let updated = entry.clone();
+        let rule_key = (
+            owner.to_string(),
+            repo.to_string(),
+            updated.default_branch.clone(),
+        );
+        if opt_out {
+            let automatic =
+                super::default_branch_protection_rule(owner, repo, &updated.default_branch);
+            if state
+                .branch_protections
+                .get(&rule_key)
+                .is_some_and(|rule| is_automatic_rule(rule, &automatic))
+            {
+                state.branch_protections.remove(&rule_key);
+            }
+        } else {
+            super::ensure_default_branch_protection(&mut state, &updated);
+        }
+        self.persist_after_mutation(&mut state, previous)?;
+        drop(state);
+        self.append_audit(action, &subject, "completed", detail)?;
         Ok(updated)
     }
 
@@ -378,4 +495,11 @@ impl ForgeCore {
         labels.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(labels)
     }
+}
+
+/// `rule` equals the automatic default-branch rule, ignoring `updated_at`.
+fn is_automatic_rule(rule: &BranchProtectionRule, automatic: &BranchProtectionRule) -> bool {
+    let mut rule = rule.clone();
+    rule.updated_at = automatic.updated_at;
+    &rule == automatic
 }

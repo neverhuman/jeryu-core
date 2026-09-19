@@ -40,6 +40,9 @@ const MIGRATION_0011: &str = include_str!("../../../../../db/migrations/0011_rev
 const MIGRATION_0012: &str = include_str!("../../../../../db/migrations/0012_deployments.sql");
 const MIGRATION_0013: &str =
     include_str!("../../../../../db/migrations/0013_repository_pushed_at.sql");
+const MIGRATION_0014: &str = include_str!(
+    "../../../../../db/migrations/0014_repository_default_branch_protection_opt_out.sql"
+);
 
 pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     apply_migrations_through_0010(conn)?;
@@ -47,6 +50,7 @@ pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     // 0012 is pure CREATE TABLE/INDEX IF NOT EXISTS: idempotent, no guard.
     conn.execute_batch(MIGRATION_0012).map_err(storage_error)?;
     apply_migration_0013(conn)?;
+    apply_migration_0014(conn)?;
     Ok(())
 }
 
@@ -155,6 +159,15 @@ fn apply_migration_0011(conn: &Connection) -> Result<()> {
 
 fn apply_migration_0013(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "repositories", "pushed_at", MIGRATION_0013)
+}
+
+fn apply_migration_0014(conn: &Connection) -> Result<()> {
+    add_column_if_missing(
+        conn,
+        "repositories",
+        "default_branch_protection_opt_out",
+        MIGRATION_0014,
+    )
 }
 
 fn add_column_if_missing(
@@ -358,6 +371,27 @@ mod tests {
             )
             .expect("read migrated repo");
         assert_eq!(pushed_at, None);
+    }
+
+    #[test]
+    fn migration_0014_adds_opt_out_defaulting_off() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        apply_migrations_through_0010(&conn).expect("migrate through 0010");
+        apply_migration_0011(&conn).expect("0011");
+        conn.execute_batch(MIGRATION_0012).expect("0012");
+        apply_migration_0013(&conn).expect("0013");
+        insert_repo(&conn, "00000000-0000-0000-0000-000000000001", "demo", None);
+
+        apply_migration_0014(&conn).expect("apply 0014");
+        apply_migration_0014(&conn).expect("reapply 0014");
+        let opt_out: i64 = conn
+            .query_row(
+                "SELECT default_branch_protection_opt_out FROM repositories WHERE name = 'demo'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated repo");
+        assert_eq!(opt_out, 0);
     }
 
     fn insert_repo(conn: &Connection, id: &str, name: &str, description: Option<&str>) {

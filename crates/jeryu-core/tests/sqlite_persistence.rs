@@ -7,8 +7,9 @@ use jeryu_core::{
     CreateCommentRequest, CreateCommitStatusRequest, CreateIssueRequest, CreateLabelRequest,
     CreateOrganizationRequest, CreatePullRequestRequest, CreateRepositoryRequest,
     CreateReviewRequest, CreateTeamRequest, CreateUserRequest, CreateWebhookRequest, ForgeCore,
-    ForgeError, PullRequestCommit, RepoAccessLevel, RepoPushHistory, ReviewCommentInput,
-    ReviewState, SetBranchProtectionRequest, UserRole, WebhookConfig, effective_reviews_for_head,
+    ForgeError, PullRequestCommit, RepoAccessLevel, RepoBranches, RepoPushHistory,
+    ReviewCommentInput, ReviewState, SetBranchProtectionRequest, UserRole, WebhookConfig,
+    effective_reviews_for_head,
 };
 use rusqlite::Connection;
 
@@ -1163,4 +1164,229 @@ fn jankurai_scores_are_isolated_per_repository_owner() {
         .unwrap();
     assert_eq!(own.len(), 1);
     assert_eq!(own[0].owner, "alice");
+}
+
+#[derive(Debug)]
+struct KnownBranches(&'static [&'static str]);
+
+impl RepoBranches for KnownBranches {
+    fn branch_exists(&self, _owner: &str, _name: &str, branch: &str) -> jeryu_core::Result<bool> {
+        Ok(self.0.contains(&branch))
+    }
+}
+
+fn create_repo_on(core: &ForgeCore, name: &str, branch: &str) {
+    core.create_repository(
+        "jeryu",
+        CreateRepositoryRequest {
+            name: name.to_string(),
+            private: true,
+            description: None,
+            default_branch: Some(branch.to_string()),
+        },
+    )
+    .unwrap();
+}
+
+/// Without an opt-out every repository keeps today's automatic protection,
+/// including a new default branch set through `set_repository_default_branch`.
+#[test]
+fn default_branch_change_persists_and_keeps_protection_by_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("forge.sqlite");
+    let branches = KnownBranches(&["main", "queue"]);
+    {
+        let core = ForgeCore::open_sqlite(&db).unwrap();
+        create_repo_on(&core, "demo-todo", "main");
+        let repo = core.get_repository("jeryu", "demo-todo").unwrap();
+        assert!(!repo.default_branch_protection_opt_out);
+        assert!(
+            core.get_branch_protection("jeryu", "demo-todo", "main")
+                .is_ok()
+        );
+
+        assert!(matches!(
+            core.set_repository_default_branch("jeryu", "demo-todo", "absent", &branches),
+            Err(ForgeError::NotFound(_))
+        ));
+        assert!(matches!(
+            core.set_repository_default_branch("jeryu", "demo-todo", " ", &branches),
+            Err(ForgeError::Validation(_))
+        ));
+        assert!(matches!(
+            core.set_repository_default_branch("jeryu", "missing", "queue", &branches),
+            Err(ForgeError::NotFound(_))
+        ));
+        assert_eq!(
+            core.get_repository("jeryu", "demo-todo")
+                .unwrap()
+                .default_branch,
+            "main"
+        );
+
+        let updated = core
+            .set_repository_default_branch("jeryu", "demo-todo", "queue", &branches)
+            .unwrap();
+        assert_eq!(updated.default_branch, "queue");
+    }
+    let core = ForgeCore::open_sqlite(&db).unwrap();
+    assert_eq!(
+        core.get_repository("jeryu", "demo-todo")
+            .unwrap()
+            .default_branch,
+        "queue"
+    );
+    assert!(
+        core.get_branch_protection("jeryu", "demo-todo", "queue")
+            .is_ok()
+    );
+    assert!(
+        core.get_branch_protection("jeryu", "demo-todo", "main")
+            .is_ok()
+    );
+}
+
+/// A global admin's opt-out removes the automatic rule, is audited, and the
+/// startup backfill does not bring the rule back; other repositories are
+/// still protected.
+#[test]
+fn default_branch_protection_opt_out_survives_reopen_and_backfill() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("forge.sqlite");
+    {
+        let core = ForgeCore::open_sqlite(&db).unwrap();
+        core.create_account("jeryu-admin", "correct horse battery", UserRole::Admin)
+            .unwrap();
+        create_repo_on(&core, "work-todo", "queue");
+        create_repo_on(&core, "other", "main");
+        let repo = core
+            .set_default_branch_protection_opt_out("jeryu-admin", "jeryu", "work-todo", true)
+            .unwrap();
+        assert!(repo.default_branch_protection_opt_out);
+        assert!(matches!(
+            core.get_branch_protection("jeryu", "work-todo", "queue"),
+            Err(ForgeError::NotFound(_))
+        ));
+        let audit = core.list_audit("jeryu/work-todo").unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(
+            audit[0].action,
+            "repository.default_branch_protection_opt_out"
+        );
+        assert_eq!(audit[0].phase, "completed");
+        assert_eq!(audit[0].detail["actor"], "jeryu-admin");
+        assert_eq!(audit[0].detail["opt_out"], true);
+    }
+    for _ in 0..2 {
+        let core = ForgeCore::open_sqlite(&db).unwrap();
+        assert!(
+            core.get_repository("jeryu", "work-todo")
+                .unwrap()
+                .default_branch_protection_opt_out
+        );
+        assert!(matches!(
+            core.get_branch_protection("jeryu", "work-todo", "queue"),
+            Err(ForgeError::NotFound(_))
+        ));
+        assert!(core.get_branch_protection("jeryu", "other", "main").is_ok());
+    }
+
+    let core = ForgeCore::open_sqlite(&db).unwrap();
+    let repo = core
+        .set_default_branch_protection_opt_out("jeryu-admin", "jeryu", "work-todo", false)
+        .unwrap();
+    assert!(!repo.default_branch_protection_opt_out);
+    assert!(
+        core.get_branch_protection("jeryu", "work-todo", "queue")
+            .is_ok()
+    );
+    assert_eq!(core.list_audit("jeryu/work-todo").unwrap().len(), 2);
+}
+
+#[test]
+fn default_branch_protection_opt_out_refuses_non_admins() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = ForgeCore::open_sqlite(temp.path().join("forge.sqlite")).unwrap();
+    core.create_account("jordanh", "correct horse battery", UserRole::User)
+        .unwrap();
+    create_repo_on(&core, "work-todo", "queue");
+    core.grant_repo_access(
+        "jordanh",
+        "jordanh",
+        "jeryu",
+        "work-todo",
+        RepoAccessLevel::Admin,
+    )
+    .unwrap();
+    for actor in ["jordanh", "nobody"] {
+        assert!(matches!(
+            core.set_default_branch_protection_opt_out(actor, "jeryu", "work-todo", true),
+            Err(ForgeError::BranchProtection(_))
+        ));
+    }
+    assert!(
+        !core
+            .get_repository("jeryu", "work-todo")
+            .unwrap()
+            .default_branch_protection_opt_out
+    );
+    assert!(
+        core.get_branch_protection("jeryu", "work-todo", "queue")
+            .is_ok()
+    );
+}
+
+/// A repository requiring a status context can never opt out, and a
+/// customised default-branch rule is never removed by an opt-out.
+#[test]
+fn default_branch_protection_opt_out_refused_with_required_status_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = ForgeCore::open_sqlite(temp.path().join("forge.sqlite")).unwrap();
+    core.create_account("jeryu-admin", "correct horse battery", UserRole::Admin)
+        .unwrap();
+    create_repo_on(&core, "gated-todo", "queue");
+    core.set_branch_protection(
+        "jeryu",
+        "gated-todo",
+        "release",
+        SetBranchProtectionRequest {
+            required_status_checks: vec!["ci/fast".to_string()],
+            ..SetBranchProtectionRequest::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        core.set_default_branch_protection_opt_out("jeryu-admin", "jeryu", "gated-todo", true),
+        Err(ForgeError::Validation(_))
+    ));
+    assert!(
+        !core
+            .get_repository("jeryu", "gated-todo")
+            .unwrap()
+            .default_branch_protection_opt_out
+    );
+    assert!(
+        core.get_branch_protection("jeryu", "gated-todo", "queue")
+            .is_ok()
+    );
+
+    create_repo_on(&core, "custom-todo", "queue");
+    core.set_branch_protection(
+        "jeryu",
+        "custom-todo",
+        "queue",
+        SetBranchProtectionRequest {
+            required_approving_review_count: 1,
+            ..SetBranchProtectionRequest::default()
+        },
+    )
+    .unwrap();
+    core.set_default_branch_protection_opt_out("jeryu-admin", "jeryu", "custom-todo", true)
+        .unwrap();
+    assert_eq!(
+        core.get_branch_protection("jeryu", "custom-todo", "queue")
+            .unwrap()
+            .required_approving_review_count,
+        1
+    );
 }

@@ -911,6 +911,17 @@ impl ForgeCore {
             .is_some_and(RepoAccessLevel::allows_write)
     }
 
+    /// `login` is an active account with the global admin role.
+    pub fn is_global_admin(&self, login: &str) -> bool {
+        self.state
+            .read()
+            .accounts
+            .get(login)
+            .is_some_and(|account| {
+                account.status.permits_authentication() && account.role == UserRole::Admin
+            })
+    }
+
     pub fn user_can_admin_repo(&self, login: &str, owner: &str, repo: &str) -> bool {
         self.repo_access_for(login, owner, repo)
             .is_some_and(RepoAccessLevel::allows_admin)

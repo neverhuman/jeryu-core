@@ -40,6 +40,7 @@ impl FakeReadService {
                 created_at: now,
                 updated_at: now,
                 pushed_at: None,
+                default_branch_protection_opt_out: false,
             },
         }
     }

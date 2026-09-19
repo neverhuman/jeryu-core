@@ -1,6 +1,13 @@
 # Changelog
 
 ## Unreleased
+- `ForgeCore::set_repository_default_branch` changes a repository's default
+  branch after checking it exists (via `RepoBranches`); the new default branch
+  gets the usual automatic protection.
+- Per-repository `default_branch_protection_opt_out` (migration 0014): a global
+  admin can exempt a todo queue repository's default branch from automatic
+  PR-only protection. Off by default, audited, refused while any required
+  status context is configured.
 - Track `Repository.pushed_at` (migration 0013): jeryu-gitd records pushes that
   moved a ref and reports them through `PushObserver`; existing repositories
   backfill once from git history. `RepositorySummary.pushed_at` (RFC 3339).

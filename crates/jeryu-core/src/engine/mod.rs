@@ -105,7 +105,20 @@ fn default_branch_protection_rule(owner: &str, repo: &str, branch: &str) -> Bran
     }
 }
 
+/// Whether any branch protection rule of `owner/repo` requires a status
+/// context. Such a repository can never opt out of default-branch protection.
+fn repo_requires_status_context(state: &State, owner: &str, repo: &str) -> bool {
+    state.branch_protections.values().any(|rule| {
+        rule.owner == owner && rule.repo == repo && !rule.required_status_checks.is_empty()
+    })
+}
+
 fn ensure_default_branch_protection(state: &mut State, repo: &Repository) -> bool {
+    if repo.default_branch_protection_opt_out
+        && !repo_requires_status_context(state, &repo.owner, &repo.name)
+    {
+        return false;
+    }
     let key = (
         repo.owner.clone(),
         repo.name.clone(),
@@ -154,6 +167,16 @@ pub trait RepoPushHistory: std::fmt::Debug + Send + Sync {
     /// (`git for-each-ref --sort=-committerdate --count=1`); `None` when the
     /// repository has no commits or no bare directory on disk.
     fn newest_commit_time(&self, owner: &str, name: &str) -> Result<Option<DateTime<Utc>>>;
+}
+
+/// Answers whether a branch exists in a repository's git storage.
+///
+/// Like [`RepoPushHistory`], defined here so `jeryu-core` stays free of the
+/// git-daemon crate; the caller of
+/// [`ForgeCore::set_repository_default_branch`] backs it with the bare repo.
+pub trait RepoBranches: std::fmt::Debug + Send + Sync {
+    /// `true` when `refs/heads/<branch>` exists in `owner/name`.
+    fn branch_exists(&self, owner: &str, name: &str, branch: &str) -> Result<bool>;
 }
 
 #[derive(Debug, Clone, Default)]

@@ -1,0 +1,22 @@
+# jankurai:migration v1
+id = "0014_repository_default_branch_protection_opt_out"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "old_app_new_db,new_app_old_db"
+requires = ["0013_repository_pushed_at"]
+rollback = "db/rollbacks/0014_repository_default_branch_protection_opt_out.sql"
+backfill = "none; existing rows default to 0 (auto-protection unchanged)"
+data_classification = "internal"
+tenant_impact = "none"
+tests = [
+  "db-migration-analyze",
+  "migration_0014_adds_opt_out_defaulting_off",
+  "default_branch_protection_opt_out_survives_reopen_and_backfill",
+]

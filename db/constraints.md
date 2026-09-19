@@ -301,3 +301,19 @@ Rollback/backfill:
   carry a value are never overwritten.
 - `db/rollbacks/0013_repository_pushed_at.sql` is non-destructive; the value is
   re-derivable from git.
+
+## 0014 Repository default-branch protection opt-out
+
+The fourteenth migration adds `repositories.default_branch_protection_opt_out`
+(`INTEGER NOT NULL DEFAULT 0`, `0`/`1`).
+
+Constraint policy:
+- Default `0`: automatic PR-only protection of the default branch (on create
+  and on every open) is unchanged.
+- Set only by an active global admin through
+  `ForgeCore::set_default_branch_protection_opt_out`, audited as
+  `repository.default_branch_protection_opt_out`.
+- Refused, and ignored if already set, for a repository whose branch
+  protection requires any status context.
+- `db/rollbacks/0014_repository_default_branch_protection_opt_out.sql` is
+  non-destructive; an older application re-protects the default branch.
