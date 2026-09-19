@@ -20,6 +20,10 @@ pub const PRE_RECEIVE_HOOK: &str = r#"#!/usr/bin/env bash
 set -euo pipefail
 
 input=$(cat)
+if [ -e jeryu/archived ]; then
+  printf '%s\n' "jeryu-gitd: repository_archived: this repository is archived and read-only; unarchive it to push" >&2
+  exit 1
+fi
 if printf '%s\n' "$input" | awk '$3 == "refs/heads/main" { found = 1 } END { exit found ? 0 : 1 }'; then
   printf '%s\n' "jeryu-gitd: direct pushes to refs/heads/main are blocked; open a pull request and merge through Jeryu" >&2
   exit 1
@@ -69,6 +73,7 @@ impl PreReceiveGuard {
         actor: &str,
         input: &str,
     ) -> Result<Vec<RefChange>> {
+        repo.ensure_writable()?;
         let mut changes = Vec::new();
         for (idx, line) in input.lines().enumerate() {
             let trimmed = line.trim();

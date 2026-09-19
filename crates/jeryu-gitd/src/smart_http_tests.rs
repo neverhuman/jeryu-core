@@ -578,3 +578,89 @@ fn ref_update_records_push_and_committer_time_backfills() {
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_dir_all(seed);
 }
+
+#[test]
+fn archived_repository_refuses_push_but_serves_clone_until_unarchived() {
+    if Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| !output.status.success())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let root = temp_dir("jeryu-archived-root");
+    let seed = temp_dir("jeryu-archived-seed");
+    let clone = temp_dir("jeryu-archived-clone");
+    let observer = Arc::new(RecordingObserver::default());
+    let manager = RepoManager::new(GitdConfig::new(&root)).with_push_observer(observer.clone());
+    let repo = manager
+        .create_bare(&RepoId::new("acme", "retired").expect("valid repo id"))
+        .expect("create bare repository");
+    seed_repository(&seed, &repo.path);
+    manager
+        .install_pre_receive_hook(&repo)
+        .expect("install pre-receive hook");
+    manager.set_archived(&repo, true).expect("archive");
+    manager
+        .set_archived(&repo, true)
+        .expect("archive is idempotent");
+    assert!(repo.is_archived());
+
+    let (base_url, stop, server_thread) = start_test_server(SmartHttpServer::new(manager.clone()));
+    let remote = format!("{base_url}/acme/retired.git");
+    run_command(
+        Command::new("git")
+            .args(["clone", "--branch", "main"])
+            .arg(&remote)
+            .arg(&clone),
+        "clone of archived repository",
+    );
+    run_git(
+        &clone,
+        &["config", "user.email", "a@example.invalid"],
+        "email",
+    );
+    run_git(&clone, &["config", "user.name", "Archive Test"], "name");
+    std::fs::write(clone.join("topic.txt"), "topic\n").expect("write topic");
+    run_git(&clone, &["add", "topic.txt"], "add");
+    run_git(&clone, &["commit", "-m", "topic"], "commit");
+
+    let refused = Command::new("git")
+        .args(["push", "origin", "HEAD:refs/heads/topic"])
+        .current_dir(&clone)
+        .output()
+        .expect("refused push runs");
+    assert!(!refused.status.success(), "archived push must be refused");
+    assert!(observer.seen().is_empty(), "refused push was recorded");
+    run_command(
+        Command::new("git")
+            .args(["fetch", "origin", "main"])
+            .current_dir(&clone),
+        "fetch of archived repository",
+    );
+
+    let head = git_output(&clone, &["rev-parse", "HEAD"]);
+    let err = crate::refs::RefService::new(manager.clone())
+        .update_ref(&repo, "system:test", "refs/heads/side", &head, None)
+        .expect_err("server-side ref update refused while archived");
+    assert!(matches!(err, GitdError::RepositoryArchived(_)), "{err}");
+    assert!(err.to_string().starts_with("repository_archived"));
+
+    manager.set_archived(&repo, false).expect("unarchive");
+    manager
+        .set_archived(&repo, false)
+        .expect("unarchive is idempotent");
+    run_git(
+        &clone,
+        &["push", "origin", "HEAD:refs/heads/topic"],
+        "push after unarchive",
+    );
+    stop.store(true, Ordering::Release);
+    server_thread.join().expect("server thread joins");
+    assert_eq!(observer.seen(), vec!["acme/retired".to_string()]);
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(seed);
+    let _ = std::fs::remove_dir_all(clone);
+}

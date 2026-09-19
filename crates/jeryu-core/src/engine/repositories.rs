@@ -195,6 +195,59 @@ impl ForgeCore {
         Ok(updated)
     }
 
+    /// Archive (`true`) or unarchive (`false`) `owner/repo` on behalf of `actor`.
+    ///
+    /// Archived means read-only: pushes, ref updates, pull requests, reviews,
+    /// merges, statuses and check runs are refused with `RepositoryArchived`
+    /// (see [`Self::ensure_repository_writable`]); reads keep working. Branch
+    /// protection and history are untouched, so unarchiving restores
+    /// everything. Idempotent: setting the current value changes nothing.
+    /// Audited as `repository.archived` (requested/completed/failed).
+    pub fn set_repository_archived(
+        &self,
+        actor: &str,
+        owner: &str,
+        repo: &str,
+        archived: bool,
+    ) -> Result<Repository> {
+        let subject = format!("{owner}/{repo}");
+        let action = "repository.archived";
+        let detail = serde_json::json!({ "archived": archived });
+        let current = self.get_repository(owner, repo)?;
+        if current.archived == archived {
+            return Ok(current);
+        }
+        self.append_audit_as(actor, action, &subject, "requested", detail.clone())?;
+        let result = self.write_repository_archived(owner, repo, archived);
+        let phase = if result.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        };
+        self.append_audit_as(actor, action, &subject, phase, detail)?;
+        result
+    }
+
+    fn write_repository_archived(
+        &self,
+        owner: &str,
+        repo: &str,
+        archived: bool,
+    ) -> Result<Repository> {
+        let mut state = self.state.write();
+        let key = (owner.to_string(), repo.to_string());
+        if !state.repos.contains_key(&key) {
+            return Err(ForgeError::NotFound(format!("repository {owner}/{repo}")));
+        }
+        let previous = state.clone();
+        let entry = state.repos.get_mut(&key).expect("presence checked above");
+        entry.archived = archived;
+        entry.updated_at = Utc::now();
+        let updated = entry.clone();
+        self.persist_after_mutation(&mut state, previous)?;
+        Ok(updated)
+    }
+
     /// Change the repository's default branch to an existing `branch`.
     ///
     /// The branch must exist in git storage (`branches`); a missing branch is

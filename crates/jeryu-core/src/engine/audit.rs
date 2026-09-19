@@ -23,7 +23,8 @@ pub struct AuditEntry {
     pub id: String,
     /// RFC 3339 timestamp the entry was appended at.
     pub occurred_at: String,
-    /// Acting principal; the local control plane always writes `local`.
+    /// Acting principal: `local` for [`ForgeCore::append_audit`], the caller's
+    /// login for [`ForgeCore::append_audit_as`].
     pub actor: String,
     /// Dotted action name, e.g. `repository.delete`.
     pub action: String,
@@ -50,6 +51,24 @@ impl ForgeCore {
         phase: &str,
         detail: Value,
     ) -> Result<String> {
+        self.append_audit_as("local", action, subject, phase, detail)
+    }
+
+    /// [`Self::append_audit`] recording `actor` (the real acting login) as
+    /// the entry's actor instead of the local control plane.
+    pub fn append_audit_as(
+        &self,
+        actor: &str,
+        action: &str,
+        subject: &str,
+        phase: &str,
+        detail: Value,
+    ) -> Result<String> {
+        if actor.trim().is_empty() {
+            return Err(ForgeError::Validation(
+                "audit actor cannot be empty".to_string(),
+            ));
+        }
         if action.trim().is_empty() {
             return Err(ForgeError::Validation(
                 "audit action cannot be empty".to_string(),
@@ -63,7 +82,7 @@ impl ForgeCore {
         let entry = AuditEntry {
             id: Uuid::new_v4().to_string(),
             occurred_at: Utc::now().to_rfc3339(),
-            actor: "local".to_string(),
+            actor: actor.to_string(),
             action: action.to_string(),
             subject: subject.to_string(),
             phase: phase.to_string(),

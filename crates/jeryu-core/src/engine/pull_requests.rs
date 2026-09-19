@@ -65,7 +65,7 @@ impl ForgeCore {
         require_name("pull request title", &request.title)?;
         require_name("head", &request.head)?;
         require_name("base", &request.base)?;
-        self.ensure_repo_exists(owner, repo)?;
+        self.ensure_repository_writable(owner, repo)?;
         self.ensure_user(author);
         let mut state = self.state.write();
         let previous = state.clone();
@@ -203,6 +203,7 @@ impl ForgeCore {
         number: u64,
         request: UpdatePullRequestRequest,
     ) -> Result<PullRequest> {
+        self.ensure_repository_writable(owner, repo)?;
         let mut state = self.state.write();
         let previous = state.clone();
         let key = (owner.to_string(), repo.to_string(), number);
@@ -393,6 +394,7 @@ impl ForgeCore {
         merge_sha: String,
         requested_sha: Option<&str>,
     ) -> Result<MergeResult> {
+        self.ensure_repository_writable(owner, repo)?;
         let mut state = self.state.write();
         let previous = state.clone();
         let key = (owner.to_string(), repo.to_string(), number);
@@ -473,6 +475,7 @@ impl ForgeCore {
         number: u64,
         request: MergePullRequestRequest,
     ) -> Result<MergeResult> {
+        self.ensure_repository_writable(owner, repo)?;
         match self.evaluate_merge_readiness(owner, repo, number, request.sha.as_deref())? {
             MergeReadiness::AlreadyMerged { sha } => Ok(MergeResult {
                 sha,

@@ -151,6 +151,9 @@ impl SmartHttpServer {
         let (owner, repo_name) = parse_repo_from_path(base)?;
         self.authorize(request, &owner, service.is_write())?;
         let repo = self.manager.open_parts(&owner, &repo_name)?;
+        if service.is_write() {
+            repo.ensure_writable()?;
+        }
         write_continue_if_requested(request, output)?;
         let body_prefix = if service == PackService::ReceivePack {
             read_receive_pack_prefix(input, content_length, body_prefix)?
@@ -278,6 +281,7 @@ impl SmartHttpServer {
         self.authorize(request, &owner, service.is_write())?;
         let repo = self.manager.open_parts(&owner, &repo_name)?;
         if service == PackService::ReceivePack {
+            repo.ensure_writable()?;
             ensure_receive_pack_policy(&request.body)?;
         }
         let before = if service == PackService::ReceivePack {
@@ -305,8 +309,12 @@ impl SmartHttpServer {
     fn lfs_batch(&self, request: &HttpRequest) -> Result<HttpResponse> {
         let (owner, repo_name) =
             parse_repo_from_path(request.path.trim_end_matches("/info/lfs/objects/batch"))?;
-        self.authorize(request, &owner, lfs_batch_is_write(&request.body)?)?;
+        let write = lfs_batch_is_write(&request.body)?;
+        self.authorize(request, &owner, write)?;
         let repo = self.manager.open_parts(&owner, &repo_name)?;
+        if write {
+            repo.ensure_writable()?;
+        }
         let store = LfsStore::for_repo(&repo.path);
         let text = String::from_utf8_lossy(&request.body);
         let objects_url = lfs_objects_url(request);
@@ -825,6 +833,7 @@ fn error_response(err: GitdError) -> HttpResponse {
         GitdError::Unauthorized => unauthorized_response(),
         GitdError::Forbidden(msg) => forbidden_response(&msg),
         GitdError::ProtectedRefDenied(msg) => forbidden_response(&msg),
+        err @ GitdError::RepositoryArchived(_) => forbidden_response(&err.to_string()),
         GitdError::Lfs(msg) => lfs_error_response(422, &msg),
         err => HttpResponse::text(500, &format!("jeryu_gitd error: {err}\n")),
     }

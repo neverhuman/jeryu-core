@@ -179,6 +179,7 @@ pub fn exec_from_env(root: &Path, git_bin: &str) -> Result<i32> {
     config.git_bin = git_bin.to_string();
     let manager = RepoManager::new(config);
     let opened = manager.open_parts(&parsed.owner, &parsed.repo_git)?;
+    opened.ensure_writable()?;
     let before = manager.begin_push(&opened)?;
     let status = Command::new(git_bin).args([subcommand, &repo]).status()?;
     manager.finish_push(&opened, &before)?;

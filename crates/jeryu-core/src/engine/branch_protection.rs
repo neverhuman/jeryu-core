@@ -124,7 +124,7 @@ impl ForgeCore {
         operation: RefOperation,
         actor_is_admin: bool,
     ) -> Result<RefOperationEvaluation> {
-        self.ensure_repo_exists(owner, repo)?;
+        self.ensure_repository_writable(owner, repo)?;
         let state = self.state.read();
         let protection = state.branch_protections.get(&(
             owner.to_string(),

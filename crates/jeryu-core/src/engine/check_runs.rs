@@ -20,7 +20,7 @@ impl ForgeCore {
     ) -> Result<CheckRun> {
         require_name("check run name", &request.name)?;
         require_name("head sha", &request.head_sha)?;
-        self.ensure_repo_exists(owner, repo)?;
+        self.ensure_repository_writable(owner, repo)?;
         let completed = matches!(request.status, Some(CheckRunStatus::Completed))
             || request.conclusion.is_some();
         let check_run = CheckRun {

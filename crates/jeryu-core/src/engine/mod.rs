@@ -212,6 +212,19 @@ impl ForgeCore {
         self.get_repository(owner, repo).map(|_| ())
     }
 
+    /// Refuse a write to `owner/repo` when it is archived.
+    ///
+    /// Unknown repositories are `NotFound`; archived ones are
+    /// `RepositoryArchived`. Every mutating path of an archived repository
+    /// (ref updates, pull requests, reviews, merges, statuses, check runs)
+    /// goes through this check; the git edge calls it before accepting a push.
+    pub fn ensure_repository_writable(&self, owner: &str, repo: &str) -> Result<()> {
+        if self.get_repository(owner, repo)?.archived {
+            return Err(ForgeError::RepositoryArchived(format!("{owner}/{repo}")));
+        }
+        Ok(())
+    }
+
     fn persist_after_mutation(
         &self,
         state: &mut RwLockWriteGuard<'_, State>,

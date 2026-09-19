@@ -40,6 +40,8 @@ pub enum GitdError {
     Unauthorized,
     /// Authenticated, but the principal lacks authorization for the action.
     Forbidden(String),
+    /// The repository is archived (read-only); pushes and ref updates are refused.
+    RepositoryArchived(String),
 }
 
 impl Display for GitdError {
@@ -70,6 +72,10 @@ impl Display for GitdError {
             Self::Lfs(msg) => write!(f, "lfs error: {msg}"),
             Self::Unauthorized => write!(f, "unauthorized"),
             Self::Forbidden(msg) => write!(f, "forbidden: {msg}"),
+            Self::RepositoryArchived(repo) => write!(
+                f,
+                "repository_archived: {repo} is archived and read-only; unarchive it to push"
+            ),
         }
     }
 }

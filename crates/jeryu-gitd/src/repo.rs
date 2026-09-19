@@ -192,6 +192,30 @@ impl RepoManager {
         Ok(repo)
     }
 
+    /// Mark `repo` archived (read-only) or clear the mark. Idempotent.
+    ///
+    /// The mark is the file `jeryu/archived` inside the bare repository, so
+    /// every receive path (smart HTTP, SSH, the pre-receive hook and
+    /// [`crate::refs::RefService`]) sees it without a forge round-trip. The
+    /// forge (`ForgeCore::set_repository_archived`) stays the source of truth;
+    /// the unified server mirrors its flag here.
+    pub fn set_archived(&self, repo: &Repository, archived: bool) -> Result<()> {
+        let marker = archived_marker(repo);
+        if archived {
+            if let Some(parent) = marker.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&marker, b"archived\n")?;
+        } else {
+            match std::fs::remove_file(&marker) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Ok(())
+    }
+
     /// Install Jeryu's server-side pre-receive hook into a bare repository.
     ///
     /// This is intentionally separate from [`Self::create_bare`] so tests and
@@ -215,6 +239,27 @@ impl RepoManager {
         std::fs::create_dir_all(&jf)?;
         std::fs::write(jf.join("phase"), b"phase1-git-server-core\n")?;
         std::fs::write(jf.join("repo-id"), repo.id.to_string())?;
+        Ok(())
+    }
+}
+
+/// Path of the archive mark inside a bare repository.
+fn archived_marker(repo: &Repository) -> PathBuf {
+    repo.path.join("jeryu").join("archived")
+}
+
+impl Repository {
+    /// Whether the repository carries the archive mark (read-only).
+    #[must_use]
+    pub fn is_archived(&self) -> bool {
+        archived_marker(self).is_file()
+    }
+
+    /// Refuse a write with [`GitdError::RepositoryArchived`] when archived.
+    pub fn ensure_writable(&self) -> Result<()> {
+        if self.is_archived() {
+            return Err(GitdError::RepositoryArchived(self.id.to_string()));
+        }
         Ok(())
     }
 }

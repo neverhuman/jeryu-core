@@ -18,6 +18,7 @@ impl ForgeCore {
         author: &str,
         request: CreateReviewRequest,
     ) -> Result<Review> {
+        self.ensure_repository_writable(owner, repo)?;
         self.ensure_user(author);
         let mut state = self.state.write();
         let previous = state.clone();

@@ -96,6 +96,7 @@ impl RefService {
         old_oid: Option<&str>,
     ) -> Result<()> {
         validate_ref_name(name)?;
+        repo.ensure_writable()?;
         let operation = if is_zero_oid(new_oid) {
             RefOperation::Delete
         } else if old_oid.is_some() {
@@ -150,6 +151,7 @@ impl RefService {
         require_fast_forward: bool,
     ) -> Result<MergeOutcome> {
         validate_ref_name(base_ref)?;
+        repo.ensure_writable()?;
         if is_zero_oid(base_oid) || is_zero_oid(head_oid) {
             return Err(GitdError::InvalidInput(
                 "merge requires non-zero base and head oids".to_string(),

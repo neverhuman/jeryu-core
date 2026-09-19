@@ -21,7 +21,7 @@ impl ForgeCore {
         request: CreateCommitStatusRequest,
     ) -> Result<CommitStatus> {
         require_name("sha", sha)?;
-        self.ensure_repo_exists(owner, repo)?;
+        self.ensure_repository_writable(owner, repo)?;
         self.ensure_user(creator);
         let now = Utc::now();
         let status = CommitStatus {
