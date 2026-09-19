@@ -120,6 +120,7 @@ impl RefService {
             args.push(prior_oid);
         }
         run_capture(&self.manager.config().git_bin, &args, Some(&repo.path))?;
+        self.manager.record_push(repo)?;
         Ok(())
     }
 

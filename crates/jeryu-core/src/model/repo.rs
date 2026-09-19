@@ -88,6 +88,10 @@ pub struct Repository {
     pub disabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Last successful push (receive-pack or server-side ref update that moved
+    /// a ref). `None` until a push is observed or git history is backfilled.
+    #[serde(default)]
+    pub pushed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

@@ -1,0 +1,23 @@
+# jankurai:migration v1
+id = "0013_repository_pushed_at"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "old_app_new_db,new_app_old_db"
+requires = ["0012_deployments"]
+rollback = "db/rollbacks/0013_repository_pushed_at.sql"
+backfill = "on open, ForgeCore::backfill_repository_pushed_at fills NULL rows from the newest committer date across refs (git for-each-ref --sort=-committerdate --count=1)"
+data_classification = "internal"
+tenant_impact = "none"
+tests = [
+  "db-migration-analyze",
+  "migration_0013_adds_nullable_pushed_at",
+  "repository_pushed_at_survives_sqlite_reopen",
+  "backfill_fills_only_unset_pushed_at",
+]

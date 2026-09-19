@@ -284,3 +284,20 @@ Deployment read identity and transition invariants:
   memory changes. Any failed row rolls the entire transition back.
 - Current environment state requires an effective success. Historical successes
   remain available as rollback candidates after inactivation.
+
+## 0013 Repository last push
+
+The thirteenth migration adds nullable `repositories.pushed_at` (RFC 3339 UTC).
+
+Constraint policy:
+- Written only after a successful receive-pack or server-side ref update that
+  moved at least one ref (`ForgeCore::record_repository_push`); rejected or
+  no-op pushes leave it unchanged. The value never moves backwards.
+- `NULL` means no push observed and no git history to backfill from.
+
+Rollback/backfill:
+- Existing rows start `NULL`; `ForgeCore::backfill_repository_pushed_at` fills
+  them once from the newest committer date across refs. Rows that already
+  carry a value are never overwritten.
+- `db/rollbacks/0013_repository_pushed_at.sql` is non-destructive; the value is
+  re-derivable from git.

@@ -9,7 +9,8 @@ use crate::pack::{
     read_receive_pack_prefix, spawn_stateless_rpc, stateless_rpc_with_protocol,
 };
 use crate::pktline;
-use crate::repo::RepoManager;
+use crate::push::RefSnapshot;
+use crate::repo::{RepoManager, Repository};
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -161,6 +162,16 @@ impl SmartHttpServer {
         let remaining = content_length.checked_sub(prefix_len).ok_or_else(|| {
             GitdError::Protocol("request body prefix exceeds Content-Length".to_string())
         })?;
+        let push = if service == PackService::ReceivePack {
+            let before = self.manager.begin_push(&repo)?;
+            Some(PendingPush {
+                manager: self.manager.clone(),
+                repo: repo.clone(),
+                before,
+            })
+        } else {
+            None
+        };
         let process = spawn_stateless_rpc(
             &self.manager.config().git_bin,
             &repo,
@@ -169,6 +180,7 @@ impl SmartHttpServer {
         )?;
         Ok(PreparedRpc {
             process,
+            push,
             body_prefix,
             remaining,
             content_length,
@@ -268,6 +280,11 @@ impl SmartHttpServer {
         if service == PackService::ReceivePack {
             ensure_receive_pack_policy(&request.body)?;
         }
+        let before = if service == PackService::ReceivePack {
+            Some(self.manager.begin_push(&repo)?)
+        } else {
+            None
+        };
         let body = stateless_rpc_with_protocol(
             &self.manager.config().git_bin,
             &repo,
@@ -275,6 +292,9 @@ impl SmartHttpServer {
             &request.body,
             git_protocol_header(request)?,
         )?;
+        if let Some(before) = before {
+            self.manager.finish_push(&repo, &before)?;
+        }
         Ok(HttpResponse::bytes(
             200,
             &format!("application/x-{}-result", service.http_name()),
@@ -377,6 +397,7 @@ impl SmartHttpServer {
 
 struct PreparedRpc {
     process: StreamingCommand,
+    push: Option<PendingPush>,
     body_prefix: Vec<u8>,
     remaining: u64,
     content_length: u64,
@@ -390,8 +411,19 @@ impl PreparedRpc {
         let body = Cursor::new(self.body_prefix).chain(input.take(self.remaining));
         self.process.pump(body, output, self.content_length, || {
             cancel_input.shutdown(Shutdown::Read)
-        })
+        })?;
+        if let Some(push) = self.push {
+            push.manager.finish_push(&push.repo, &push.before)?;
+        }
+        Ok(())
     }
+}
+
+/// Ref snapshot taken before a streamed receive-pack, compared afterwards.
+struct PendingPush {
+    manager: RepoManager,
+    repo: Repository,
+    before: RefSnapshot,
 }
 
 struct PreparedLfsDownload {

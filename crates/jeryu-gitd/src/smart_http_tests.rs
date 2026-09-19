@@ -399,3 +399,182 @@ fn temp_dir(prefix: &str) -> PathBuf {
     std::fs::create_dir_all(&path).expect("create test directory");
     path
 }
+
+#[derive(Debug, Default)]
+struct RecordingObserver(std::sync::Mutex<Vec<String>>);
+
+impl crate::PushObserver for RecordingObserver {
+    fn repository_pushed(&self, repo: &RepoId, _at: SystemTime) {
+        self.0.lock().expect("observer lock").push(repo.to_string());
+    }
+}
+
+impl RecordingObserver {
+    fn seen(&self) -> Vec<String> {
+        self.0.lock().expect("observer lock").clone()
+    }
+}
+
+#[test]
+fn receive_pack_records_successful_push_but_not_rejected_push() {
+    if Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| !output.status.success())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let root = temp_dir("jeryu-pushed-at-root");
+    let seed = temp_dir("jeryu-pushed-at-seed");
+    let clone = temp_dir("jeryu-pushed-at-clone");
+    let observer = Arc::new(RecordingObserver::default());
+    let manager = RepoManager::new(GitdConfig::new(&root)).with_push_observer(observer.clone());
+    let repo = manager
+        .create_bare(&RepoId::new("acme", "pushed").expect("valid repo id"))
+        .expect("create bare repository");
+    seed_repository(&seed, &repo.path);
+    manager
+        .install_pre_receive_hook(&repo)
+        .expect("install pre-receive hook");
+    assert_eq!(crate::push::read_push_marker(&repo).expect("marker"), None);
+
+    let (base_url, stop, server_thread) = start_test_server(SmartHttpServer::new(manager.clone()));
+    let remote = format!("{base_url}/acme/pushed.git");
+    run_command(
+        Command::new("git")
+            .args(["clone", "--branch", "main"])
+            .arg(&remote)
+            .arg(&clone),
+        "clone",
+    );
+    run_git(
+        &clone,
+        &["config", "user.email", "p@example.invalid"],
+        "email",
+    );
+    run_git(&clone, &["config", "user.name", "Push Test"], "name");
+    std::fs::write(clone.join("topic.txt"), "topic\n").expect("write topic");
+    run_git(&clone, &["add", "topic.txt"], "add");
+    run_git(&clone, &["commit", "-m", "topic"], "commit");
+
+    // The installed hook rejects direct pushes to main: no ref moves.
+    let rejected = Command::new("git")
+        .args(["push", "origin", "HEAD:refs/heads/main"])
+        .current_dir(&clone)
+        .output()
+        .expect("rejected push runs");
+    assert!(!rejected.status.success(), "main push must be rejected");
+    assert!(observer.seen().is_empty(), "rejected push was recorded");
+    assert_eq!(crate::push::read_push_marker(&repo).expect("marker"), None);
+
+    run_git(
+        &clone,
+        &["push", "origin", "HEAD:refs/heads/topic"],
+        "topic push",
+    );
+    stop.store(true, Ordering::Release);
+    server_thread.join().expect("server thread joins");
+
+    assert_eq!(observer.seen(), vec!["acme/pushed".to_string()]);
+    assert!(
+        crate::push::read_push_marker(&repo)
+            .expect("marker")
+            .is_some()
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(seed);
+    let _ = std::fs::remove_dir_all(clone);
+}
+
+#[test]
+fn ref_update_records_push_and_committer_time_backfills() {
+    if Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| !output.status.success())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let root = temp_dir("jeryu-pushed-at-refs-root");
+    let seed = temp_dir("jeryu-pushed-at-refs-seed");
+    let observer = Arc::new(RecordingObserver::default());
+    let manager = RepoManager::new(GitdConfig::new(&root)).with_push_observer(observer.clone());
+    let repo = manager
+        .create_bare(&RepoId::new("acme", "refs").expect("valid repo id"))
+        .expect("create bare repository");
+    assert_eq!(
+        manager
+            .newest_committer_time("acme", "refs")
+            .expect("empty"),
+        None
+    );
+    assert_eq!(
+        manager
+            .newest_committer_time("acme", "absent")
+            .expect("absent"),
+        None
+    );
+
+    run_git(&seed, &["init"], "init");
+    run_git(
+        &seed,
+        &["config", "user.email", "p@example.invalid"],
+        "email",
+    );
+    run_git(&seed, &["config", "user.name", "Push Test"], "name");
+    std::fs::write(seed.join("a.txt"), "a\n").expect("write");
+    run_git(&seed, &["add", "a.txt"], "add");
+    run_command(
+        Command::new("git")
+            .args(["commit", "-m", "old"])
+            .env("GIT_COMMITTER_DATE", "2026-01-02T03:04:05Z")
+            .current_dir(&seed),
+        "old commit",
+    );
+    std::fs::write(seed.join("b.txt"), "b\n").expect("write");
+    run_git(&seed, &["add", "b.txt"], "add");
+    run_command(
+        Command::new("git")
+            .args(["commit", "-m", "new"])
+            .env("GIT_COMMITTER_DATE", "2026-03-04T05:06:07Z")
+            .current_dir(&seed),
+        "new commit",
+    );
+    let target = repo.path.to_str().unwrap_or_default();
+    run_git(
+        &seed,
+        &["push", target, "HEAD~1:refs/heads/main"],
+        "old ref",
+    );
+    run_git(&seed, &["push", target, "HEAD:refs/heads/topic"], "new ref");
+    assert!(observer.seen().is_empty(), "raw git pushes bypass gitd");
+    assert_eq!(
+        manager
+            .newest_committer_time("acme", "refs")
+            .expect("history"),
+        Some(UNIX_EPOCH + Duration::from_secs(1_772_600_767))
+    );
+
+    let refs = crate::RefService::new(manager.clone());
+    let head = git_output(&seed, &["rev-parse", "HEAD"]);
+    refs.update_ref(&repo, "alice", "refs/heads/feature", &head, None)
+        .expect("create feature ref");
+    assert_eq!(observer.seen(), vec!["acme/refs".to_string()]);
+    assert!(
+        refs.update_ref(
+            &repo,
+            "alice",
+            "refs/heads/feature",
+            &head,
+            Some(&"0".repeat(39))
+        )
+        .is_err()
+    );
+    assert_eq!(observer.seen().len(), 1, "failed ref update was recorded");
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(seed);
+}

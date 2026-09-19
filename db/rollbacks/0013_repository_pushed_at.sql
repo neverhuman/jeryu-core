@@ -1,0 +1,11 @@
+-- Rollback for 0013_repository_pushed_at is intentionally non-destructive.
+--
+-- The nullable column is ignored by an application built before 0013, so a
+-- live rollback retains it and rolls forward after repair. The value is
+-- re-derivable from git (newest committer date across refs), so no snapshot
+-- is required to restore it.
+--
+-- timeout-guard:
+--   lock_timeout = '5s'
+--   statement_timeout = '60s'
+SELECT '0013_repository_pushed_at rollback is non-destructive; retain the additive column and roll forward after repair' AS rollback_notice;

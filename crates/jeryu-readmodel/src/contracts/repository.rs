@@ -77,6 +77,11 @@ pub struct RepositorySummary {
     pub active_agents: u32,
     pub blocked_agents: u32,
     pub updated_at: String,
+    /// Last successful push to the repository (RFC 3339, UTC); `None` when
+    /// no push has been observed and git history had nothing to backfill.
+    /// TS-optional so pre-existing SPA fixtures stay valid.
+    #[ts(optional = nullable)]
+    pub pushed_at: Option<String>,
     /// Newest jankurai audit of the default branch; `None` when no audit has
     /// been ingested, score `None` with a decision when the tool could not
     /// score the tree. TS-optional so pre-existing SPA fixtures stay valid
@@ -262,4 +267,50 @@ pub struct CreateRepositoryPreview {
     pub settings_to_apply: Vec<String>,
     pub side_effects: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": { "id": "r1", "host": "jeryu", "owner": "jeryu", "name": "demo" },
+            "entity": { "kind": "repository", "id": "r1" },
+            "description": null,
+            "visibility": "private",
+            "default_branch": "main",
+            "family": null,
+            "repo_role": null,
+            "topics": [],
+            "language": null,
+            "health": "ok",
+            "open_pull_requests": 0,
+            "failing_checks": 0,
+            "running_jobs": 0,
+            "active_agents": 0,
+            "blocked_agents": 0,
+            "updated_at": "2026-09-19T12:00:00Z",
+            "clone_http_url": null,
+            "clone_ssh_url": null,
+            "available_actions": []
+        })
+    }
+
+    #[test]
+    fn repository_summary_pushed_at_serializes_as_rfc3339_or_null() {
+        let mut summary: RepositorySummary =
+            serde_json::from_value(summary_json()).expect("payload without pushed_at");
+        assert_eq!(summary.pushed_at, None);
+        assert_eq!(
+            serde_json::to_value(&summary).unwrap()["pushed_at"],
+            serde_json::Value::Null
+        );
+
+        summary.pushed_at = Some("2026-09-19T12:34:56Z".to_string());
+        let wire = serde_json::to_value(&summary).unwrap();
+        assert_eq!(wire["pushed_at"], "2026-09-19T12:34:56Z");
+        let back: RepositorySummary = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, summary);
+    }
 }

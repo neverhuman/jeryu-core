@@ -2,10 +2,13 @@
 
 use crate::auth::{AuthRegistry, Principal};
 use crate::command::exec_or_run;
+use crate::config::GitdConfig;
 use crate::error::{GitdError, Result};
 use crate::path::{normalize_repo_name, safe_join, validate_segment};
+use crate::repo::RepoManager;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Parsed SSH Git command.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -167,7 +170,19 @@ pub fn exec_from_env(root: &Path, git_bin: &str) -> Result<i32> {
             )));
         }
     };
-    exec_or_run(git_bin, &[subcommand, &repo])
+    if !parsed.is_write() {
+        return exec_or_run(git_bin, &[subcommand, &repo]);
+    }
+    // receive-pack runs as a child (not exec) so a push that moved refs can be
+    // recorded once git exits; a rejected push leaves refs unchanged.
+    let mut config = GitdConfig::new(root);
+    config.git_bin = git_bin.to_string();
+    let manager = RepoManager::new(config);
+    let opened = manager.open_parts(&parsed.owner, &parsed.repo_git)?;
+    let before = manager.begin_push(&opened)?;
+    let status = Command::new(git_bin).args([subcommand, &repo]).status()?;
+    manager.finish_push(&opened, &before)?;
+    Ok(status.code().unwrap_or(1))
 }
 
 #[cfg(test)]

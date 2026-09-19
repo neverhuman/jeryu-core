@@ -6,6 +6,12 @@ import type { RepositoryVisibility } from "./RepositoryVisibility";
 
 export type RepositorySummary = { id: RepositoryId, entity: { kind: string; id: string }, description: string | null, visibility: RepositoryVisibility, default_branch: string, family: string | null, repo_role: RepositoryRole | null, topics: Array<string>, language: string | null, health: string, open_pull_requests: number, failing_checks: number, running_jobs: number, active_agents: number, blocked_agents: number, updated_at: string, 
 /**
+ * Last successful push to the repository (RFC 3339, UTC); `None` when
+ * no push has been observed and git history had nothing to backfill.
+ * TS-optional so pre-existing SPA fixtures stay valid.
+ */
+pushed_at?: string | null, 
+/**
  * Newest jankurai audit of the default branch; `None` when no audit has
  * been ingested, score `None` with a decision when the tool could not
  * score the tree. TS-optional so pre-existing SPA fixtures stay valid

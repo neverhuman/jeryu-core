@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::hash::Hash;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::{Counters, ForgeCore, require_name};
+use super::{Counters, ForgeCore, RepoPushHistory, require_name};
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
 
@@ -126,6 +126,7 @@ impl ForgeCore {
             disabled: false,
             created_at: now,
             updated_at: now,
+            pushed_at: None,
         };
         state.counters.insert(key.clone(), Counters::default());
         state.repos.insert(key, repo.clone());
@@ -191,6 +192,71 @@ impl ForgeCore {
         let updated = entry.clone();
         self.persist_after_mutation(&mut state, previous)?;
         Ok(updated)
+    }
+
+    /// Record a successful push at `at`. Called by the git edge only after a
+    /// receive-pack or ref update actually moved a ref; rejected pushes never
+    /// reach here. `pushed_at` never moves backwards, so a late-arriving
+    /// notification for an older push is a no-op.
+    pub fn record_repository_push(
+        &self,
+        owner: &str,
+        repo: &str,
+        at: DateTime<Utc>,
+    ) -> Result<Repository> {
+        let mut state = self.state.write();
+        let key = (owner.to_string(), repo.to_string());
+        let Some(current) = state.repos.get(&key) else {
+            return Err(ForgeError::NotFound(format!("repository {owner}/{repo}")));
+        };
+        if current.pushed_at.is_some_and(|pushed_at| pushed_at >= at) {
+            return Ok(current.clone());
+        }
+        let previous = state.clone();
+        let entry = state.repos.get_mut(&key).expect("presence checked above");
+        entry.pushed_at = Some(at);
+        let updated = entry.clone();
+        self.persist_after_mutation(&mut state, previous)?;
+        Ok(updated)
+    }
+
+    /// Fill `pushed_at` for repositories that have none from their git
+    /// history (newest committer date across refs). Rows that already carry a
+    /// value are never overwritten, so running this on every open is a
+    /// one-time backfill per repository. Returns how many rows were filled.
+    pub fn backfill_repository_pushed_at(&self, history: &dyn RepoPushHistory) -> Result<usize> {
+        let pending: Vec<(String, String)> = self
+            .state
+            .read()
+            .repos
+            .iter()
+            .filter(|(_, repo)| repo.pushed_at.is_none())
+            .map(|(key, _)| key.clone())
+            .collect();
+        let mut found = Vec::new();
+        for (owner, name) in pending {
+            if let Some(at) = history.newest_commit_time(&owner, &name)? {
+                found.push(((owner, name), at));
+            }
+        }
+        if found.is_empty() {
+            return Ok(0);
+        }
+        let mut state = self.state.write();
+        let previous = state.clone();
+        let mut filled = 0;
+        for (key, at) in found {
+            if let Some(entry) = state.repos.get_mut(&key)
+                && entry.pushed_at.is_none()
+            {
+                entry.pushed_at = Some(at);
+                filled += 1;
+            }
+        }
+        if filled > 0 {
+            self.persist_after_mutation(&mut state, previous)?;
+        }
+        Ok(filled)
     }
 
     /// Delete a repository and everything scoped to it from the live state.

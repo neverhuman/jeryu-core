@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use parking_lot::{RwLock, RwLockWriteGuard};
 use serde_json::Value;
 use uuid::Uuid;
@@ -141,6 +141,19 @@ pub trait RepoMaterializer: std::fmt::Debug + Send + Sync {
     /// initial `HEAD`. Implementations MUST be idempotent: an already-present
     /// repository is success, not an error.
     fn materialize(&self, owner: &str, name: &str, default_branch: &str) -> Result<()>;
+}
+
+/// Reads push history from a repository's git storage.
+///
+/// Like [`RepoMaterializer`], defined here so `jeryu-core` stays free of the
+/// git-daemon crate: the unified `jeryu serve` backs it with
+/// `jeryu_gitd::RepoManager::newest_committer_time` and hands it to
+/// [`ForgeCore::backfill_repository_pushed_at`] once after opening the store.
+pub trait RepoPushHistory: std::fmt::Debug + Send + Sync {
+    /// Newest committer date across all refs of `owner/name`
+    /// (`git for-each-ref --sort=-committerdate --count=1`); `None` when the
+    /// repository has no commits or no bare directory on disk.
+    fn newest_commit_time(&self, owner: &str, name: &str) -> Result<Option<DateTime<Utc>>>;
 }
 
 #[derive(Debug, Clone, Default)]

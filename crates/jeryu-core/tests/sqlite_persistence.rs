@@ -1,14 +1,14 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-use chrono::Duration;
+use chrono::{Duration, TimeZone, Utc};
 use jeryu_core::{
     CheckConclusion, CheckRunStatus, CommitStatusState, CreateCheckRunRequest,
     CreateCommentRequest, CreateCommitStatusRequest, CreateIssueRequest, CreateLabelRequest,
     CreateOrganizationRequest, CreatePullRequestRequest, CreateRepositoryRequest,
     CreateReviewRequest, CreateTeamRequest, CreateUserRequest, CreateWebhookRequest, ForgeCore,
-    ForgeError, PullRequestCommit, RepoAccessLevel, ReviewCommentInput, ReviewState,
-    SetBranchProtectionRequest, UserRole, WebhookConfig, effective_reviews_for_head,
+    ForgeError, PullRequestCommit, RepoAccessLevel, RepoPushHistory, ReviewCommentInput,
+    ReviewState, SetBranchProtectionRequest, UserRole, WebhookConfig, effective_reviews_for_head,
 };
 use rusqlite::Connection;
 
@@ -890,6 +890,105 @@ fn sqlite_store_round_trips_repository_family() {
         core.set_repository_family("jeryu", "missing", None),
         Err(ForgeError::NotFound(_))
     ));
+}
+
+fn create_demo_repo(core: &ForgeCore, name: &str) {
+    core.create_repository(
+        "jeryu",
+        CreateRepositoryRequest {
+            name: name.to_string(),
+            private: true,
+            description: None,
+            default_branch: Some("main".to_string()),
+        },
+    )
+    .unwrap();
+}
+
+/// `pushed_at` rides the full-rewrite persist, only moves forward, and a
+/// missing repository is NotFound.
+#[test]
+fn repository_pushed_at_survives_sqlite_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("forge.sqlite");
+    let first = Utc.with_ymd_and_hms(2026, 9, 19, 12, 0, 0).unwrap();
+    let older = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+
+    {
+        let core = ForgeCore::open_sqlite(&db).unwrap();
+        create_demo_repo(&core, "demo");
+        assert_eq!(
+            core.get_repository("jeryu", "demo").unwrap().pushed_at,
+            None
+        );
+        let pushed = core.record_repository_push("jeryu", "demo", first).unwrap();
+        assert_eq!(pushed.pushed_at, Some(first));
+        let stale = core.record_repository_push("jeryu", "demo", older).unwrap();
+        assert_eq!(stale.pushed_at, Some(first));
+        create_demo_repo(&core, "other");
+    }
+
+    let core = ForgeCore::open_sqlite(&db).unwrap();
+    assert_eq!(
+        core.get_repository("jeryu", "demo").unwrap().pushed_at,
+        Some(first)
+    );
+    assert_eq!(
+        core.get_repository("jeryu", "other").unwrap().pushed_at,
+        None
+    );
+    assert!(matches!(
+        core.record_repository_push("jeryu", "missing", first),
+        Err(ForgeError::NotFound(_))
+    ));
+}
+
+#[derive(Debug)]
+struct FixedHistory(std::collections::HashMap<String, chrono::DateTime<Utc>>);
+
+impl RepoPushHistory for FixedHistory {
+    fn newest_commit_time(
+        &self,
+        _owner: &str,
+        name: &str,
+    ) -> jeryu_core::Result<Option<chrono::DateTime<Utc>>> {
+        Ok(self.0.get(name).copied())
+    }
+}
+
+/// Backfill fills unset rows from git history, never overwrites an observed
+/// push, leaves history-less repos unset, and persists.
+#[test]
+fn backfill_fills_only_unset_pushed_at() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("forge.sqlite");
+    let observed = Utc.with_ymd_and_hms(2026, 9, 19, 12, 0, 0).unwrap();
+    let committed = Utc.with_ymd_and_hms(2026, 8, 1, 8, 30, 0).unwrap();
+    let history = FixedHistory(
+        [
+            ("pushed".to_string(), committed),
+            ("quiet".to_string(), committed),
+        ]
+        .into_iter()
+        .collect(),
+    );
+
+    {
+        let core = ForgeCore::open_sqlite(&db).unwrap();
+        create_demo_repo(&core, "pushed");
+        create_demo_repo(&core, "quiet");
+        create_demo_repo(&core, "empty");
+        core.record_repository_push("jeryu", "pushed", observed)
+            .unwrap();
+        assert_eq!(core.backfill_repository_pushed_at(&history).unwrap(), 1);
+        assert_eq!(core.backfill_repository_pushed_at(&history).unwrap(), 0);
+    }
+
+    let core = ForgeCore::open_sqlite(&db).unwrap();
+    let pushed_at = |name: &str| core.get_repository("jeryu", name).unwrap().pushed_at;
+    assert_eq!(pushed_at("pushed"), Some(observed));
+    assert_eq!(pushed_at("quiet"), Some(committed));
+    assert_eq!(pushed_at("empty"), None);
 }
 
 /// Jankurai scores must survive the full-rewrite persist, replace records for

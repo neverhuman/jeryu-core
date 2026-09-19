@@ -39,6 +39,7 @@ impl FakeReadService {
                 disabled: false,
                 created_at: now,
                 updated_at: now,
+                pushed_at: None,
             },
         }
     }

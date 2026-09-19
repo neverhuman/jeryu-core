@@ -5,8 +5,11 @@ use crate::config::GitdConfig;
 use crate::error::{GitdError, Result};
 use crate::hooks::PRE_RECEIVE_HOOK;
 use crate::path::{normalize_repo_name, safe_join, validate_segment};
+use crate::push::{PushObserver, RefSnapshot, ref_snapshot, write_push_marker};
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 /// Logical repository identifier.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -56,13 +59,63 @@ pub struct Repository {
 #[derive(Clone, Debug)]
 pub struct RepoManager {
     config: GitdConfig,
+    push_observer: Option<Arc<dyn PushObserver>>,
 }
 
 impl RepoManager {
     /// Create a manager.
     #[must_use]
     pub fn new(config: GitdConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            push_observer: None,
+        }
+    }
+
+    /// Report every successful push to `observer` (the unified `jeryu serve`
+    /// forwards it to `ForgeCore::record_repository_push`).
+    #[must_use]
+    pub fn with_push_observer(mut self, observer: Arc<dyn PushObserver>) -> Self {
+        self.push_observer = Some(observer);
+        self
+    }
+
+    /// Snapshot refs before a push so [`Self::finish_push`] can tell whether
+    /// it moved anything.
+    pub fn begin_push(&self, repo: &Repository) -> Result<RefSnapshot> {
+        ref_snapshot(&self.config.git_bin, repo)
+    }
+
+    /// Record a push when refs differ from `before`; a rejected or no-op push
+    /// leaves refs unchanged and is not recorded. Returns whether it recorded.
+    pub fn finish_push(&self, repo: &Repository, before: &RefSnapshot) -> Result<bool> {
+        if ref_snapshot(&self.config.git_bin, repo)? == *before {
+            return Ok(false);
+        }
+        self.record_push(repo)?;
+        Ok(true)
+    }
+
+    /// Record a successful push now: marker file, receipt, observer.
+    pub fn record_push(&self, repo: &Repository) -> Result<()> {
+        let at = SystemTime::now();
+        write_push_marker(repo, at)?;
+        if let Some(observer) = &self.push_observer {
+            observer.repository_pushed(&repo.id, at);
+        }
+        Ok(())
+    }
+
+    /// Newest committer date across refs of `owner/name`; `None` when the
+    /// repository is absent on disk or has no commits. Backs the forge's
+    /// one-time `pushed_at` backfill.
+    pub fn newest_committer_time(&self, owner: &str, name: &str) -> Result<Option<SystemTime>> {
+        let repo = match self.open_parts(owner, name) {
+            Ok(repo) => repo,
+            Err(GitdError::RepoNotFound(_)) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        crate::push::newest_committer_time(&self.config.git_bin, &repo)
     }
 
     /// Access the active config.

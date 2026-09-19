@@ -295,8 +295,8 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
             r#"
             INSERT INTO repositories (
               id, owner, name, full_name, private, description, default_branch,
-              archived, disabled, created_at, updated_at, family
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+              archived, disabled, created_at, updated_at, family, pushed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             "#,
             params![
                 repo.id.to_string(),
@@ -311,6 +311,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
                 time(repo.created_at),
                 time(repo.updated_at),
                 repo.family,
+                repo.pushed_at.map(time),
             ],
         )
         .map_err(storage_error)?;
@@ -904,7 +905,7 @@ fn load_repositories(conn: &Connection, state: &mut State) -> Result<()> {
         .prepare(
             r#"
             SELECT id, owner, name, full_name, private, description, default_branch,
-                   archived, disabled, created_at, updated_at, family
+                   archived, disabled, created_at, updated_at, family, pushed_at
             FROM repositories
             "#,
         )
@@ -924,6 +925,11 @@ fn load_repositories(conn: &Connection, state: &mut State) -> Result<()> {
             disabled: int_bool(row.get(8).map_err(storage_error)?),
             created_at: parse_time(row.get(9).map_err(storage_error)?)?,
             updated_at: parse_time(row.get(10).map_err(storage_error)?)?,
+            pushed_at: row
+                .get::<_, Option<String>>(12)
+                .map_err(storage_error)?
+                .map(parse_time)
+                .transpose()?,
         };
         state
             .repos

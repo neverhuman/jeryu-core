@@ -38,12 +38,15 @@ const MIGRATION_0010: &str =
     include_str!("../../../../../db/migrations/0010_account_lifecycle.sql");
 const MIGRATION_0011: &str = include_str!("../../../../../db/migrations/0011_review_head_sha.sql");
 const MIGRATION_0012: &str = include_str!("../../../../../db/migrations/0012_deployments.sql");
+const MIGRATION_0013: &str =
+    include_str!("../../../../../db/migrations/0013_repository_pushed_at.sql");
 
 pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     apply_migrations_through_0010(conn)?;
     apply_migration_0011(conn)?;
     // 0012 is pure CREATE TABLE/INDEX IF NOT EXISTS: idempotent, no guard.
     conn.execute_batch(MIGRATION_0012).map_err(storage_error)?;
+    apply_migration_0013(conn)?;
     Ok(())
 }
 
@@ -148,6 +151,10 @@ fn apply_migration_0010(conn: &Connection) -> Result<()> {
 
 fn apply_migration_0011(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "reviews", "head_sha", MIGRATION_0011)
+}
+
+fn apply_migration_0013(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "repositories", "pushed_at", MIGRATION_0013)
 }
 
 fn add_column_if_missing(
@@ -317,6 +324,8 @@ mod tests {
             )
             .expect("read migrated review");
         assert_eq!(head_sha, None);
+        // load_state reads the current schema; finish migrating first.
+        apply_migrations(&conn).expect("migrate to current schema");
         let state = super::super::load_state(&conn).expect("load migrated production shape");
         let reviews = state
             .reviews
@@ -328,6 +337,27 @@ mod tests {
             crate::effective_reviews_for_head(reviews, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn migration_0013_adds_nullable_pushed_at() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        apply_migrations_through_0010(&conn).expect("migrate through 0010");
+        apply_migration_0011(&conn).expect("0011");
+        conn.execute_batch(MIGRATION_0012).expect("0012");
+        assert!(!column_exists(&conn, "repositories", "pushed_at").expect("inspect old shape"));
+        insert_repo(&conn, "00000000-0000-0000-0000-000000000001", "demo", None);
+
+        apply_migration_0013(&conn).expect("apply 0013");
+        apply_migration_0013(&conn).expect("reapply 0013");
+        let pushed_at: Option<String> = conn
+            .query_row(
+                "SELECT pushed_at FROM repositories WHERE name = 'demo'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read migrated repo");
+        assert_eq!(pushed_at, None);
     }
 
     fn insert_repo(conn: &Connection, id: &str, name: &str, description: Option<&str>) {
