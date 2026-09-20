@@ -67,6 +67,12 @@ pub struct RepositorySummary {
     pub visibility: RepositoryVisibility,
     pub default_branch: String,
     pub family: Option<String>,
+    /// Archived means read-only: the repository still reads and clones, but
+    /// pushes, pull requests, reviews and merges are refused. Nothing is
+    /// deleted and unarchiving restores everything. `#[serde(default)]` keeps
+    /// a payload written before this field existed readable.
+    #[serde(default)]
+    pub archived: bool,
     pub repo_role: Option<RepositoryRole>,
     pub topics: Vec<String>,
     pub language: Option<String>,

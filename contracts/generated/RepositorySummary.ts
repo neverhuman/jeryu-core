@@ -4,7 +4,14 @@ import type { RepositoryMirrorStatus } from "./RepositoryMirrorStatus";
 import type { RepositoryRole } from "./RepositoryRole";
 import type { RepositoryVisibility } from "./RepositoryVisibility";
 
-export type RepositorySummary = { id: RepositoryId, entity: { kind: string; id: string }, description: string | null, visibility: RepositoryVisibility, default_branch: string, family: string | null, repo_role: RepositoryRole | null, topics: Array<string>, language: string | null, health: string, open_pull_requests: number, failing_checks: number, running_jobs: number, active_agents: number, blocked_agents: number, updated_at: string, 
+export type RepositorySummary = { id: RepositoryId, entity: { kind: string; id: string }, description: string | null, visibility: RepositoryVisibility, default_branch: string, family: string | null, 
+/**
+ * Archived means read-only: the repository still reads and clones, but
+ * pushes, pull requests, reviews and merges are refused. Nothing is
+ * deleted and unarchiving restores everything. `#[serde(default)]` keeps
+ * a payload written before this field existed readable.
+ */
+archived: boolean, repo_role: RepositoryRole | null, topics: Array<string>, language: string | null, health: string, open_pull_requests: number, failing_checks: number, running_jobs: number, active_agents: number, blocked_agents: number, updated_at: string, 
 /**
  * Last successful push to the repository (RFC 3339, UTC); `None` when
  * no push has been observed and git history had nothing to backfill.
