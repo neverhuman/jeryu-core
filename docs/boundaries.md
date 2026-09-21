@@ -64,4 +64,4 @@ unclaimed sibling repo while still allowing an in-workspace read
 (`secret_paths_denied`), a runaway allocator is OOM-killed by its `memory.max`
 (`memory_oom_kill`), the egress proxy denies the plain-HTTP forward path and an
 empty allowlist by default, and the record-only auto-merge bridge is held by a
-7-probe adversarial harness. See `docs/testing.md`.
+7-probe adversarial harness. These suites run in jeryu-deploy; see `docs/testing.md#workcells`.
