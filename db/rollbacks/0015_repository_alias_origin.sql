@@ -1,0 +1,11 @@
+-- Rollback for 0015_repository_alias_origin is intentionally non-destructive.
+--
+-- An application built before 0015 ignores the column; its full-state rewrite
+-- reinserts aliases without it and they default back to 'transfer', while the
+-- redirects themselves keep working. Retain the additive column and roll
+-- forward after repair.
+--
+-- timeout-guard:
+--   lock_timeout = '5s'
+--   statement_timeout = '60s'
+SELECT '0015_repository_alias_origin rollback is non-destructive; retain the additive column and roll forward after repair' AS rollback_notice;

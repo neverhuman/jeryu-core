@@ -149,8 +149,9 @@ impl SmartHttpServer {
         let suffix = format!("/{}", service.http_name());
         let base = request.path.trim_end_matches(&suffix);
         let (owner, repo_name) = parse_repo_from_path(base)?;
-        self.authorize(request, &owner, service.is_write())?;
-        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        let id = self.manager.canonical_parts(&owner, &repo_name)?;
+        self.authorize(request, &id.owner, service.is_write())?;
+        let repo = self.manager.open(&id)?;
         if service.is_write() {
             repo.ensure_writable()?;
         }
@@ -193,8 +194,9 @@ impl SmartHttpServer {
 
     fn prepare_lfs_download(&self, request: &HttpRequest) -> Result<Option<PreparedLfsDownload>> {
         let (owner, repo_name, oid) = lfs_object_path_parts(&request.path)?;
-        self.authorize(request, &owner, false)?;
-        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        let id = self.manager.canonical_parts(&owner, &repo_name)?;
+        self.authorize(request, &id.owner, false)?;
+        let repo = self.manager.open(&id)?;
         let Some((file, size)) = LfsStore::for_repo(&repo.path).open_reader(&oid)? else {
             return Ok(None);
         };
@@ -257,8 +259,9 @@ impl SmartHttpServer {
         let service = PackService::parse(service)
             .ok_or_else(|| GitdError::Http(format!("unsupported service: {service}")))?;
         let (owner, repo_name) = parse_repo_from_path(request.path.trim_end_matches("/info/refs"))?;
-        self.authorize(request, &owner, service.is_write())?;
-        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        let id = self.manager.canonical_parts(&owner, &repo_name)?;
+        self.authorize(request, &id.owner, service.is_write())?;
+        let repo = self.manager.open(&id)?;
         let mut body = pktline::encode_str(&format!("# service={}\n", service.http_name()));
         body.extend(pktline::flush());
         body.extend(advertise_refs_with_protocol(
@@ -278,8 +281,9 @@ impl SmartHttpServer {
         let suffix = format!("/{}", service.http_name());
         let base = request.path.trim_end_matches(&suffix);
         let (owner, repo_name) = parse_repo_from_path(base)?;
-        self.authorize(request, &owner, service.is_write())?;
-        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        let id = self.manager.canonical_parts(&owner, &repo_name)?;
+        self.authorize(request, &id.owner, service.is_write())?;
+        let repo = self.manager.open(&id)?;
         if service == PackService::ReceivePack {
             repo.ensure_writable()?;
             ensure_receive_pack_policy(&request.body)?;
@@ -310,8 +314,9 @@ impl SmartHttpServer {
         let (owner, repo_name) =
             parse_repo_from_path(request.path.trim_end_matches("/info/lfs/objects/batch"))?;
         let write = lfs_batch_is_write(&request.body)?;
-        self.authorize(request, &owner, write)?;
-        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        let id = self.manager.canonical_parts(&owner, &repo_name)?;
+        self.authorize(request, &id.owner, write)?;
+        let repo = self.manager.open(&id)?;
         if write {
             repo.ensure_writable()?;
         }
@@ -339,8 +344,9 @@ impl SmartHttpServer {
         reader: impl Read,
     ) -> Result<HttpResponse> {
         let (owner, repo_name, oid) = lfs_object_path_parts(&request.path)?;
-        self.authorize(request, &owner, true)?;
-        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        let id = self.manager.canonical_parts(&owner, &repo_name)?;
+        self.authorize(request, &id.owner, true)?;
+        let repo = self.manager.open(&id)?;
         LfsStore::for_repo(&repo.path).put_reader_with_limit(
             &oid,
             expected_size,
@@ -356,8 +362,9 @@ impl SmartHttpServer {
 
     fn lfs_download(&self, request: &HttpRequest) -> Result<HttpResponse> {
         let (owner, repo_name, oid) = lfs_object_path_parts(&request.path)?;
-        self.authorize(request, &owner, false)?;
-        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        let id = self.manager.canonical_parts(&owner, &repo_name)?;
+        self.authorize(request, &id.owner, false)?;
+        let repo = self.manager.open(&id)?;
         let store = LfsStore::for_repo(&repo.path);
         if !store.exists(&oid) {
             return Ok(lfs_error_response(404, "object not found"));
@@ -371,8 +378,9 @@ impl SmartHttpServer {
 
     fn lfs_verify(&self, request: &HttpRequest) -> Result<HttpResponse> {
         let (owner, repo_name, oid) = lfs_object_path_parts(&request.path)?;
-        self.authorize(request, &owner, true)?;
-        let repo = self.manager.open_parts(&owner, &repo_name)?;
+        let id = self.manager.canonical_parts(&owner, &repo_name)?;
+        self.authorize(request, &id.owner, true)?;
+        let repo = self.manager.open(&id)?;
         let verify: LfsVerifyRequest = serde_json::from_slice(&request.body)
             .map_err(|err| GitdError::Lfs(format!("invalid LFS verify JSON: {err}")))?;
         let body_oid = normalize_oid(&verify.oid)?;
@@ -393,8 +401,9 @@ impl SmartHttpServer {
     fn lfs_locks_verify(&self, request: &HttpRequest) -> Result<HttpResponse> {
         let (owner, repo_name) =
             parse_repo_from_path(request.path.trim_end_matches("/info/lfs/locks/verify"))?;
-        self.authorize(request, &owner, true)?;
-        self.manager.open_parts(&owner, &repo_name)?;
+        let id = self.manager.canonical_parts(&owner, &repo_name)?;
+        self.authorize(request, &id.owner, true)?;
+        self.manager.open(&id)?;
         Ok(HttpResponse::bytes(
             200,
             "application/vnd.git-lfs+json",
@@ -890,3 +899,7 @@ mod tests;
 #[cfg(test)]
 #[path = "lfs_stream_tests.rs"]
 mod lfs_stream_tests;
+
+#[cfg(test)]
+#[path = "redirect_tests.rs"]
+mod redirect_tests;

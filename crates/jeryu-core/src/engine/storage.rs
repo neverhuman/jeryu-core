@@ -35,6 +35,9 @@ impl SqliteStore {
         // The deploy history is not part of the snapshot `load_state` reads; it
         // has its own append-only tables (see `storage::deployments`).
         deployments::load_deployments(&conn, &mut state)?;
+        // Deploy rows keep the slug they were appended under; a later rename
+        // or transfer re-keys only the repository, so follow its UUID.
+        super::refresh_deployment_slugs(&mut state);
         let mut backfilled = backfill_missing_counters(&mut state);
         backfilled += super::backfill_default_branch_protections(&mut state);
         drop(conn);
@@ -351,8 +354,8 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
             r#"
             INSERT INTO repository_aliases (
               old_owner, old_name, repository_id, canonical_owner, canonical_name,
-              created_at, transaction_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+              created_at, transaction_id, origin
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
             params![
                 alias.owner,
@@ -362,6 +365,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
                 alias.canonical_name,
                 time(alias.created_at),
                 alias.transaction_id.to_string(),
+                text(&alias.origin)?,
             ],
         )
         .map_err(storage_error)?;
@@ -982,7 +986,7 @@ fn load_repository_aliases(conn: &Connection, state: &mut State) -> Result<()> {
         .prepare(
             r#"
             SELECT old_owner, old_name, repository_id, canonical_owner, canonical_name,
-                   created_at, transaction_id
+                   created_at, transaction_id, origin
             FROM repository_aliases
             "#,
         )
@@ -997,6 +1001,7 @@ fn load_repository_aliases(conn: &Connection, state: &mut State) -> Result<()> {
             canonical_name: row.get(4).map_err(storage_error)?,
             created_at: parse_time(row.get(5).map_err(storage_error)?)?,
             transaction_id: parse_uuid(row.get(6).map_err(storage_error)?)?,
+            origin: from_text(row.get(7).map_err(storage_error)?)?,
         };
         state
             .repository_aliases

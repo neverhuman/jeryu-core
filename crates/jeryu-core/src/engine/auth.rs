@@ -795,7 +795,7 @@ impl ForgeCore {
         access: RepoAccessLevel,
     ) -> Result<RepoAccessGrant> {
         self.get_account(login)?;
-        self.get_repository(owner, repo)?;
+        self.canonical_repository(owner, repo)?;
         let mut state = self.state.write();
         let previous = state.clone();
         let grant = RepoAccessGrant {
@@ -822,7 +822,7 @@ impl ForgeCore {
         repo: &str,
         access: RepoAccessLevel,
     ) -> Result<RepoAccessGrant> {
-        self.get_repository(owner, repo)?;
+        self.canonical_repository(owner, repo)?;
         if !self.user_can_admin_repo(actor, owner, repo) {
             return Err(ForgeError::BranchProtection(
                 "repo admin access required".to_string(),
@@ -849,7 +849,7 @@ impl ForgeCore {
         owner: &str,
         repo: &str,
     ) -> Result<bool> {
-        self.get_repository(owner, repo)?;
+        self.canonical_repository(owner, repo)?;
         if !self.user_can_admin_repo(actor, owner, repo) {
             return Err(ForgeError::BranchProtection(
                 "repo admin access required".to_string(),
@@ -877,7 +877,7 @@ impl ForgeCore {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<RepoAccessGrant>> {
-        self.get_repository(owner, repo)?;
+        self.canonical_repository(owner, repo)?;
         if !self.user_can_admin_repo(actor, owner, repo) {
             return Err(ForgeError::BranchProtection(
                 "repo admin access required".to_string(),

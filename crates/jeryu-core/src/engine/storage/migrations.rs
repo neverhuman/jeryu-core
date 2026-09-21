@@ -43,6 +43,8 @@ const MIGRATION_0013: &str =
 const MIGRATION_0014: &str = include_str!(
     "../../../../../db/migrations/0014_repository_default_branch_protection_opt_out.sql"
 );
+const MIGRATION_0015: &str =
+    include_str!("../../../../../db/migrations/0015_repository_alias_origin.sql");
 
 pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     apply_migrations_through_0010(conn)?;
@@ -51,6 +53,7 @@ pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_0012).map_err(storage_error)?;
     apply_migration_0013(conn)?;
     apply_migration_0014(conn)?;
+    apply_migration_0015(conn)?;
     Ok(())
 }
 
@@ -168,6 +171,10 @@ fn apply_migration_0014(conn: &Connection) -> Result<()> {
         "default_branch_protection_opt_out",
         MIGRATION_0014,
     )
+}
+
+fn apply_migration_0015(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "repository_aliases", "origin", MIGRATION_0015)
 }
 
 fn add_column_if_missing(
@@ -392,6 +399,55 @@ mod tests {
             )
             .expect("read migrated repo");
         assert_eq!(opt_out, 0);
+    }
+
+    #[test]
+    fn migration_0015_adds_alias_origin_defaulting_to_transfer() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        apply_migrations_through_0010(&conn).expect("migrate through 0010");
+        apply_migration_0011(&conn).expect("0011");
+        conn.execute_batch(MIGRATION_0012).expect("0012");
+        apply_migration_0013(&conn).expect("0013");
+        apply_migration_0014(&conn).expect("0014");
+        let repo_id = "00000000-0000-0000-0000-000000000001";
+        let transaction_id = "00000000-0000-0000-0000-0000000000aa";
+        insert_repo(&conn, repo_id, "demo", None);
+        conn.execute(
+            r#"
+            INSERT INTO repository_transfer_journal (
+              transaction_id, idempotency_key, request_fingerprint, repository_id,
+              source_owner, source_name, destination_owner, destination_name,
+              status, prepared_at
+            ) VALUES (?2, 'k', 'f', ?1, 'old', 'demo', 'jeryu', 'demo', 'committed',
+                      '2026-06-01T00:00:00Z')
+            "#,
+            rusqlite::params![repo_id, transaction_id],
+        )
+        .expect("insert journal");
+        conn.execute(
+            r#"
+            INSERT INTO repository_aliases (
+              old_owner, old_name, repository_id, canonical_owner, canonical_name,
+              created_at, transaction_id
+            ) VALUES ('old', 'demo', ?1, 'jeryu', 'demo', '2026-06-01T00:00:00Z', ?2)
+            "#,
+            rusqlite::params![repo_id, transaction_id],
+        )
+        .expect("insert alias");
+
+        apply_migration_0015(&conn).expect("apply 0015");
+        apply_migration_0015(&conn).expect("reapply 0015");
+        let origin: String = conn
+            .query_row("SELECT origin FROM repository_aliases", [], |row| {
+                row.get(0)
+            })
+            .expect("read migrated alias");
+        assert_eq!(origin, "transfer");
+        assert!(
+            conn.execute("UPDATE repository_aliases SET origin = 'other'", [])
+                .is_err(),
+            "origin is closed to transfer/rename"
+        );
     }
 
     fn insert_repo(conn: &Connection, id: &str, name: &str, description: Option<&str>) {

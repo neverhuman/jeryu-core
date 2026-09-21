@@ -55,11 +55,22 @@ pub struct Repository {
     pub path: PathBuf,
 }
 
+/// Maps a renamed or transferred repository's old slug to its current one.
+///
+/// `jeryu-gitd` does not depend on the forge core: the unified `jeryu serve`
+/// backs this with `ForgeCore::get_repository_alias`, so clone, fetch and push
+/// by an old name keep reaching the moved bare repository.
+pub trait RepoRedirects: std::fmt::Debug + Send + Sync {
+    /// Current id for the old `owner/name`, or `None` when it is not an alias.
+    fn redirect(&self, owner: &str, name: &str) -> Option<RepoId>;
+}
+
 /// Repository manager rooted at a storage directory.
 #[derive(Clone, Debug)]
 pub struct RepoManager {
     config: GitdConfig,
     push_observer: Option<Arc<dyn PushObserver>>,
+    redirects: Option<Arc<dyn RepoRedirects>>,
 }
 
 impl RepoManager {
@@ -69,7 +80,16 @@ impl RepoManager {
         Self {
             config,
             push_observer: None,
+            redirects: None,
         }
+    }
+
+    /// Follow old-name aliases from `redirects` when a requested repository
+    /// has no bare directory of its own.
+    #[must_use]
+    pub fn with_redirects(mut self, redirects: Arc<dyn RepoRedirects>) -> Self {
+        self.redirects = Some(redirects);
+        self
     }
 
     /// Report every successful push to `observer` (the unified `jeryu serve`
@@ -162,21 +182,82 @@ impl RepoManager {
     }
 
     /// Open an existing repository.
+    ///
+    /// A repository present on disk under `id` always wins; only when it is
+    /// absent is `id` followed through [`RepoRedirects`] to a moved one.
     pub fn open(&self, id: &RepoId) -> Result<Repository> {
         let repo = self.resolve(id)?;
-        if !repo.path.join("HEAD").is_file() {
-            return Err(GitdError::RepoNotFound(repo.path));
+        if repo.path.join("HEAD").is_file() {
+            return Ok(repo);
         }
-        Ok(repo)
+        if let Some(target) = self.redirect_target(id)? {
+            return Ok(target);
+        }
+        Err(GitdError::RepoNotFound(repo.path))
     }
 
-    /// Open a repository by URL path segments.
+    /// Open a repository by URL path segments, following redirects.
     pub fn open_parts(&self, owner: &str, repo: &str) -> Result<Repository> {
         let repo = self.resolve_parts(owner, repo)?;
+        self.open(&repo.id)
+    }
+
+    /// The id `owner/repo` is served as: itself when it exists on disk or
+    /// has no redirect, otherwise the current id of the moved repository.
+    /// Authorization must use the returned owner.
+    pub fn canonical_parts(&self, owner: &str, repo: &str) -> Result<RepoId> {
+        let requested = self.resolve_parts(owner, repo)?;
+        if requested.path.join("HEAD").is_file() {
+            return Ok(requested.id);
+        }
+        Ok(self
+            .redirect_target(&requested.id)?
+            .map_or(requested.id, |target| target.id))
+    }
+
+    fn redirect_target(&self, id: &RepoId) -> Result<Option<Repository>> {
+        let Some(redirects) = &self.redirects else {
+            return Ok(None);
+        };
+        let Some(target) = redirects.redirect(&id.owner, &id.name) else {
+            return Ok(None);
+        };
+        if target == *id {
+            return Ok(None);
+        }
+        let repo = self.resolve(&RepoId::new(target.owner, target.name)?)?;
         if !repo.path.join("HEAD").is_file() {
             return Err(GitdError::RepoNotFound(repo.path));
         }
-        Ok(repo)
+        Ok(Some(repo))
+    }
+
+    /// Move the bare repository `from` to `to` (a rename or a transfer).
+    ///
+    /// Refuses when `from` is missing or `to` already exists; the owner
+    /// directory of `to` is created on demand. The move is one `rename(2)`
+    /// within the storage root, so it either happens completely or not at all.
+    pub fn relocate_bare(&self, from: &RepoId, to: &RepoId) -> Result<Repository> {
+        let source = self.resolve(from)?;
+        if !source.path.join("HEAD").is_file() {
+            return Err(GitdError::RepoNotFound(source.path));
+        }
+        let target = self.resolve(to)?;
+        if target.path.exists() {
+            return Err(GitdError::InvalidInput(format!(
+                "repository already exists: {to}"
+            )));
+        }
+        let parent = target
+            .path
+            .parent()
+            .ok_or_else(|| GitdError::InvalidPath("missing repository parent".to_string()))?;
+        std::fs::create_dir_all(parent)?;
+        std::fs::rename(&source.path, &target.path)?;
+        let metadata = target.path.join("jeryu");
+        std::fs::create_dir_all(&metadata)?;
+        std::fs::write(metadata.join("repo-id"), to.to_string())?;
+        Ok(target)
     }
 
     /// Attach Jeryu metadata to an existing bare repository in this manager.

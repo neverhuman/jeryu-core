@@ -312,7 +312,9 @@ fn exercise_shallow_push(protocol: &str) {
     let _ = std::fs::remove_dir_all(clone);
 }
 
-fn start_test_server(server: SmartHttpServer) -> (String, Arc<AtomicBool>, JoinHandle<()>) {
+pub(super) fn start_test_server(
+    server: SmartHttpServer,
+) -> (String, Arc<AtomicBool>, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
     listener
         .set_nonblocking(true)
@@ -336,7 +338,7 @@ fn start_test_server(server: SmartHttpServer) -> (String, Arc<AtomicBool>, JoinH
     (format!("http://{address}"), stop, handle)
 }
 
-fn seed_repository(work: &Path, remote: &Path) {
+pub(super) fn seed_repository(work: &Path, remote: &Path) {
     run_git(work, &["init"], "seed init");
     run_git(
         work,
@@ -362,11 +364,11 @@ fn seed_repository(work: &Path, remote: &Path) {
     );
 }
 
-fn run_git(work: &Path, args: &[&str], label: &str) {
+pub(super) fn run_git(work: &Path, args: &[&str], label: &str) {
     run_command(Command::new("git").args(args).current_dir(work), label);
 }
 
-fn run_command(command: &mut Command, label: &str) {
+pub(super) fn run_command(command: &mut Command, label: &str) {
     let output = command
         .output()
         .unwrap_or_else(|err| panic!("{label} failed to start: {err}"));
@@ -378,7 +380,7 @@ fn run_command(command: &mut Command, label: &str) {
     );
 }
 
-fn git_output(work: &Path, args: &[&str]) -> String {
+pub(super) fn git_output(work: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
         .current_dir(work)
@@ -388,7 +390,7 @@ fn git_output(work: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn temp_dir(prefix: &str) -> PathBuf {
+pub(super) fn temp_dir(prefix: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

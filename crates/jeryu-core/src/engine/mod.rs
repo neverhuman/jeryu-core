@@ -32,6 +32,7 @@ mod jankurai;
 mod pull_requests;
 mod readmes;
 mod repositories;
+mod repository_rename;
 mod repository_transfer;
 mod repository_transfer_state;
 mod reviews;
@@ -134,6 +135,37 @@ fn ensure_default_branch_protection(state: &mut State, repo: &Repository) -> boo
     true
 }
 
+/// The repository `owner/name` names: the canonical one, else the target of
+/// an old-name alias. Aliases are retargeted on every move, so one hop is the
+/// whole chain.
+fn resolve_repository<'a>(state: &'a State, owner: &str, name: &str) -> Option<&'a Repository> {
+    let key = (owner.to_string(), name.to_string());
+    if let Some(repo) = state.repos.get(&key) {
+        return Some(repo);
+    }
+    let alias = state.repository_aliases.get(&key)?;
+    state
+        .repos
+        .get(&(alias.canonical_owner.clone(), alias.canonical_name.clone()))
+        .filter(|repo| repo.id == alias.repository_id)
+}
+
+/// Point every deployment's denormalized `owner/repo` at the current slug of
+/// its repository (matched by UUID).
+fn refresh_deployment_slugs(state: &mut State) {
+    let slugs: HashMap<Uuid, (String, String)> = state
+        .repos
+        .values()
+        .map(|repo| (repo.id, (repo.owner.clone(), repo.name.clone())))
+        .collect();
+    for deployment in state.deployments.values_mut() {
+        if let Some((owner, name)) = slugs.get(&deployment.repository_id) {
+            deployment.owner.clone_from(owner);
+            deployment.repo.clone_from(name);
+        }
+    }
+}
+
 fn backfill_default_branch_protections(state: &mut State) -> usize {
     let repos: Vec<_> = state.repos.values().cloned().collect();
     repos
@@ -179,11 +211,31 @@ pub trait RepoBranches: std::fmt::Debug + Send + Sync {
     fn branch_exists(&self, owner: &str, name: &str, branch: &str) -> Result<bool>;
 }
 
+/// Moves a repository's bare git directory on disk for a rename or transfer.
+///
+/// Like [`RepoMaterializer`], defined here so `jeryu-core` stays free of the
+/// git-daemon crate: the unified `jeryu serve` backs it with
+/// `jeryu_gitd::RepoManager::relocate_bare` via
+/// [`ForgeCore::with_repo_relocator`]. With none set, renames are
+/// metadata-only.
+pub trait RepoRelocator: std::fmt::Debug + Send + Sync {
+    /// Move `from_owner/from_name` to `to_owner/to_name`. Must either move the
+    /// directory completely or leave it where it was and return an error.
+    fn relocate(
+        &self,
+        from_owner: &str,
+        from_name: &str,
+        to_owner: &str,
+        to_name: &str,
+    ) -> Result<()>;
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ForgeCore {
     state: Arc<RwLock<State>>,
     storage: Option<Arc<storage::SqliteStore>>,
     repo_materializer: Option<Arc<dyn RepoMaterializer>>,
+    repo_relocator: Option<Arc<dyn RepoRelocator>>,
 }
 
 impl ForgeCore {
@@ -199,17 +251,29 @@ impl ForgeCore {
         self
     }
 
+    /// Inject a [`RepoRelocator`] so [`Self::rename_repository`] also moves
+    /// the bare git repository on disk (used by the unified `jeryu serve`).
+    #[must_use]
+    pub fn with_repo_relocator(mut self, relocator: Arc<dyn RepoRelocator>) -> Self {
+        self.repo_relocator = Some(relocator);
+        self
+    }
+
     pub fn open_sqlite(path: impl AsRef<Path>) -> Result<Self> {
         let (storage, state) = storage::SqliteStore::open(path)?;
         Ok(Self {
             state: Arc::new(RwLock::new(state)),
             storage: Some(Arc::new(storage)),
             repo_materializer: None,
+            repo_relocator: None,
         })
     }
 
+    /// Strict existence check on the canonical slug. Internal writers key
+    /// state by the `(owner, repo)` they were given, so they must never follow
+    /// an old-name alias.
     fn ensure_repo_exists(&self, owner: &str, repo: &str) -> Result<()> {
-        self.get_repository(owner, repo).map(|_| ())
+        self.canonical_repository(owner, repo).map(|_| ())
     }
 
     /// Refuse a write to `owner/repo` when it is archived.

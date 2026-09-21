@@ -1,0 +1,22 @@
+# jankurai:migration v1
+id = "0015_repository_alias_origin"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "old_app_new_db,new_app_old_db"
+requires = ["0014_repository_default_branch_protection_opt_out"]
+rollback = "db/rollbacks/0015_repository_alias_origin.sql"
+backfill = "none; existing aliases default to 'transfer', which is how they were written"
+data_classification = "internal"
+tenant_impact = "none"
+tests = [
+  "db-migration-analyze",
+  "migration_0015_adds_alias_origin_defaulting_to_transfer",
+  "transfer_rekeys_every_scoped_map_and_redirects_the_old_name",
+]

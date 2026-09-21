@@ -227,10 +227,11 @@ fn transfer_preserves_uuid_scoped_state_alias_and_journal_across_reopen() {
     }
 
     let core = ForgeCore::open_sqlite(&database).unwrap();
-    assert!(matches!(
-        core.get_repository("jeryu", "redline"),
-        Err(ForgeError::NotFound(_))
-    ));
+    // The old slug redirects to the moved repository.
+    assert_eq!(
+        core.get_repository("jeryu", "redline").unwrap().full_name,
+        "veox/redline"
+    );
     assert_eq!(
         core.get_repository("veox", "redline").unwrap().id,
         repository_id

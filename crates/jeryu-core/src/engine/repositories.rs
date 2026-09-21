@@ -153,7 +153,19 @@ impl ForgeCore {
         repos
     }
 
+    /// Look up `owner/repo`, following an old-name alias left by a rename or
+    /// transfer (the way GitHub keeps a moved repository's old URL working).
+    /// A repository that exists under the requested slug always wins over an
+    /// alias; the returned repository carries its current `owner`/`name`.
     pub fn get_repository(&self, owner: &str, repo: &str) -> Result<Repository> {
+        let state = self.state.read();
+        super::resolve_repository(&state, owner, repo)
+            .cloned()
+            .ok_or_else(|| ForgeError::NotFound(format!("repository {owner}/{repo}")))
+    }
+
+    /// Look up `owner/repo` by its canonical slug only, never via an alias.
+    pub(super) fn canonical_repository(&self, owner: &str, repo: &str) -> Result<Repository> {
         self.state
             .read()
             .repos
@@ -213,7 +225,7 @@ impl ForgeCore {
         let subject = format!("{owner}/{repo}");
         let action = "repository.archived";
         let detail = serde_json::json!({ "archived": archived });
-        let current = self.get_repository(owner, repo)?;
+        let current = self.canonical_repository(owner, repo)?;
         if current.archived == archived {
             return Ok(current);
         }
@@ -267,7 +279,7 @@ impl ForgeCore {
                 "branch must not have surrounding whitespace".to_string(),
             ));
         }
-        let current = self.get_repository(owner, repo)?;
+        let current = self.canonical_repository(owner, repo)?;
         if current.default_branch == branch {
             return Ok(current);
         }
@@ -307,7 +319,7 @@ impl ForgeCore {
         repo: &str,
         opt_out: bool,
     ) -> Result<Repository> {
-        let current = self.get_repository(owner, repo)?;
+        let current = self.canonical_repository(owner, repo)?;
         if !self.is_global_admin(actor) {
             return Err(ForgeError::BranchProtection(
                 "global admin required".to_string(),
@@ -485,6 +497,14 @@ impl ForgeCore {
         for grant_key in grant_keys {
             state.repo_grants.remove(&grant_key);
         }
+        // Old-name redirects and the move history reference the repository
+        // UUID; they go with it instead of pointing at nothing.
+        state
+            .repository_aliases
+            .retain(|_, alias| alias.repository_id != removed_repo.id);
+        state
+            .repository_transfers
+            .retain(|_, journal| journal.repository_id != removed_repo.id);
 
         self.persist_after_mutation(&mut state, previous)?;
         Ok(RepositoryDeletion {

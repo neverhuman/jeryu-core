@@ -15,6 +15,21 @@ pub struct RepositoryAlias {
     pub canonical_name: String,
     pub created_at: DateTime<Utc>,
     pub transaction_id: Uuid,
+    /// Which operation recorded the alias; stored rows before 0015 are
+    /// transfers.
+    #[serde(default)]
+    pub origin: RepositoryAliasOrigin,
+}
+
+/// Operation that recorded a [`RepositoryAlias`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositoryAliasOrigin {
+    /// Two-phase transfer journal (`commit_repository_transfer`).
+    #[default]
+    Transfer,
+    /// `ForgeCore::rename_repository` (rename, owner move, or both).
+    Rename,
 }
 
 /// State of a two-phase repository transfer.

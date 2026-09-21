@@ -4,7 +4,37 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use super::State;
-use crate::{ForgeError, RepositoryTransferJournal, Result};
+use crate::{
+    ForgeError, RepositoryAlias, RepositoryAliasOrigin, RepositoryTransferJournal, Result,
+};
+
+/// Keep the moved repository's old slug as an alias and retarget every alias
+/// it already had, so a chain of moves resolves to the final slug in one hop.
+pub(super) fn record_alias(
+    state: &mut State,
+    journal: &RepositoryTransferJournal,
+    origin: RepositoryAliasOrigin,
+) {
+    for alias in state.repository_aliases.values_mut() {
+        if alias.repository_id == journal.repository_id {
+            alias.canonical_owner = journal.destination_owner.clone();
+            alias.canonical_name = journal.destination_name.clone();
+        }
+    }
+    state.repository_aliases.insert(
+        (journal.source_owner.clone(), journal.source_name.clone()),
+        RepositoryAlias {
+            repository_id: journal.repository_id,
+            owner: journal.source_owner.clone(),
+            name: journal.source_name.clone(),
+            canonical_owner: journal.destination_owner.clone(),
+            canonical_name: journal.destination_name.clone(),
+            created_at: chrono::Utc::now(),
+            transaction_id: journal.transaction_id,
+            origin,
+        },
+    );
+}
 
 pub(super) fn rekey_repository(
     state: &mut State,

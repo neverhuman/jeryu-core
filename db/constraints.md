@@ -317,3 +317,22 @@ Constraint policy:
   protection requires any status context.
 - `db/rollbacks/0014_repository_default_branch_protection_opt_out.sql` is
   non-destructive; an older application re-protects the default branch.
+
+## 0015 Repository alias origin
+
+The fifteenth migration adds `repository_aliases.origin`
+(`TEXT NOT NULL DEFAULT 'transfer'`, closed to `transfer`/`rename`).
+
+Constraint policy:
+- `transfer` aliases come from the two-phase transfer journal; `rename`
+  aliases come from `ForgeCore::rename_repository`, audited as
+  `repository.renamed`. Every rename also writes a committed
+  `repository_transfer_journal` row, so the alias foreign key to its
+  transaction holds for both origins.
+- An alias only answers for a slug that has no canonical repository: a
+  repository created later at the old name takes precedence. Each rename
+  retargets every alias of the moved repository, so a chain of renames resolves
+  to the final name in one lookup; renaming onto one of its own old names
+  drops that alias.
+- `db/rollbacks/0015_repository_alias_origin.sql` is non-destructive; an older
+  application keeps the redirects and reads every alias as `transfer`.

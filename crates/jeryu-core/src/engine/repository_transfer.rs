@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use super::{ForgeCore, require_name};
 use crate::{
-    ForgeError, PrepareRepositoryTransfer, Repository, RepositoryAlias, RepositoryTransferJournal,
-    RepositoryTransferStatus, Result,
+    ForgeError, PrepareRepositoryTransfer, Repository, RepositoryAlias, RepositoryAliasOrigin,
+    RepositoryTransferJournal, RepositoryTransferStatus, Result,
 };
 
 impl ForgeCore {
@@ -154,23 +154,10 @@ impl ForgeCore {
             *state = previous;
             return Err(error);
         }
-        for alias in state.repository_aliases.values_mut() {
-            if alias.repository_id == journal.repository_id {
-                alias.canonical_owner = journal.destination_owner.clone();
-                alias.canonical_name = journal.destination_name.clone();
-            }
-        }
-        state.repository_aliases.insert(
-            (journal.source_owner.clone(), journal.source_name.clone()),
-            RepositoryAlias {
-                repository_id: journal.repository_id,
-                owner: journal.source_owner.clone(),
-                name: journal.source_name.clone(),
-                canonical_owner: journal.destination_owner.clone(),
-                canonical_name: journal.destination_name.clone(),
-                created_at: Utc::now(),
-                transaction_id,
-            },
+        super::repository_transfer_state::record_alias(
+            &mut state,
+            &journal,
+            RepositoryAliasOrigin::Transfer,
         );
         let entry = state
             .repository_transfers
