@@ -1054,3 +1054,7 @@ pub(crate) fn random_secret() -> Result<String> {
         .map_err(|err| ForgeError::Storage(format!("read randomness: {err}")))?;
     Ok(hex::encode(bytes))
 }
+
+#[cfg(test)]
+#[path = "auth_tests.rs"]
+mod tests;
