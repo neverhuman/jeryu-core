@@ -71,4 +71,17 @@ bash ops/ci/artifact_support.sh
 
 echo "[pr-ci] workspace test suite" >&2
 cargo nextest run --workspace --build-jobs "$JOBS" --test-threads "$JOBS"
+
+# Coverage ratchet: a per-crate drop below ops/ci/coverage-baseline.tsv fails the
+# required check. Exit 3 means PENDING (cargo-llvm-cov absent on this host):
+# report it and continue rather than block on a missing tool.
+echo "[pr-ci] coverage ratchet" >&2
+coverage_rc=0
+bash ops/ci/coverage.sh || coverage_rc=$?
+if [ "$coverage_rc" -eq 3 ]; then
+  echo "[pr-ci] coverage PENDING: cargo-llvm-cov not installed" >&2
+elif [ "$coverage_rc" -ne 0 ]; then
+  echo "[pr-ci] coverage ratchet failed (exit $coverage_rc)" >&2
+  exit "$coverage_rc"
+fi
 echo "[pr-ci] jeryu-core OK" >&2

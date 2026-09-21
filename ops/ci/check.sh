@@ -38,4 +38,5 @@ for script in scripts/*.sh ops/ci/*.sh; do
   [[ -e "$script" ]] || continue
   bash -n "$script"
 done
+bash ops/ci/coverage_selftest.sh
 printf 'check ok: %s\n' "$(pwd)"

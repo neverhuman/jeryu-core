@@ -1,0 +1,4 @@
+# crate	line-coverage ratio (ops/ci/coverage.sh --update)
+jeryu-core	0.9584
+jeryu-gitd	0.7329
+jeryu-readmodel	0.8698
