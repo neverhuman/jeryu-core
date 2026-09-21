@@ -277,6 +277,10 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 }
 
 #[cfg(test)]
+#[path = "migrations_upgrade_tests.rs"]
+mod upgrade_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
