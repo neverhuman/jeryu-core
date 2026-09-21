@@ -125,3 +125,36 @@ Known gates:
 - jeryu-web: Playwright action tests plus `npm run -s test:e2e:matrix`; a new
   or removed `@action:` tag must be reflected in
   `apps/web/e2e/action-matrix.json`.
+
+## Budget and stop conditions
+
+- Default local CI uses 40 workers and should finish quickly on this workspace; if a lane exceeds 20 minutes, stop and split it into a narrower proof lane.
+- Do not keep retrying a flaky or missing live-capability gate. Mark it PENDING with evidence until the runtime exists.
+- Paid or networked tools must be opt-in and must have an explicit environment variable gate plus a documented stop condition.
+- Networked or paid agent/tool execution is disabled unless
+  `JERYU_ALLOW_NETWORK_TOOLS=1` or a narrower lane-specific opt-in is present.
+- Any paid tool lane must publish a budget receipt naming the request budget,
+  consumed units, remaining quota, and operator who opted in. Missing budget
+  receipt is a failed lane, not a warning.
+- Stop a paid or unbounded lane when it reaches 80 percent of the declared
+  budget, when no progress artifact changes for two consecutive attempts, or
+  when the same failure repeats twice.
+- Kill switch: unset the opt-in variable and create
+  `target/jeryu-ci/STOP_NETWORK_TOOLS` to make networked local CI lanes
+  fail closed before launching work.
+
+## Launch-gate evidence
+
+- Release candidates require artifact-backed evidence for security, backups, monitoring, rollback, and abuse controls before signing.
+- Full launch gate evidence includes security scan receipts, backup receipts, monitoring receipts, rollback receipts, abuse controls receipts, and CI or script evidence from `just ci`, `just security`, and `just release`.
+- Security: `just security` must pass and record secret-scan, dependency-scan,
+  zero-evidence, and cache-poisoning results before a release candidate is
+  signed.
+- Backups: release candidates must include a restore receipt or dry-run restore
+  log for repository metadata, artifacts, and service state.
+- Monitoring: operators must attach the metrics/log receipt for the release
+  candidate and the rollback alert route before rollout.
+- Rollback: `docs/release.md` is the rollback control surface; each release
+  receipt must name the previous signed artifact and checksum.
+- Abuse controls: agent, runner, and token-scope gates must pass before any
+  hosted or remote deployment path is enabled.
