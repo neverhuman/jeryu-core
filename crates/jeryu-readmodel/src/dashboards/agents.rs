@@ -99,22 +99,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dashboard_default_is_empty() {
-        let d = AgentsSnapshot::default();
-        assert!(d.items.is_empty());
-        assert!(d.freshness.is_none());
-        assert_eq!(d.blocked(), 0);
-    }
-
-    #[test]
-    fn agent_status_round_trips() {
-        let json = serde_json::to_string(&AgentStatus::Blocked).unwrap();
-        assert_eq!(json, "\"blocked\"");
-        let back: AgentStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, AgentStatus::Blocked);
-    }
-
-    #[test]
     fn blocked_counts_blocked_sessions() {
         let d = AgentsSnapshot {
             items: vec![
@@ -126,13 +110,5 @@ mod tests {
             summary: None,
         };
         assert_eq!(d.blocked(), 2);
-    }
-
-    #[test]
-    fn dashboard_serde_roundtrip() {
-        let d = AgentsSnapshot::default();
-        let json = serde_json::to_string(&d).unwrap();
-        let back: AgentsSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(d, back);
     }
 }

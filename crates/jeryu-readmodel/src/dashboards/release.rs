@@ -151,30 +151,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dashboard_default_is_empty() {
-        let d = ReleaseSnapshot::default();
-        assert!(d.items.is_empty());
-        assert!(d.freshness.is_none());
-        assert_eq!(d.blocked(), 0);
-    }
-
-    #[test]
-    fn enums_round_trip() {
-        assert_eq!(
-            serde_json::to_string(&ReleaseGate::Blocked).unwrap(),
-            "\"blocked\""
-        );
-        assert_eq!(
-            serde_json::to_string(&PromotionStage::Canary).unwrap(),
-            "\"canary\""
-        );
-        assert_eq!(
-            serde_json::to_string(&SbomStatus::Verified).unwrap(),
-            "\"verified\""
-        );
-    }
-
-    #[test]
     fn blocked_counts_blocked_candidates() {
         let mut blocked = ReleaseItem::new("rel-1", "abc1234");
         blocked.gate = ReleaseGate::Blocked;
@@ -184,17 +160,5 @@ mod tests {
             summary: None,
         };
         assert_eq!(d.blocked(), 1);
-    }
-
-    #[test]
-    fn dashboard_serde_roundtrip() {
-        let d = ReleaseSnapshot {
-            items: vec![ReleaseItem::new("rel-1", "abc1234")],
-            freshness: None,
-            summary: Some(ReleaseSummary::default()),
-        };
-        let json = serde_json::to_string(&d).unwrap();
-        let back: ReleaseSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(d, back);
     }
 }

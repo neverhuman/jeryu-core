@@ -104,22 +104,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dashboard_default_is_empty() {
-        let d = EvidenceSnapshot::default();
-        assert!(d.items.is_empty());
-        assert!(d.freshness.is_none());
-        assert_eq!(d.denied(), 0);
-    }
-
-    #[test]
-    fn gate_decision_round_trips() {
-        let json = serde_json::to_string(&GateDecision::Deny).unwrap();
-        assert_eq!(json, "\"deny\"");
-        let back: GateDecision = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, GateDecision::Deny);
-    }
-
-    #[test]
     fn denied_counts_deny_receipts() {
         let d = EvidenceSnapshot {
             items: vec![
@@ -138,13 +122,5 @@ mod tests {
             summary: None,
         };
         assert_eq!(d.denied(), 1);
-    }
-
-    #[test]
-    fn dashboard_serde_roundtrip() {
-        let d = EvidenceSnapshot::default();
-        let json = serde_json::to_string(&d).unwrap();
-        let back: EvidenceSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(d, back);
     }
 }

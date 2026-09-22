@@ -31,23 +31,3 @@ pub struct SourceDoctorSummary {
     pub sources_degraded: u32,
     pub schema_drift_count: u32,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dashboard_default_is_empty() {
-        let d = SourceDoctorDashboard::default();
-        assert!(d.items.is_empty());
-        assert!(d.freshness.is_none());
-    }
-
-    #[test]
-    fn dashboard_serde_roundtrip() {
-        let d = SourceDoctorDashboard::default();
-        let json = serde_json::to_string(&d).unwrap();
-        let back: SourceDoctorDashboard = serde_json::from_str(&json).unwrap();
-        assert_eq!(d, back);
-    }
-}

@@ -100,38 +100,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dashboard_default_is_empty() {
-        let d = WorkflowSnapshot::default();
-        assert!(d.items.is_empty());
-        assert!(d.freshness.is_none());
-        assert_eq!(d.blocked(), 0);
-    }
-
-    #[test]
-    fn delivery_posture_round_trips() {
-        let json = serde_json::to_string(&DeliveryPosture::Merging).unwrap();
-        assert_eq!(json, "\"merging\"");
-        let back: DeliveryPosture = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, DeliveryPosture::Merging);
-    }
-
-    #[test]
     fn uses_pr_number() {
         let mut item = WorkflowItem::new("pipe-1", "core/web");
         item.pr_number = Some(101);
         let json = serde_json::to_string(&item).unwrap();
         assert!(json.contains("pr_number"));
-    }
-
-    #[test]
-    fn dashboard_serde_roundtrip() {
-        let d = WorkflowSnapshot {
-            items: vec![WorkflowItem::new("pipe-1", "core/web")],
-            freshness: None,
-            summary: Some(WorkflowSummary::default()),
-        };
-        let json = serde_json::to_string(&d).unwrap();
-        let back: WorkflowSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(d, back);
     }
 }

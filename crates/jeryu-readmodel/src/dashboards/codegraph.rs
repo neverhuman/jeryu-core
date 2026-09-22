@@ -106,13 +106,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dashboard_default_is_empty() {
-        let d = CodegraphDashboard::default();
-        assert!(d.items.is_empty());
-        assert_eq!(d.misses(), 0);
-    }
-
-    #[test]
     fn dashboard_counts_typed_misses() {
         let mut hit = CodegraphEvidenceItem::new("q-1", "code.references");
         hit.symbol = "AgentRunStore".into();

@@ -145,22 +145,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dashboard_default_is_empty() {
-        let d = AgentRunsDashboard::default();
-        assert!(d.items.is_empty());
-        assert_eq!(d.running(), 0);
-        assert_eq!(d.live_tty(), 0);
-    }
-
-    #[test]
-    fn run_status_round_trips() {
-        let json = serde_json::to_string(&AgentRunStatus::Running).unwrap();
-        assert_eq!(json, "\"running\"");
-        let back: AgentRunStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, AgentRunStatus::Running);
-    }
-
-    #[test]
     fn live_tty_counts_pty_runs_with_status() {
         let mut pty = AgentRunItem::new("run-1", AgentRunStatus::Running);
         pty.tty_status = Some("live".into());

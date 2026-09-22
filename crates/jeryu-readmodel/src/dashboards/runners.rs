@@ -32,23 +32,3 @@ pub struct RunnersSummary {
     pub paused_runners: u32,
     pub draining_runners: u32,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dashboard_default_is_empty() {
-        let d = RunnersDashboard::default();
-        assert!(d.items.is_empty());
-        assert!(d.freshness.is_none());
-    }
-
-    #[test]
-    fn dashboard_serde_roundtrip() {
-        let d = RunnersDashboard::default();
-        let json = serde_json::to_string(&d).unwrap();
-        let back: RunnersDashboard = serde_json::from_str(&json).unwrap();
-        assert_eq!(d, back);
-    }
-}

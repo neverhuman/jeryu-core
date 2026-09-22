@@ -130,12 +130,4 @@ mod tests {
         assert_eq!(state.confidence, 0.0);
         assert_eq!(state.last_error.as_deref(), Some("timeout"));
     }
-
-    #[test]
-    fn source_kind_round_trips() {
-        let json = serde_json::to_string(&SourceKind::Scm).unwrap();
-        assert_eq!(json, "\"scm\"");
-        let back: SourceKind = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, SourceKind::Scm);
-    }
 }

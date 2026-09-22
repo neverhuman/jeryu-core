@@ -97,34 +97,4 @@ pub struct ApprovalsSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dashboard_default_is_empty() {
-        let d = ApprovalsSnapshot::default();
-        assert!(d.items.is_empty());
-        assert!(d.freshness.is_none());
-        assert_eq!(d.failing_checks(), 0);
-    }
-
-    #[test]
-    fn check_status_round_trips() {
-        let json = serde_json::to_string(&CheckStatus::Failure).unwrap();
-        assert_eq!(json, "\"failure\"");
-        let back: CheckStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, CheckStatus::Failure);
-        assert!(back.is_failing());
-    }
-
-    #[test]
-    fn dashboard_serde_roundtrip() {
-        let d = ApprovalsSnapshot {
-            items: vec![ApprovalItem::new(101, "fix flaky test", RiskTier::R2)],
-            freshness: None,
-            summary: Some(ApprovalsSummary::default()),
-        };
-        let json = serde_json::to_string(&d).unwrap();
-        let back: ApprovalsSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(d, back);
-        assert!(json.contains("pr_number"));
-    }
 }

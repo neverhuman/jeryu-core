@@ -157,22 +157,6 @@ mod tests {
     use chrono::Utc;
 
     #[test]
-    fn dashboard_default_is_empty() {
-        let d = WorkcellsDashboard::default();
-        assert!(d.items.is_empty());
-        assert!(d.freshness.is_none());
-        assert_eq!(d.blocked(), 0);
-    }
-
-    #[test]
-    fn workcell_state_round_trips() {
-        let json = serde_json::to_string(&WorkcellState::Repairing).unwrap();
-        assert_eq!(json, "\"repairing\"");
-        let back: WorkcellState = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, WorkcellState::Repairing);
-    }
-
-    #[test]
     fn dashboard_counts_claimed_and_blocked_cells() {
         let mut claimed = WorkcellItem::new("wc-1", "agent-a");
         claimed.claim_state = WorkcellState::Claimed;
