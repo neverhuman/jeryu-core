@@ -104,7 +104,7 @@ pub struct RepositorySummary {
     pub mirror: Option<RepositoryMirrorStatus>,
     pub clone_http_url: Option<String>,
     pub clone_ssh_url: Option<String>,
-    #[ts(type = "Array<{ action_id: string; label: string; risk: string | null }>")]
+    #[ts(type = "Array<{ action_id: string; label: string; risk: string | null; method: string | null; href: string | null }>")]
     pub available_actions: Vec<AvailableAction>,
 }
 

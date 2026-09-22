@@ -29,4 +29,4 @@ jankurai_score?: number | null, jankurai_decision?: string | null, jankurai_scor
  * Offsite push-mirror state derived from `jeryu/github-mirror`
  * bookkeeping runs; `None` when no mirror has ever reported.
  */
-mirror?: RepositoryMirrorStatus | null, clone_http_url: string | null, clone_ssh_url: string | null, available_actions: Array<{ action_id: string; label: string; risk: string | null }>, };
+mirror?: RepositoryMirrorStatus | null, clone_http_url: string | null, clone_ssh_url: string | null, available_actions: Array<{ action_id: string; label: string; risk: string | null; method: string | null; href: string | null }>, };

@@ -132,7 +132,7 @@ pub struct PullRequestSummary {
     /// Passport recompute so we can detect re-evaluation drift across replays.
     /// `None` when the Passport has not been computed yet (e.g. brand-new PR).
     pub passport_hash: Option<String>,
-    #[ts(type = "Array<{ action_id: string; label: string; risk: string | null }>")]
+    #[ts(type = "Array<{ action_id: string; label: string; risk: string | null; method: string | null; href: string | null }>")]
     pub available_actions: Vec<AvailableAction>,
 }
 

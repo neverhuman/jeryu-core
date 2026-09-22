@@ -13,4 +13,4 @@ export type PullRequestSummary = { repo: RepositoryId, number: number, entity: {
  * Passport recompute so we can detect re-evaluation drift across replays.
  * `None` when the Passport has not been computed yet (e.g. brand-new PR).
  */
-passport_hash: string | null, available_actions: Array<{ action_id: string; label: string; risk: string | null }>, };
+passport_hash: string | null, available_actions: Array<{ action_id: string; label: string; risk: string | null; method: string | null; href: string | null }>, };
