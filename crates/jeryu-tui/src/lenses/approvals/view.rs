@@ -297,10 +297,4 @@ mod tests {
         assert!(out.contains("failing checks"));
         assert!(out.contains("Actions"));
     }
-
-    #[test]
-    fn renders_at_220x60_without_panic() {
-        let input = ApprovalsLensInput::from_read_model(&sample_read_model());
-        let _ = ink(220, 60, &input);
-    }
 }

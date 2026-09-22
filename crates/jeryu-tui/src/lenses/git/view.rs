@@ -188,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_empty_state_at_80x24_without_panic() {
+    fn renders_empty_state_at_80x24() {
         let input = GitLensInput::from_state(&[], 0);
         let s = ink(80, 24, &input);
         assert!(s.contains("Git"));
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_ledger_at_120x36_without_panic() {
+    fn renders_ledger_at_120x36() {
         let events = vec![
             record("push", 0, "synced", "git push origin main"),
             record("fetch", 128, "n/a", "git fetch --all"),

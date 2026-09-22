@@ -244,54 +244,11 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    #[test]
-    fn q_quits_when_not_drilled() {
-        let mut app = App::default();
-        assert_eq!(handle_key(&mut app, key(KeyCode::Char('q'))), Flow::Quit);
-    }
-
-    #[test]
-    fn digit_selects_tab() {
-        let mut app = App::default();
-        handle_key(&mut app, key(KeyCode::Char('1')));
-        assert_eq!(app.active_tab, ActiveTab::Mission);
-        handle_key(&mut app, key(KeyCode::Char('9')));
-        assert_eq!(app.active_tab, ActiveTab::Evidence);
-    }
-
-    #[test]
-    fn arrows_cycle_tabs() {
-        let mut app = App::default(); // Workflow
-        handle_key(&mut app, key(KeyCode::Right));
-        assert_eq!(app.active_tab, ActiveTab::Mission);
-        handle_key(&mut app, key(KeyCode::Left));
-        assert_eq!(app.active_tab, ActiveTab::Workflow);
-    }
-
-    #[test]
-    fn enter_drills_and_esc_unwinds_instead_of_quitting() {
-        let mut app = App::default();
-        assert_eq!(handle_key(&mut app, key(KeyCode::Enter)), Flow::Continue);
-        assert!(app.focus.is_drilled());
-        // Esc while drilled unwinds, does not quit.
-        assert_eq!(handle_key(&mut app, key(KeyCode::Esc)), Flow::Continue);
-        assert!(!app.focus.is_drilled());
-        // Esc at top level quits.
-        assert_eq!(handle_key(&mut app, key(KeyCode::Esc)), Flow::Quit);
-    }
-
-    #[test]
-    fn tab_cycles_focus_within_tab() {
-        let mut app = App::default();
-        app.set_tab(ActiveTab::Mission);
-        let first = app.focus.active;
-        handle_key(&mut app, key(KeyCode::Tab));
-        assert_ne!(app.focus.active, first);
-    }
+    // Keyboard routing shared with the public API is covered by
+    // `tests/interaction.rs`; these cases reach crate-private seams.
 
     // ── Terminal routing ──────────────────────────────────────────────────
 
-    use crate::app::SessionLaunchPhase;
     use crate::runtime::session::RecordingSessionLauncher;
     use crate::runtime::tty::{RecordingControlSink, ScriptedTtySource, TtyChunk};
     use jeryu_readmodel::sample_read_model;
@@ -307,48 +264,6 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_agents_opens_and_attaches_a_session() {
-        let mut app = agents_app();
-        let mut sink = RecordingControlSink::new();
-        assert_eq!(
-            handle_key_with_sink(&mut app, key(KeyCode::Enter), &mut sink),
-            Flow::Continue
-        );
-        let term = app.terminal.as_ref().expect("session opened");
-        assert!(term.is_attached());
-        assert!(term.run_id().starts_with("agent_run."));
-        assert!(sink.sent.is_empty());
-    }
-
-    #[test]
-    fn attached_ctrl_c_emits_interrupt_without_quitting() {
-        let mut app = agents_app();
-        let mut sink = RecordingControlSink::new();
-        handle_key_with_sink(&mut app, key(KeyCode::Enter), &mut sink);
-        assert_eq!(
-            handle_key_with_sink(&mut app, ctrl(KeyCode::Char('c')), &mut sink),
-            Flow::Continue
-        );
-        assert_eq!(sink.sent, vec![AgentControl::Interrupt]);
-    }
-
-    #[test]
-    fn attached_printable_keys_become_input_bytes() {
-        let mut app = agents_app();
-        let mut sink = RecordingControlSink::new();
-        handle_key_with_sink(&mut app, key(KeyCode::Enter), &mut sink);
-        handle_key_with_sink(&mut app, key(KeyCode::Char('l')), &mut sink);
-        handle_key_with_sink(&mut app, key(KeyCode::Char('s')), &mut sink);
-        assert_eq!(
-            sink.sent,
-            vec![
-                AgentControl::Input(b"l".to_vec()),
-                AgentControl::Input(b"s".to_vec()),
-            ]
-        );
-    }
-
-    #[test]
     fn ctrl_letter_folds_to_c0_control_byte() {
         let mut app = agents_app();
         let mut sink = RecordingControlSink::new();
@@ -356,20 +271,6 @@ mod tests {
         // Ctrl-A encodes as 0x01.
         handle_key_with_sink(&mut app, ctrl(KeyCode::Char('a')), &mut sink);
         assert_eq!(sink.sent, vec![AgentControl::Input(vec![0x01])]);
-    }
-
-    #[test]
-    fn detach_key_releases_keyboard_and_q_then_quits() {
-        let mut app = agents_app();
-        let mut sink = RecordingControlSink::new();
-        handle_key_with_sink(&mut app, key(KeyCode::Enter), &mut sink);
-        handle_key_with_sink(&mut app, ctrl(KeyCode::Char(']')), &mut sink);
-        assert!(!app.terminal.as_ref().unwrap().is_attached());
-        assert!(sink.sent.is_empty());
-        assert_eq!(
-            handle_key_with_sink(&mut app, key(KeyCode::Char('q')), &mut sink),
-            Flow::Quit
-        );
     }
 
     #[test]
@@ -403,32 +304,6 @@ mod tests {
     // ── New Session launch (`n` on the Agents tab) ─────────────────────────
 
     #[test]
-    fn n_on_agents_launches_a_session_through_the_launcher() {
-        let mut app = agents_app();
-        let mut sink = RecordingControlSink::new();
-        let mut launcher = RecordingSessionLauncher::new();
-        assert_eq!(
-            handle_key_with_session(&mut app, key(KeyCode::Char('n')), &mut sink, &mut launcher),
-            Flow::Continue
-        );
-
-        // The launcher was asked to create a session on the in-scope repo.
-        assert_eq!(launcher.requested, vec!["core/web".to_string()]);
-        // The launch advanced to attached and recorded the returned run/branch.
-        let launch = app.session_launch.as_ref().expect("launch recorded");
-        assert_eq!(launch.phase, SessionLaunchPhase::Attached);
-        assert_eq!(launch.repo_id, "core/web");
-        assert_eq!(launch.run_id.as_deref(), Some("agent_run.session-1"));
-        assert_eq!(launch.branch.as_deref(), Some("agent/session-1"));
-        // The new run's live terminal is mounted and attached.
-        let term = app.terminal.as_ref().expect("terminal mounted");
-        assert!(term.is_attached());
-        assert_eq!(term.run_id(), "agent_run.session-1");
-        // No terminal-control bytes were emitted by the launch itself.
-        assert!(sink.sent.is_empty());
-    }
-
-    #[test]
     fn n_does_not_launch_when_no_repo_is_in_scope() {
         let mut app = App::new_render_only(jeryu_readmodel::TuiReadModel::default());
         app.set_tab(ActiveTab::Agents);
@@ -454,22 +329,6 @@ mod tests {
         assert!(launcher.requested.is_empty());
         assert!(app.session_launch.is_none());
         assert_eq!(app.active_tab, ActiveTab::Mission);
-    }
-
-    #[test]
-    fn session_router_preserves_existing_keys() {
-        // Digit tab-select and quit still work through the session router, so
-        // the affordance is purely additive to the keyboard model.
-        let mut app = agents_app();
-        let mut sink = RecordingControlSink::new();
-        let mut launcher = RecordingSessionLauncher::new();
-        handle_key_with_session(&mut app, key(KeyCode::Char('1')), &mut sink, &mut launcher);
-        assert_eq!(app.active_tab, ActiveTab::Mission);
-        assert!(launcher.requested.is_empty());
-        assert_eq!(
-            handle_key_with_session(&mut app, key(KeyCode::Char('q')), &mut sink, &mut launcher),
-            Flow::Quit
-        );
     }
 
     #[test]

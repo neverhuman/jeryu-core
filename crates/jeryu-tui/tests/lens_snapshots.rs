@@ -427,25 +427,6 @@ fn stream_mode_badge_reflects_transport() {
     assert!(render_once(&app, 120, 40, StreamMode::Degraded).contains("DEGRADED"));
 }
 
-#[test]
-fn every_tab_renders_at_compact_and_wide_sizes() {
-    for tab in ActiveTab::ALL {
-        for (width, height) in [(80, 24), (120, 40)] {
-            let mut app = App::new_render_only(sample_read_model());
-            app.set_tab(*tab);
-            let ink = render_once(&app, width, height, StreamMode::Fixture);
-            assert!(
-                ink.contains("jeryu"),
-                "brand missing for {tab:?} {width}x{height}"
-            );
-            assert!(
-                !ink.contains("not yet ported"),
-                "placeholder rendered for {tab:?} {width}x{height}"
-            );
-        }
-    }
-}
-
 // ── Degraded-fixture sweep ────────────────────────────────────────────────
 
 /// A fully degraded fixture: the sample model with the freshness watermark
@@ -464,7 +445,7 @@ fn degraded_fixture_model() -> TuiReadModel {
 fn degraded_fixture_chrome_shows_expired_and_degraded_badges() {
     // The degraded chrome path: stale freshness → EXPIRED chip, and the
     // DEGRADED transport badge. Asserted once on Mission so the per-tab sweep
-    // below can focus on "renders without placeholder".
+    // sweep below can focus on "renders without placeholder".
     for (width, height) in [(80, 24), (120, 40)] {
         let ink = snapshot_sized_mode(
             degraded_fixture_model(),
@@ -485,29 +466,26 @@ fn degraded_fixture_chrome_shows_expired_and_degraded_badges() {
 }
 
 #[test]
-fn every_tab_renders_in_degraded_fixture_at_compact_and_wide_sizes() {
+fn every_tab_renders_healthy_and_degraded_at_every_size() {
+    // One sweep for every tab × {healthy, degraded} × {compact, wide, extra
+    // wide}: the chrome brand and transport badge always paint, and no lens
+    // falls back to a placeholder.
+    let fixtures = [
+        (sample_read_model(), StreamMode::Fixture, "FIXTURE"),
+        (degraded_fixture_model(), StreamMode::Degraded, "DEGRADED"),
+    ];
     for tab in ActiveTab::ALL {
-        for (width, height) in [(80, 24), (120, 40)] {
-            let ink = snapshot_sized_mode(
-                degraded_fixture_model(),
-                *tab,
-                width,
-                height,
-                StreamMode::Degraded,
-            );
-            assert!(
-                ink.contains("jeryu"),
-                "brand missing for degraded {tab:?} {width}x{height}"
-            );
-            assert!(
-                !ink.contains("not yet ported"),
-                "placeholder rendered for degraded {tab:?} {width}x{height}"
-            );
-            // The degraded transport badge is part of the chrome on every tab.
-            assert!(
-                ink.contains("DEGRADED"),
-                "degraded badge missing for {tab:?} {width}x{height}"
-            );
+        for (model, stream, badge) in &fixtures {
+            for (width, height) in [(80, 24), (120, 40), (220, 60)] {
+                let ink = snapshot_sized_mode(model.clone(), *tab, width, height, *stream);
+                let case = format!("{tab:?} {stream:?} {width}x{height}");
+                assert!(ink.contains("jeryu"), "brand missing for {case}");
+                assert!(
+                    !ink.contains("not yet ported"),
+                    "placeholder rendered for {case}"
+                );
+                assert!(ink.contains(badge), "transport badge missing for {case}");
+            }
         }
     }
 }

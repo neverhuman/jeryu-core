@@ -370,10 +370,4 @@ mod tests {
         assert!(out.contains("frozen"));
         assert!(out.contains("NO"));
     }
-
-    #[test]
-    fn renders_at_220x60_without_panic() {
-        let input = AgentsLensInput::from_read_model(&sample_read_model());
-        let _ = ink(220, 60, &input);
-    }
 }

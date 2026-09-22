@@ -221,10 +221,4 @@ mod tests {
         assert!(out.contains("BLOCKED"));
         assert!(out.contains("cursor=42"));
     }
-
-    #[test]
-    fn renders_at_220x60_without_panic() {
-        let input = ReleaseLensInput::from_read_model(&sample_read_model());
-        let _ = ink(220, 60, &input);
-    }
 }

@@ -342,9 +342,4 @@ mod tests {
         assert!(out.contains("oci-runner-1"));
         assert!(out.contains("online"));
     }
-
-    #[test]
-    fn renders_at_220x60_without_panic() {
-        let _ = ink(220, 60, &degraded_model());
-    }
 }

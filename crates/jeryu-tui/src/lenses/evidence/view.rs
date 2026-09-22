@@ -299,10 +299,4 @@ mod tests {
         assert!(out.contains("codegraph-tool-build"));
         assert!(!out.contains("not yet ported"));
     }
-
-    #[test]
-    fn renders_at_220x60_without_panic() {
-        let input = EvidenceLensInput::from_read_model(&sample_read_model());
-        let _ = ink(220, 60, &input);
-    }
 }

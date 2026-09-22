@@ -758,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_populated_at_80x24_without_panic() {
+    fn renders_populated_at_80x24() {
         let ink = ink(&populated_input(), 80, 24);
         assert!(ink.contains("Jankurai"), "header must name Jankurai");
         assert!(ink.contains("score"), "summary must mention score");
@@ -766,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_populated_at_120x40_without_panic() {
+    fn renders_populated_at_120x40() {
         let ink = ink(&populated_input(), 120, 40);
         assert!(ink.contains("Jankurai"));
         assert!(ink.contains("score"));
