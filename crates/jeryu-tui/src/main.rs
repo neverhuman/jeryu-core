@@ -7,6 +7,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use jeryu_readmodel::contracts::TUI_READ_MODEL_PATH;
 use jeryu_readmodel::{TuiReadModel, sample_read_model};
 use jeryu_tui::runtime::{Flow, handle_key};
 use jeryu_tui::{App, StreamMode, draw, parse_capture_tab, render_once};
@@ -105,17 +106,28 @@ fn run_interactive(
 fn load_model(source: Source, api_url: &str) -> Result<TuiReadModel, Box<dyn std::error::Error>> {
     match source {
         Source::Fixture => Ok(sample_read_model()),
-        Source::Api => {
-            let response = reqwest::blocking::get(tui_bootstrap_url(api_url))?
-                .error_for_status()?
-                .json::<TuiReadModel>()?;
-            Ok(response)
-        }
+        Source::Api => fetch_read_model(api_url),
     }
 }
 
-fn tui_bootstrap_url(api_url: &str) -> String {
-    format!("{}/api/v1/bootstrap.tui", api_url.trim_end_matches('/'))
+/// The read model's own URL, followed by the suffixed path servers older than
+/// the split-out serve it under. A server that answers only one of the two is
+/// still usable, which is what lets the two sides be released separately.
+fn read_model_urls(api_url: &str) -> [String; 2] {
+    let base = api_url.trim_end_matches('/');
+    [
+        format!("{base}{TUI_READ_MODEL_PATH}"),
+        format!("{base}/api/v1/bootstrap.tui"),
+    ]
+}
+
+fn fetch_read_model(api_url: &str) -> Result<TuiReadModel, Box<dyn std::error::Error>> {
+    let [current, older] = read_model_urls(api_url);
+    let mut response = reqwest::blocking::get(&current)?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        response = reqwest::blocking::get(&older)?;
+    }
+    Ok(response.error_for_status()?.json::<TuiReadModel>()?)
 }
 
 #[cfg(test)]
@@ -125,8 +137,19 @@ mod tests {
     #[test]
     fn api_url_builder_is_stable() {
         assert_eq!(
-            tui_bootstrap_url("http://127.0.0.1:8787/"),
-            "http://127.0.0.1:8787/api/v1/bootstrap.tui"
+            read_model_urls("http://127.0.0.1:8787/"),
+            [
+                "http://127.0.0.1:8787/api/v1/read-model/tui".to_string(),
+                "http://127.0.0.1:8787/api/v1/bootstrap.tui".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn read_model_url_comes_from_the_contract() {
+        assert_eq!(
+            read_model_urls("http://host")[0],
+            format!("http://host{TUI_READ_MODEL_PATH}")
         );
     }
 }

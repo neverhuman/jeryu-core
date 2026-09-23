@@ -58,8 +58,8 @@ pub use tool_finder::{
 pub use tool_fleet::{ToolFleetEntry, ToolFleetResponse};
 pub use tool_registry::{ToolRegistryEntry, ToolRegistrySummary};
 pub use web::{
-    ClientWsMessage, ServerWsMessage, SubscriptionSpec, Viewer, WebBootstrap, WebEvent,
-    WebFeatureFlags,
+    ClientWsMessage, ServerWsMessage, SubscriptionSpec, TUI_READ_MODEL_PATH, Viewer, WebBootstrap,
+    WebBootstrapLinks, WebEvent, WebFeatureFlags,
 };
 
 use ts_rs::{Config, ExportError, TS};
@@ -181,6 +181,7 @@ contract_exports!(
     TreeEntryKind,
     Viewer,
     WebBootstrap,
+    WebBootstrapLinks,
     WebEvent,
     WebFeatureFlags,
 );
