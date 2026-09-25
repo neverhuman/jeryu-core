@@ -666,3 +666,154 @@ fn archived_repository_refuses_push_but_serves_clone_until_unarchived() {
     let _ = std::fs::remove_dir_all(seed);
     let _ = std::fs::remove_dir_all(clone);
 }
+
+/// Reader that records how many bytes a consumer has taken from it.
+struct CountingReader {
+    inner: Cursor<Vec<u8>>,
+    read: u64,
+}
+
+impl CountingReader {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            inner: Cursor::new(bytes),
+            read: 0,
+        }
+    }
+}
+
+impl Read for CountingReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read += n as u64;
+        Ok(n)
+    }
+}
+
+/// Build a receive-pack request body creating `ref_name` at `commit`, with the
+/// pack generated from `work`.
+fn receive_pack_body(work: &Path, commit: &str, ref_name: &str) -> Vec<u8> {
+    let line = format!("{} {commit} {ref_name}\0 report-status\n", "0".repeat(40));
+    let mut body = pktline::encode_str(&line);
+    body.extend(pktline::flush());
+    let mut child = Command::new("git")
+        .args(["pack-objects", "--stdout", "--revs"])
+        .current_dir(work)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn pack-objects");
+    child
+        .stdin
+        .take()
+        .expect("pack-objects stdin")
+        .write_all(format!("{commit}\n").as_bytes())
+        .expect("write revs");
+    let output = child.wait_with_output().expect("pack-objects output");
+    assert!(
+        output.status.success(),
+        "pack-objects failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    body.extend(output.stdout);
+    body
+}
+
+#[test]
+fn mounted_pack_rpc_streams_a_push_larger_than_a_buffered_body() {
+    if Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| !output.status.success())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let root = temp_dir("jeryu-mounted-root");
+    let seed = temp_dir("jeryu-mounted-seed");
+    let manager = RepoManager::new(GitdConfig::new(&root));
+    let repo = manager
+        .create_bare(&RepoId::new("acme", "mounted").expect("valid repo id"))
+        .expect("create bare repository");
+    seed_repository(&seed, &repo.path);
+
+    // An incompressible blob so the pack really is several MiB on the wire.
+    let mut blob = Vec::with_capacity(4 * 1024 * 1024);
+    let mut state = 0x243f_6a88_85a3_08d3u64;
+    while blob.len() < 4 * 1024 * 1024 {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        blob.extend_from_slice(&state.to_le_bytes());
+    }
+    std::fs::write(seed.join("big.bin"), &blob).expect("write big blob");
+    run_git(&seed, &["add", "big.bin"], "big add");
+    run_git(&seed, &["commit", "-m", "big"], "big commit");
+    let commit = git_output(&seed, &["rev-parse", "HEAD"]);
+    let body = receive_pack_body(&seed, &commit, "refs/heads/big");
+    let content_length = body.len() as u64;
+    assert!(content_length > 4 * 1024 * 1024, "{content_length}");
+
+    let request = HttpRequest {
+        method: "POST".to_string(),
+        path: "/acme/mounted.git/git-receive-pack".to_string(),
+        query: HashMap::new(),
+        headers: HashMap::new(),
+        body: Vec::new(),
+        is_loopback: true,
+        auth_prechecked: true,
+    };
+    let server = SmartHttpServer::new(manager);
+    let mut reader = CountingReader::new(body);
+    let rpc = server
+        .prepare_pack_rpc(&request, content_length, &mut reader)
+        .expect("prepare mounted receive-pack");
+    // Preparing reads the command prelude only: the pack is still on the wire.
+    let prelude_bytes = reader.read;
+    assert!(
+        prelude_bytes < 4096,
+        "prelude read {prelude_bytes} of {content_length} bytes"
+    );
+    let commands = rpc.commands().expect("prelude commands");
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].ref_name, "refs/heads/big");
+    assert_eq!(commands[0].new_oid, commit);
+    assert_eq!(rpc.content_type(), "application/x-git-receive-pack-result");
+
+    let mut reply = Vec::new();
+    rpc.stream(&mut reader, &mut reply, || Ok(()))
+        .expect("stream mounted receive-pack");
+    assert_eq!(reader.read, content_length);
+    let reply = String::from_utf8_lossy(&reply).to_string();
+    assert!(reply.contains("unpack ok"), "{reply}");
+    assert_eq!(
+        git_output(&repo.path, &["rev-parse", "refs/heads/big"]),
+        commit
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(seed);
+}
+
+#[test]
+fn mounted_pack_rpc_rejects_a_non_pack_request() {
+    let root = temp_dir("jeryu-mounted-route-root");
+    let manager = RepoManager::new(GitdConfig::new(&root));
+    manager
+        .create_bare(&RepoId::new("acme", "routed").expect("valid repo id"))
+        .expect("create bare repository");
+    let request = HttpRequest {
+        method: "GET".to_string(),
+        path: "/acme/routed.git/info/refs".to_string(),
+        query: HashMap::new(),
+        headers: HashMap::new(),
+        body: Vec::new(),
+        is_loopback: true,
+        auth_prechecked: true,
+    };
+    let err = SmartHttpServer::new(manager)
+        .prepare_pack_rpc(&request, 0, &mut io::empty())
+        .expect_err("info/refs is not a pack RPC");
+    assert!(matches!(err, GitdError::Http(_)), "{err}");
+
+    let _ = std::fs::remove_dir_all(root);
+}

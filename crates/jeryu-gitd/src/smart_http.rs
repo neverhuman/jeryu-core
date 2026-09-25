@@ -5,8 +5,9 @@ use crate::command::StreamingCommand;
 use crate::error::{GitdError, Result};
 use crate::lfs::{LfsStore, LfsVerifyRequest, normalize_oid};
 use crate::pack::{
-    PackService, advertise_refs_with_protocol, ensure_receive_pack_policy,
-    read_receive_pack_prefix, spawn_stateless_rpc, stateless_rpc_with_protocol,
+    PackService, ReceivePackCommand, advertise_refs_with_protocol, ensure_receive_pack_policy,
+    read_receive_pack_prefix, receive_pack_commands, spawn_stateless_rpc,
+    stateless_rpc_with_protocol,
 };
 use crate::pktline;
 use crate::push::RefSnapshot;
@@ -84,15 +85,7 @@ impl SmartHttpServer {
             .unwrap_or(false);
         let (mut request, content_length, body_prefix) = HttpRequest::read_head(&mut stream)?;
         request.is_loopback = is_loopback;
-        let pack_service = if request.method == "POST" && request.path.ends_with("/git-upload-pack")
-        {
-            Some(PackService::UploadPack)
-        } else if request.method == "POST" && request.path.ends_with("/git-receive-pack") {
-            Some(PackService::ReceivePack)
-        } else {
-            None
-        };
-        if let Some(service) = pack_service {
+        if let Some(service) = pack_service(&request) {
             let Some(content_length) = content_length else {
                 return HttpResponse::text(411, "Git smart HTTP RPC requires Content-Length\n")
                     .write(&mut stream);
@@ -143,8 +136,8 @@ impl SmartHttpServer {
         service: PackService,
         content_length: u64,
         body_prefix: Vec<u8>,
-        input: &mut TcpStream,
-        output: &mut TcpStream,
+        input: &mut impl Read,
+        output: &mut impl Write,
     ) -> Result<PreparedRpc> {
         let suffix = format!("/{}", service.http_name());
         let base = request.path.trim_end_matches(&suffix);
@@ -201,6 +194,42 @@ impl SmartHttpServer {
             return Ok(None);
         };
         Ok(Some(PreparedLfsDownload { file, size }))
+    }
+
+    /// Prepare a pack RPC for a host that terminates HTTP itself.
+    ///
+    /// The mounted `/git` route in `jeryu serve` owns its own HTTP layer, so it
+    /// cannot use the socket path in [`Self::serve`]; without this seam it has
+    /// to materialize the whole pack to call [`Self::route`]. The returned
+    /// [`PackRpc`] has `git` already spawned and the receive-pack command
+    /// prelude already read and checked, so the caller can inspect the ref
+    /// updates and then pump the remaining body straight into the child.
+    ///
+    /// `content_length` is the declared body length in decoded bytes and `body`
+    /// yields those bytes (the caller enforces its own size limits while
+    /// reading). Authorization follows [`Self::route`]: `auth_prechecked`
+    /// requests are trusted, others are checked against the registry.
+    pub fn prepare_pack_rpc(
+        &self,
+        request: &HttpRequest,
+        content_length: u64,
+        body: &mut impl Read,
+    ) -> Result<PackRpc> {
+        let service = pack_service(request).ok_or_else(|| {
+            GitdError::Http(format!(
+                "no pack RPC for {} {}",
+                request.method, request.path
+            ))
+        })?;
+        let prepared = self.prepare_streaming_rpc(
+            request,
+            service,
+            content_length,
+            Vec::new(),
+            body,
+            &mut io::sink(),
+        )?;
+        Ok(PackRpc { prepared })
     }
 
     /// Route a fully materialized synthetic HTTP request and return a response.
@@ -412,6 +441,48 @@ impl SmartHttpServer {
     }
 }
 
+/// A pack RPC prepared by [`SmartHttpServer::prepare_pack_rpc`], waiting for
+/// the rest of the request body.
+#[derive(Debug)]
+pub struct PackRpc {
+    prepared: PreparedRpc,
+}
+
+impl PackRpc {
+    /// Content type of the response this RPC produces.
+    #[must_use]
+    pub fn content_type(&self) -> &str {
+        &self.prepared.content_type
+    }
+
+    /// Ref update commands from the receive-pack prelude, for host policy that
+    /// runs before the pack is accepted. Empty for upload-pack.
+    pub fn commands(&self) -> Result<Vec<ReceivePackCommand>> {
+        if self.prepared.push.is_none() {
+            return Ok(Vec::new());
+        }
+        receive_pack_commands(&self.prepared.body_prefix)
+    }
+
+    /// Pump `body` (the request bytes after the prelude this RPC already read)
+    /// into `git` and the reply into `output`.
+    ///
+    /// `cancel_body` must interrupt a blocked read of `body` so the pump can
+    /// finish when `git` stops producing output; a no-op closure is correct
+    /// when the caller's reader cannot block indefinitely.
+    pub fn stream<R: Read + Send, W: Write, C: FnOnce() -> io::Result<()>>(
+        self,
+        body: R,
+        output: W,
+        cancel_body: C,
+    ) -> Result<()> {
+        let remaining = self.prepared.remaining;
+        self.prepared
+            .pump(body.take(remaining), output, cancel_body)
+    }
+}
+
+#[derive(Debug)]
 struct PreparedRpc {
     process: StreamingCommand,
     push: Option<PendingPush>,
@@ -425,10 +496,23 @@ impl PreparedRpc {
     fn stream(self, input: TcpStream, output: &mut TcpStream) -> Result<()> {
         let cancel_input = input.try_clone()?;
         HttpResponse::write_streaming_head(output, &self.content_type)?;
-        let body = Cursor::new(self.body_prefix).chain(input.take(self.remaining));
-        self.process.pump(body, output, self.content_length, || {
+        let remaining = self.remaining;
+        self.pump(input.take(remaining), output, || {
             cancel_input.shutdown(Shutdown::Read)
-        })?;
+        })
+    }
+
+    /// Pump the prefix already read plus the `rest` of the body into `git`, the
+    /// reply into `output`, then settle a pending push.
+    fn pump<R: Read + Send, W: Write, C: FnOnce() -> io::Result<()>>(
+        self,
+        rest: R,
+        output: W,
+        cancel_input: C,
+    ) -> Result<()> {
+        let body = Cursor::new(self.body_prefix).chain(rest);
+        self.process
+            .pump(body, output, self.content_length, cancel_input)?;
         if let Some(push) = self.push {
             push.manager.finish_push(&push.repo, &push.before)?;
         }
@@ -437,6 +521,7 @@ impl PreparedRpc {
 }
 
 /// Ref snapshot taken before a streamed receive-pack, compared afterwards.
+#[derive(Debug)]
 struct PendingPush {
     manager: RepoManager,
     repo: Repository,
@@ -460,6 +545,20 @@ impl PreparedLfsDownload {
             )));
         }
         Ok(())
+    }
+}
+
+/// The pack service a request addresses, if any.
+fn pack_service(request: &HttpRequest) -> Option<PackService> {
+    if request.method != "POST" {
+        return None;
+    }
+    if request.path.ends_with("/git-upload-pack") {
+        Some(PackService::UploadPack)
+    } else if request.path.ends_with("/git-receive-pack") {
+        Some(PackService::ReceivePack)
+    } else {
+        None
     }
 }
 
@@ -546,7 +645,7 @@ fn git_protocol_header(request: &HttpRequest) -> Result<Option<&str>> {
     }
 }
 
-fn write_continue_if_requested(request: &HttpRequest, output: &mut TcpStream) -> Result<()> {
+fn write_continue_if_requested(request: &HttpRequest, output: &mut impl Write) -> Result<()> {
     let Some(expectation) = request.headers.get("expect") else {
         return Ok(());
     };
