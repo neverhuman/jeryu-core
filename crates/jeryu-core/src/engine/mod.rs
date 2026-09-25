@@ -326,22 +326,23 @@ fn slugify(value: &str) -> String {
         .join("-")
 }
 
-fn next_issue_number(state: &mut State, owner: &str, repo: &str) -> u64 {
+/// Allocates the next number in a repository's single issue/pull number space.
+///
+/// Issues and pull requests share one sequence, the way GitHub numbers them: a
+/// PR is an issue, so PR #N and issue #N are the same record and a comment
+/// posted through the issues route reaches the PR it names. The two stored
+/// counters are kept in step (both set to the number just handed out) so a
+/// repository whose counters drifted apart before they were unified never
+/// reuses a number that is already live.
+fn next_record_number(state: &mut State, owner: &str, repo: &str) -> u64 {
     let counters = state
         .counters
         .entry((owner.to_string(), repo.to_string()))
         .or_default();
-    counters.issue += 1;
-    counters.issue
-}
-
-fn next_pull_number(state: &mut State, owner: &str, repo: &str) -> u64 {
-    let counters = state
-        .counters
-        .entry((owner.to_string(), repo.to_string()))
-        .or_default();
-    counters.pull += 1;
-    counters.pull
+    let number = counters.issue.max(counters.pull) + 1;
+    counters.issue = number;
+    counters.pull = number;
+    number
 }
 
 /// Whether jeryu enforces a passing `jankurai/proof` check on every merge,

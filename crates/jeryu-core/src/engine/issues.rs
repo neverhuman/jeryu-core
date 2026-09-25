@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{ForgeCore, emit_event_locked, next_issue_number, require_name};
+use super::{ForgeCore, emit_event_locked, next_record_number, require_name};
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
 use crate::webhooks::event_payload;
@@ -22,7 +22,7 @@ impl ForgeCore {
         self.ensure_user(author);
         let mut state = self.state.write();
         let previous = state.clone();
-        let number = next_issue_number(&mut state, owner, repo);
+        let number = next_record_number(&mut state, owner, repo);
         let now = Utc::now();
         let issue = Issue {
             id: Uuid::new_v4(),

@@ -5,8 +5,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::{
-    ForgeCore, apply_evaluation, emit_event_locked, evaluate_locked, next_issue_number,
-    next_pull_number, require_name,
+    ForgeCore, apply_evaluation, emit_event_locked, evaluate_locked, next_record_number,
+    require_name,
 };
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
@@ -69,8 +69,9 @@ impl ForgeCore {
         self.ensure_user(author);
         let mut state = self.state.write();
         let previous = state.clone();
-        let issue_number = next_issue_number(&mut state, owner, repo);
-        let pull_number = next_pull_number(&mut state, owner, repo);
+        // A PR is an issue: one number, one record pair.
+        let pull_number = next_record_number(&mut state, owner, repo);
+        let issue_number = pull_number;
         let now = Utc::now();
         let issue = Issue {
             id: Uuid::new_v4(),

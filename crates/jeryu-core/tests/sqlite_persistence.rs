@@ -401,9 +401,11 @@ fn sqlite_store_round_trips_core_forge_resources() {
     }
 
     let raw = Connection::open(&db).unwrap();
+    // Issues and pulls share one number space: the seeded issue is #1, the pull
+    // request #2.
     let stored_head: String = raw
         .query_row(
-            "SELECT head_json FROM pull_requests WHERE number = 1",
+            "SELECT head_json FROM pull_requests WHERE number = 2",
             [],
             |row| row.get(0),
         )
@@ -414,7 +416,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
     );
     let stored_base: String = raw
         .query_row(
-            "SELECT base_json FROM pull_requests WHERE number = 1",
+            "SELECT base_json FROM pull_requests WHERE number = 2",
             [],
             |row| row.get(0),
         )
@@ -425,7 +427,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
     );
     let stored_commits: String = raw
         .query_row(
-            "SELECT commits_json FROM pull_requests WHERE number = 1",
+            "SELECT commits_json FROM pull_requests WHERE number = 2",
             [],
             |row| row.get(0),
         )
@@ -441,7 +443,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
     );
     let stored_changes: String = raw
         .query_row(
-            "SELECT changed_files_json FROM pull_requests WHERE number = 1",
+            "SELECT changed_files_json FROM pull_requests WHERE number = 2",
             [],
             |row| row.get(0),
         )
@@ -460,7 +462,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
     assert!(issue_pull_request_json.is_none());
     let stored_review_head: Option<String> = raw
         .query_row(
-            "SELECT head_sha FROM reviews WHERE pull_number = 1",
+            "SELECT head_sha FROM reviews WHERE pull_number = 2",
             [],
             |row| row.get(0),
         )
@@ -500,11 +502,14 @@ fn sqlite_store_round_trips_core_forge_resources() {
             .source_repository,
         "fork-owner/jeryu"
     );
-    let reopened_reviews = reopened.list_reviews("alice", "jeryu", 1).unwrap();
+    let reopened_reviews = reopened.list_reviews("alice", "jeryu", pr_number).unwrap();
     assert_eq!(reopened_reviews.len(), 1);
     assert_eq!(reopened_reviews[0].head_sha.as_deref(), Some("abc123"));
     assert_eq!(
-        reopened.list_review_comments("alice", "jeryu", 1).unwrap()[0].path,
+        reopened
+            .list_review_comments("alice", "jeryu", pr_number)
+            .unwrap()[0]
+            .path,
         "src/lib.rs"
     );
     assert_eq!(
@@ -578,7 +583,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
             },
         )
         .unwrap();
-    assert_eq!(next_pr.number, 2);
+    assert_eq!(next_pr.number, 4);
     assert_eq!(next_pr.source_repository, "fork-owner/jeryu");
 }
 

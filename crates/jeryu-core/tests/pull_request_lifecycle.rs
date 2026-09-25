@@ -8,10 +8,10 @@
 
 use jeryu_core::{
     CheckConclusion, CheckRunStatus, CommitStatusState, CreateCheckRunRequest,
-    CreateCommitStatusRequest, CreatePullRequestRequest, CreateRepositoryRequest,
-    CreateReviewRequest, CreateUserRequest, ForgeCore, ForgeError, IssueState, MergeBlocker,
-    MergePullRequestRequest, MergeReadiness, PullRequestState, ReviewState,
-    SetBranchProtectionRequest, UpdatePullRequestRequest,
+    CreateCommentRequest, CreateCommitStatusRequest, CreateIssueRequest, CreatePullRequestRequest,
+    CreateRepositoryRequest, CreateReviewRequest, CreateUserRequest, ForgeCore, ForgeError,
+    IssueState, MergeBlocker, MergePullRequestRequest, MergeReadiness, PullRequestState,
+    ReviewState, SetBranchProtectionRequest, UpdatePullRequestRequest,
 };
 
 fn core_with_repo() -> ForgeCore {
@@ -1124,4 +1124,71 @@ fn legacy_merge_pull_request_keeps_synthetic_sha() {
         Some(format!("merge-feat-sha-{number}"))
     );
     assert!(pr.merged);
+}
+
+#[test]
+fn issues_and_pulls_share_one_number_space() {
+    let core = core_with_repo();
+
+    let issue_one = core
+        .create_issue(
+            "alice",
+            "jeryu",
+            "alice",
+            CreateIssueRequest {
+                title: "first".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let pr_one = open_pr(&core, "sha-1", false);
+    let issue_two = core
+        .create_issue(
+            "alice",
+            "jeryu",
+            "alice",
+            CreateIssueRequest {
+                title: "second".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let pr_two = open_pr(&core, "sha-2", false);
+
+    // Interleaved creation hands out 1, 2, 3, 4 with no number used twice.
+    assert_eq!(
+        vec![issue_one.number, pr_one, issue_two.number, pr_two],
+        vec![1, 2, 3, 4]
+    );
+
+    // A PR is an issue: the same number names both halves of the record.
+    for number in [pr_one, pr_two] {
+        let pr = core.get_pull_request("alice", "jeryu", number).unwrap();
+        assert_eq!(pr.issue_number, pr.number);
+        let issue = core.get_issue("alice", "jeryu", number).unwrap();
+        assert_eq!(issue.title, "change");
+        assert!(issue.pull_request.is_some());
+    }
+
+    // Commenting on PR #N through the issues route reaches that PR, not the
+    // issue that used to share its number.
+    core.add_issue_comment(
+        "alice",
+        "jeryu",
+        pr_two,
+        "alice",
+        CreateCommentRequest {
+            body: "ship it".to_string(),
+        },
+    )
+    .unwrap();
+    let comments = core.list_issue_comments("alice", "jeryu", pr_two).unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].issue_number, pr_two);
+    assert_eq!(comments[0].body, "ship it");
+    assert!(
+        core.list_issue_comments("alice", "jeryu", issue_two.number)
+            .unwrap()
+            .is_empty()
+    );
 }

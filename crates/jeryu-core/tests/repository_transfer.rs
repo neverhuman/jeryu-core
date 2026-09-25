@@ -240,13 +240,15 @@ fn transfer_preserves_uuid_scoped_state_alias_and_journal_across_reopen() {
         core.get_repository_by_id(repository_id).unwrap().full_name,
         "veox/redline"
     );
+    // Issues and pulls share one number space: the seeded issue is #1 and the
+    // seeded pull request is #2.
     assert_eq!(core.get_issue("veox", "redline", 1).unwrap().owner, "veox");
     assert_eq!(
-        core.get_pull_request("veox", "redline", 1).unwrap().owner,
+        core.get_pull_request("veox", "redline", 2).unwrap().owner,
         "veox"
     );
     assert_eq!(
-        core.get_pull_request("veox", "redline", 1)
+        core.get_pull_request("veox", "redline", 2)
             .unwrap()
             .source_repository,
         "veox/redline"
