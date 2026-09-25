@@ -295,8 +295,9 @@ pub(crate) fn read_receive_pack_prefix(
         ));
     }
 
+    let mut offset = 0usize;
     loop {
-        match receive_pack_prelude_state(&prefix)? {
+        match receive_pack_prelude_state(&prefix, &mut offset)? {
             PreludeState::Complete(prelude_len) => {
                 if prelude_len > MAX_RECEIVE_PACK_PRELUDE_BYTES {
                     return Err(GitdError::Protocol(
@@ -336,20 +337,22 @@ enum PreludeState {
     Need(usize),
 }
 
-fn receive_pack_prelude_state(input: &[u8]) -> Result<PreludeState> {
-    let mut offset = 0usize;
+/// Advance the pkt-line scan from `offset`, which is carried across reads so a
+/// prelude arriving in many small chunks is parsed once rather than re-scanned
+/// from the start on every read.
+fn receive_pack_prelude_state(input: &[u8], offset: &mut usize) -> Result<PreludeState> {
     loop {
-        let remaining = input.len().saturating_sub(offset);
+        let remaining = input.len().saturating_sub(*offset);
         if remaining < 4 {
             return Ok(PreludeState::Need(4 - remaining));
         }
-        let hdr = std::str::from_utf8(&input[offset..offset + 4])
+        let hdr = std::str::from_utf8(&input[*offset..*offset + 4])
             .map_err(|_| GitdError::Protocol("pkt-line length is not utf8".to_string()))?;
         let len = usize::from_str_radix(hdr, 16)
             .map_err(|_| GitdError::Protocol(format!("invalid pkt-line length: {hdr}")))?;
         match len {
-            0 => return Ok(PreludeState::Complete(offset + 4)),
-            1 | 2 => offset += 4,
+            0 => return Ok(PreludeState::Complete(*offset + 4)),
+            1 | 2 => *offset += 4,
             3 => {
                 return Err(GitdError::Protocol(
                     "reserved pkt-line length 0003".to_string(),
@@ -362,7 +365,7 @@ fn receive_pack_prelude_state(input: &[u8]) -> Result<PreludeState> {
                 if remaining < n {
                     return Ok(PreludeState::Need(n - remaining));
                 }
-                offset += n;
+                *offset += n;
             }
         }
     }
@@ -523,6 +526,39 @@ mod tests {
 
         assert_eq!(prefix, body[..prelude_len]);
         assert_eq!(reader.remaining(), &body[prelude_len..]);
+    }
+
+    #[test]
+    fn receive_pack_prefix_reads_large_prelude_in_one_byte_reads() {
+        let mut body = Vec::new();
+        for index in 0..2048u32 {
+            let line = if index == 0 {
+                format!(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/topic-{index}\0 report-status\n"
+                )
+            } else {
+                format!(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/topic-{index}\n"
+                )
+            };
+            body.extend(pktline::encode_str(&line));
+        }
+        body.extend(pktline::flush());
+        let prelude_len = body.len();
+        body.extend(b"PACK payload remains in the reader");
+        let mut reader = OneByteReader::new(&body);
+
+        let prefix = read_receive_pack_prefix(&mut reader, body.len() as u64, Vec::new())
+            .unwrap_or_else(|err| panic!("read large prelude: {err}"));
+
+        assert_eq!(prefix, body[..prelude_len]);
+        assert_eq!(reader.remaining(), &body[prelude_len..]);
+
+        let commands = receive_pack_commands(&prefix).expect("parse large prelude");
+        let whole = receive_pack_commands(&body).expect("parse whole body");
+        assert_eq!(commands, whole);
+        assert_eq!(commands.len(), 2048);
+        assert_eq!(commands[2047].ref_name, "refs/heads/topic-2047");
     }
 
     #[test]
