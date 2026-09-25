@@ -25,6 +25,7 @@ impl ForgeCore {
             repo: repo.to_string(),
             branch: branch.to_string(),
             required_status_checks: request.required_status_checks,
+            strict: request.strict,
             required_approving_review_count: request.required_approving_review_count,
             enforce_admins: request.enforce_admins,
             required_linear_history: request.required_linear_history,

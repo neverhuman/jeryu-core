@@ -319,6 +319,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
             "main",
             SetBranchProtectionRequest {
                 required_status_checks: vec!["ci/fast".to_string()],
+                strict: false,
                 required_approving_review_count: 1,
                 enforce_admins: true,
                 required_linear_history: true,

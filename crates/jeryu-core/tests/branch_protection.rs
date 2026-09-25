@@ -137,6 +137,7 @@ fn set_and_get_branch_protection_roundtrips() {
             "main",
             SetBranchProtectionRequest {
                 required_status_checks: vec!["ci/fast".to_string(), "ci/slow".to_string()],
+                strict: true,
                 required_approving_review_count: 2,
                 enforce_admins: true,
                 required_linear_history: true,
@@ -151,6 +152,9 @@ fn set_and_get_branch_protection_roundtrips() {
     assert_eq!(rule.required_approving_review_count, 2);
     assert!(rule.enforce_admins);
     assert!(rule.required_linear_history);
+    // `strict` (head up to date with base) is its own policy, stored and
+    // round-tripped independently of `required_linear_history`.
+    assert!(rule.strict);
     assert!(rule.require_signed_commits);
     assert!(!rule.allow_force_pushes);
     assert!(!rule.allow_deletions);
@@ -933,4 +937,104 @@ fn codeowners_last_matching_rule_wins() {
     )));
     approve(&core, number, "security");
     assert!(eval(&core, number).mergeable);
+}
+
+// ---------------------------------------------------------------------------
+// PUT body semantics
+// ---------------------------------------------------------------------------
+
+/// A PUT replaces the whole rule, so the top-level fields must be spelled out:
+/// a body missing one is a deserialization error (the GitHub edge turns that
+/// into 422) rather than a silent "off" that disables protections.
+#[test]
+fn put_body_missing_a_required_field_is_rejected() {
+    for body in [
+        r#"{"required_approving_review_count": 2, "enforce_admins": true}"#,
+        r#"{"required_status_checks": ["ci/fast"], "enforce_admins": true}"#,
+        r#"{"required_status_checks": ["ci/fast"], "required_approving_review_count": 2}"#,
+        r#"{}"#,
+    ] {
+        let parsed = serde_json::from_str::<SetBranchProtectionRequest>(body);
+        assert!(parsed.is_err(), "body should be rejected: {body}");
+    }
+}
+
+/// The optional fields keep GitHub's defaults, and `strict` is read from the
+/// body instead of being inferred from `required_linear_history`.
+#[test]
+fn put_body_with_required_fields_defaults_only_the_optional_ones() {
+    let request: SetBranchProtectionRequest = serde_json::from_str(
+        r#"{
+            "required_status_checks": ["ci/fast"],
+            "required_approving_review_count": 1,
+            "enforce_admins": true,
+            "strict": true
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(request.required_status_checks, vec!["ci/fast".to_string()]);
+    assert_eq!(request.required_approving_review_count, 1);
+    assert!(request.enforce_admins);
+    assert!(request.strict);
+    assert!(!request.required_linear_history);
+    assert!(!request.allow_force_pushes);
+    assert!(!request.allow_deletions);
+    assert!(!request.require_signed_commits);
+    assert!(!request.require_jankurai_proof);
+}
+
+/// A strict rule is not a linear-history rule: setting one must leave the other
+/// alone, in both directions.
+#[test]
+fn strict_and_required_linear_history_are_independent() {
+    let core = core_with_repo();
+    let rule = core
+        .set_branch_protection(
+            "alice",
+            "jeryu",
+            "main",
+            SetBranchProtectionRequest {
+                strict: true,
+                ..SetBranchProtectionRequest::default()
+            },
+        )
+        .unwrap();
+    assert!(rule.strict);
+    assert!(!rule.required_linear_history);
+
+    let rule = core
+        .set_branch_protection(
+            "alice",
+            "jeryu",
+            "main",
+            SetBranchProtectionRequest {
+                required_linear_history: true,
+                ..SetBranchProtectionRequest::default()
+            },
+        )
+        .unwrap();
+    assert!(!rule.strict);
+    assert!(rule.required_linear_history);
+}
+
+/// Rules stored before `strict` existed still load; the field reads as off.
+#[test]
+fn stored_rule_without_strict_loads_with_it_off() {
+    let core = core_with_repo();
+    let rule = core
+        .set_branch_protection(
+            "alice",
+            "jeryu",
+            "main",
+            SetBranchProtectionRequest {
+                strict: true,
+                ..SetBranchProtectionRequest::default()
+            },
+        )
+        .unwrap();
+    let mut stored = serde_json::to_value(&rule).unwrap();
+    stored.as_object_mut().unwrap().remove("strict");
+    let reloaded: jeryu_core::BranchProtectionRule = serde_json::from_value(stored).unwrap();
+    assert!(!reloaded.strict);
+    assert_eq!(reloaded.branch, "main");
 }

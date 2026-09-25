@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- Branch protection carries its own `strict` (head up to date with base) flag,
+  separate from `required_linear_history`, and `SetBranchProtectionRequest`
+  requires `required_status_checks`, `required_approving_review_count` and
+  `enforce_admins`: a PUT body that omits one is rejected (422 at the edge)
+  instead of silently switching those protections off.
 - `ForgeCore::set_repository_default_branch` changes a repository's default
   branch after checking it exists (via `RepoBranches`); the new default branch
   gets the usual automatic protection.

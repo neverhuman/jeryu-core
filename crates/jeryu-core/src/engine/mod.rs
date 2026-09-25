@@ -95,6 +95,7 @@ fn default_branch_protection_rule(owner: &str, repo: &str, branch: &str) -> Bran
         repo: repo.to_string(),
         branch: branch.to_string(),
         required_status_checks: Vec::new(),
+        strict: false,
         required_approving_review_count: 0,
         enforce_admins: false,
         required_linear_history: true,

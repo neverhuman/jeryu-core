@@ -68,6 +68,7 @@ fn branch_protection_blocks_merge_until_review_and_status_pass() {
         "main",
         SetBranchProtectionRequest {
             required_status_checks: vec!["ci/fast".to_string()],
+            strict: false,
             required_approving_review_count: 1,
             enforce_admins: true,
             required_linear_history: true,
@@ -153,6 +154,7 @@ fn check_run_satisfies_required_context() {
         "main",
         SetBranchProtectionRequest {
             required_status_checks: vec!["ci/fast".to_string()],
+            strict: false,
             required_approving_review_count: 0,
             enforce_admins: false,
             required_linear_history: false,
