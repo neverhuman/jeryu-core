@@ -8,10 +8,16 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// GitHub's raw-Git file warning/error boundary for ordinary blobs.
 pub const RAW_GIT_BLOB_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Attempts to find an unused temporary file name before giving up.
+const TEMP_NAME_ATTEMPTS: u32 = 64;
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Default local Enterprise-style LFS object ceiling.
 pub const DEFAULT_LFS_MAX_OBJECT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
@@ -50,13 +56,7 @@ impl LfsStore {
                 "sha256 mismatch: expected {oid}, got {actual}"
             )));
         }
-        let path = self.object_path(&oid)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("tmp");
-        fs::write(&tmp, bytes)?;
-        fs::rename(tmp, path)?;
+        self.put_reader_with_limit(&oid, Some(bytes.len() as u64), u64::MAX, bytes)?;
         Ok(())
     }
 
@@ -88,9 +88,8 @@ impl LfsStore {
             .parent()
             .ok_or_else(|| GitdError::Lfs("LFS object path has no parent".to_string()))?;
         fs::create_dir_all(parent)?;
-        let tmp = temp_path_for(&path);
+        let (mut file, tmp) = create_temp_file(&path)?;
         let result = (|| {
-            let mut file = fs::File::create(&tmp)?;
             let mut hasher = Sha256::new();
             let mut total = 0u64;
             let mut buffer = [0u8; 64 * 1024];
@@ -125,7 +124,14 @@ impl LfsStore {
                     "sha256 mismatch: expected {oid}, got {actual}"
                 )));
             }
+            if path.exists() {
+                // The object is content addressed and already verified: another
+                // writer published identical bytes while this one was streaming.
+                fs::remove_file(&tmp)?;
+                return Ok(total);
+            }
             fs::rename(&tmp, &path)?;
+            sync_dir(parent)?;
             Ok(total)
         })();
         if result.is_err() {
@@ -484,16 +490,51 @@ fn object_href(objects_url: &str, oid: &str) -> String {
     format!("{}/{}", objects_url.trim_end_matches('/'), oid)
 }
 
-fn temp_path_for(path: &Path) -> PathBuf {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+/// Open a temporary sibling file that no other writer can already hold.
+///
+/// The name mixes the process id, a monotonic counter and the clock so that
+/// concurrent uploads of the same oid never share one temporary file;
+/// `create_new` turns any remaining collision into an error instead of two
+/// writers interleaving bytes into the same file.
+fn create_temp_file(path: &Path) -> Result<(fs::File, PathBuf)> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("object");
-    path.with_file_name(format!(".{file_name}.tmp.{}.{}", std::process::id(), now))
+    for _ in 0..TEMP_NAME_ATTEMPTS {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let unique = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_file_name(format!(
+            ".{file_name}.tmp.{}.{now}.{unique}",
+            std::process::id()
+        ));
+        match fs::File::options().write(true).create_new(true).open(&tmp) {
+            Ok(file) => return Ok((file, tmp)),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(GitdError::Io(err)),
+        }
+    }
+    Err(GitdError::Lfs(format!(
+        "could not create a temporary file for {}",
+        path.display()
+    )))
+}
+
+/// Flush a directory entry so a renamed object survives a crash.
+fn sync_dir(dir: &Path) -> Result<()> {
+    match fs::File::open(dir) {
+        Ok(handle) => match handle.sync_all() {
+            Ok(()) => Ok(()),
+            // Directory fsync is not supported everywhere; the rename itself is
+            // still atomic on those platforms.
+            Err(err) if err.kind() == io::ErrorKind::InvalidInput => Ok(()),
+            Err(err) => Err(GitdError::Io(err)),
+        },
+        Err(err) => Err(GitdError::Io(err)),
+    }
 }
 
 fn finalize_sha256_hex(hasher: Sha256) -> String {
@@ -589,6 +630,55 @@ mod tests {
             .expect_err("symlink object must be rejected");
 
         assert!(err.to_string().contains("not a regular file"));
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn lfs_parallel_puts_of_one_oid_all_publish_a_verified_object() {
+        let base = std::env::temp_dir().join(format!(
+            "jeryu-lfs-parallel-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let store = LfsStore::new(&base);
+        let data = vec![b'p'; 512 * 1024];
+        let oid = sha256_hex(&data);
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let store = store.clone();
+                let data = data.clone();
+                let oid = oid.clone();
+                scope.spawn(move || {
+                    store
+                        .put_bytes(&oid, &data)
+                        .unwrap_or_else(|err| panic!("concurrent put failed: {err}"));
+                });
+            }
+        });
+
+        store
+            .verify(&oid, data.len() as u64)
+            .unwrap_or_else(|err| panic!("verify failed: {err}"));
+        assert_eq!(
+            sha256_hex(&store.get(&oid).unwrap_or_else(|err| panic!("get failed: {err}"))),
+            oid
+        );
+        let parent = store
+            .object_path(&oid)
+            .expect("object path")
+            .parent()
+            .expect("object parent")
+            .to_path_buf();
+        let leftovers: Vec<_> = fs::read_dir(&parent)
+            .expect("read object dir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .filter(|name| name.to_string_lossy() != oid)
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left behind: {leftovers:?}");
+
         let _ = fs::remove_dir_all(base);
     }
 
