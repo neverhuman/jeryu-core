@@ -82,8 +82,77 @@ fn ref_name_validation_rejects_command_like_and_nul_names() {
     if !common::git_available() {
         return;
     }
-    assert!(validate_ref_name("-refs/heads/main").is_err());
-    assert!(validate_ref_name("refs/heads/main\0shadow").is_err());
+    assert!(validate_ref_name("git", "-refs/heads/main").is_err());
+    assert!(validate_ref_name("git", "refs/heads/main\0shadow").is_err());
+}
+
+#[test]
+fn ref_name_validation_requires_fully_qualified_names() {
+    if !common::git_available() {
+        return;
+    }
+    assert!(validate_ref_name("git", "refs/heads/main").is_ok());
+    assert!(validate_ref_name("git", "HEAD").is_err());
+    assert!(validate_ref_name("git", "main").is_err());
+    assert!(validate_ref_name("git", "refs/main").is_err());
+}
+
+#[test]
+fn ref_service_refuses_head_update() {
+    if !common::git_available() {
+        return;
+    }
+    let fixture = seed_bare_with_main("jeryu-refs-head-update");
+    let first_oid = fixture.main_oid.clone();
+
+    let err = RefService::new(fixture.manager.clone())
+        .update_ref(&fixture.repo, "alice", "HEAD", &first_oid, Some(&first_oid))
+        .unwrap_err();
+
+    assert!(
+        err.to_string().contains("fully qualified"),
+        "unexpected error: {err}"
+    );
+    fixture.cleanup();
+}
+
+#[test]
+fn ref_service_denies_protected_main_rewind_through_symbolic_ref() {
+    if !common::git_available() {
+        return;
+    }
+    let mut fixture = seed_bare_with_main("jeryu-refs-symref-force");
+    let first_oid = fixture.main_oid.clone();
+    fixture.main_oid = commit_and_push(&fixture.work, &fixture.repo, "second\n");
+    let second_oid = fixture.main_oid.clone();
+    run_git(
+        &fixture.repo.path,
+        &["symbolic-ref", "refs/heads/trunk", "refs/heads/main"],
+        "git symbolic-ref",
+    );
+
+    let err = RefService::new(fixture.manager.clone())
+        .update_ref(
+            &fixture.repo,
+            "alice",
+            "refs/heads/trunk",
+            &first_oid,
+            Some(&second_oid),
+        )
+        .unwrap_err();
+
+    assert!(
+        err.to_string().contains("cannot force-update"),
+        "unexpected error: {err}"
+    );
+    let refs = RefService::new(fixture.manager.clone())
+        .list_refs(&fixture.repo)
+        .unwrap_or_else(|read_err| panic!("refs failed after denied update: {read_err}"));
+    assert!(
+        refs.iter()
+            .any(|r| r.name == "refs/heads/main" && r.oid == second_oid)
+    );
+    fixture.cleanup();
 }
 
 #[derive(Debug)]

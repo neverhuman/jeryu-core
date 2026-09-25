@@ -92,7 +92,7 @@ impl PreReceiveGuard {
             let ref_name = parts[2];
             validate_object_id(old_oid, idx + 1, "prior")?;
             validate_object_id(new_oid, idx + 1, "next")?;
-            validate_ref_name(ref_name)?;
+            validate_ref_name(self.fsck.git_bin(), ref_name)?;
             let operation = if is_zero_oid(new_oid) {
                 RefOperation::Delete
             } else if is_zero_oid(old_oid) {

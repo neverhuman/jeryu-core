@@ -20,6 +20,12 @@ impl ObjectFsck {
         }
     }
 
+    /// The git binary this validator shells out to.
+    #[must_use]
+    pub fn git_bin(&self) -> &str {
+        &self.git_bin
+    }
+
     /// Run strict fsck. In receive-pack quarantine this observes Git's quarantine
     /// environment when invoked from the hook process.
     pub fn fsck(&self, repo: &Repository) -> Result<()> {

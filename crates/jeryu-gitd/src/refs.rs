@@ -95,8 +95,12 @@ impl RefService {
         new_oid: &str,
         old_oid: Option<&str>,
     ) -> Result<()> {
-        validate_ref_name(name)?;
+        validate_ref_name(&self.manager.config().git_bin, name)?;
         repo.ensure_writable()?;
+        // Policy and the write both target the direct ref, never the symbolic
+        // alias that was asked for.
+        let resolved = resolve_symbolic_ref(&self.manager.config().git_bin, repo, name)?;
+        let name = resolved.as_str();
         let operation = if is_zero_oid(new_oid) {
             RefOperation::Delete
         } else if old_oid.is_some() {
@@ -150,7 +154,7 @@ impl RefService {
         message: &str,
         require_fast_forward: bool,
     ) -> Result<MergeOutcome> {
-        validate_ref_name(base_ref)?;
+        validate_ref_name(&self.manager.config().git_bin, base_ref)?;
         repo.ensure_writable()?;
         if is_zero_oid(base_oid) || is_zero_oid(head_oid) {
             return Err(GitdError::InvalidInput(
@@ -305,11 +309,48 @@ fn commit_tree(
 pub const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 
 /// Validate a ref name using Git itself plus local sanity guards.
-pub fn validate_ref_name(name: &str) -> Result<()> {
+///
+/// Only fully qualified names under `refs/` with at least two levels are
+/// accepted. `HEAD` and other one-level names are refused: they are symbolic
+/// entry points, so writing them directly would move whatever branch they
+/// point at without that branch's protection rules ever being consulted.
+pub fn validate_ref_name(git_bin: &str, name: &str) -> Result<()> {
     if name.contains('\0') || name.starts_with('-') {
         return Err(GitdError::InvalidInput("invalid ref name".to_string()));
     }
-    run_capture("git", &["check-ref-format", "--allow-onelevel", name], None).map(|_| ())
+    if !name.starts_with("refs/") || name.split('/').count() < 3 {
+        return Err(GitdError::InvalidInput(format!(
+            "ref name must be fully qualified as refs/<kind>/<name>: {name}"
+        )));
+    }
+    run_capture(git_bin, &["check-ref-format", name], None).map(|_| ())
+}
+
+/// Maximum symbolic-ref hops followed before a chain is called circular.
+const MAX_SYMREF_DEPTH: usize = 8;
+
+/// Follow `name` through any symbolic refs to the direct ref it ultimately
+/// names, so policy is evaluated against the ref that actually moves.
+fn resolve_symbolic_ref(git_bin: &str, repo: &Repository, name: &str) -> Result<String> {
+    let mut current = name.to_string();
+    for _ in 0..MAX_SYMREF_DEPTH {
+        let out = std::process::Command::new(git_bin)
+            .args(["symbolic-ref", "--quiet", &current])
+            .current_dir(&repo.path)
+            .output()?;
+        if !out.status.success() {
+            return Ok(current);
+        }
+        let target = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if target.is_empty() || target == current {
+            return Ok(current);
+        }
+        validate_ref_name(git_bin, &target)?;
+        current = target;
+    }
+    Err(GitdError::InvalidInput(format!(
+        "symbolic ref {name} does not resolve to a direct ref"
+    )))
 }
 
 /// Whether an oid is all zeroes.
