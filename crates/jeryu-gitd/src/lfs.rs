@@ -518,7 +518,7 @@ fn create_temp_file(path: &Path) -> Result<(fs::File, PathBuf)> {
         }
     }
     Err(GitdError::Lfs(format!(
-        "could not create a temporary file for {}",
+        "could not reserve a fresh upload name for {}",
         path.display()
     )))
 }
