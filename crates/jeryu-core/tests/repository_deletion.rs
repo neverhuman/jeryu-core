@@ -1,11 +1,11 @@
 //! Registry deletion + audit-trail durability against the SQLite store.
 //!
-//! Persistence is a full-state rewrite: every mutation runs `delete_all` and
-//! reinserts the whole in-memory `State`. These tests pin the two invariants
-//! that design forces on deletion: (1) removing a repo from every `State` map
-//! and persisting once leaves zero rows for it in every table while another
-//! repo's rows survive, and (2) the `forge_audit_log` table — appended outside
-//! the rewrite — survives arbitrary later mutations.
+//! Persistence reconciles the State-owned tables against the whole in-memory
+//! `State`. These tests pin the two invariants that design forces on deletion:
+//! (1) removing a repo from every `State` map and persisting once leaves zero
+//! rows for it in every table while another repo's rows survive, and (2) the
+//! `forge_audit_log` table — appended outside the snapshot — survives
+//! arbitrary later mutations.
 
 use jeryu_core::{
     CheckConclusion, CheckRunStatus, CommitStatusState, CreateCheckRunRequest,
@@ -284,12 +284,11 @@ fn delete_repository_purges_every_table_and_spares_siblings() {
     assert_eq!(stale_metadata, 0);
 }
 
-/// The audit trail is OUTSIDE the full-state rewrite: entries appended before
-/// and between mutations survive every persist (each of which runs
-/// `delete_all` on the state tables), survive reopen, and survive the deletion
-/// of the subject repository itself.
+/// The audit trail is OUTSIDE the State-owned snapshot: entries appended
+/// before and between mutations survive every persist, survive reopen, and
+/// survive the deletion of the subject repository itself.
 #[test]
-fn forge_audit_log_survives_full_state_rewrites() {
+fn forge_audit_log_survives_state_snapshot_saves() {
     let temp = tempfile::tempdir().unwrap();
     let db = temp.path().join("forge.sqlite");
 

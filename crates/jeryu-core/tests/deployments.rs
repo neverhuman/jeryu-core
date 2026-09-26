@@ -361,8 +361,8 @@ fn sqlite_store_keeps_deployments_across_unrelated_writes() {
         seed(&core);
         let first = deploy(&core, SHA_A, "production");
         set_state(&core, first, DeploymentState::Success);
-        // Every one of these runs the full-state rewrite, which deletes and
-        // reinserts `repositories`. The deploy history must not ride that path.
+        // Every one of these saves the State-owned snapshot, which reconciles
+        // `repositories`. The deploy history must not ride that path.
         core.create_issue(
             "alice",
             "jeryu",

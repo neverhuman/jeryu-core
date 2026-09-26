@@ -120,9 +120,9 @@ hashed personal access tokens, and per-repository grants.
   the account and repository.
 - Grant values are constrained to `read`, `write`, or `admin`; global
   administrator users are represented by `user_accounts.role = 'admin'`.
-- The full-state rewrite threads every new table through `State`, `load_state`,
-  `persist_state`, and `delete_all` so account state survives unrelated forge
-  mutations.
+- The snapshot save threads every new table through `State`, `load_state`,
+  `stage_state`, and `storage::snapshot::OWNED_TABLES` so account state
+  survives unrelated forge mutations.
 
 Rollback/backfill:
 - Before applying 0008 to a populated store, take a `VACUUM INTO` copy and keep
@@ -155,8 +155,8 @@ Constraint policy:
   repository slug or an existing alias. Commit rechecks the destination inside
   the same locked state transition before re-keying any repository-owned row.
 - `repository_transfer_journal` and `repository_aliases` are threaded through
-  `State`, `load_state`, `persist_state`, and `delete_all`; unrelated full-state
-  rewrites must preserve both tables.
+  `State`, `load_state`, `stage_state`, and `storage::snapshot::OWNED_TABLES`;
+  unrelated snapshot saves must preserve both tables.
 - A failed journal is terminal. Replaying the exact failure reason returns the
   original record unchanged; a different reason is a conflict and cannot
   replace the original completion timestamp or cause.
@@ -204,8 +204,8 @@ Constraint policy:
   is disabled or removed from runtime access.
 - `account_invitations`, `account_activation_challenges`, and
   `owner_bootstrap_state` are threaded through `State`, `load_state`,
-  `persist_state`, and `delete_all`; unrelated full-state rewrites preserve
-  them.
+  `stage_state`, and `storage::snapshot::OWNED_TABLES`; unrelated snapshot
+  saves preserve them.
 
 Rollback/backfill:
 - Before applying 0010 to a populated store, hold the application migration
@@ -265,7 +265,7 @@ Constraint policy:
   reinserts `repositories` on every mutation, so an `ON DELETE CASCADE` would
   erase the whole history on any forge write. Rows carry the repository's stable
   id plus a denormalized owner/name, like `forge_audit_log` (0006).
-- Neither table is in `delete_all` or `persist_state`; writes go through
+- Neither table is State-owned, so no snapshot save touches them; writes go through
   `append_deployment` / `append_deployment_statuses` and reads are loaded on open.
 - `sha` is a full 40-character lowercase hex id; `state` is one of GitHub's
   seven deployment states.
@@ -354,8 +354,8 @@ never restores an older one. A historical target-less dismissal suppresses a
 preceding approval but cannot erase a rejection; a later explicit decision can
 establish a new verdict. Headless events remain unbound history.
 
-No self-referential foreign key is added: the existing full-state rewrite
-deletes and reinserts the history. Core enforces the target's identity and scope;
+No self-referential foreign key is added: the snapshot save reconciles the
+history in one pass. Core enforces the target's identity and scope;
 UUID parsing fails on corrupt stored values. Existing repository/PR foreign keys
 remain. SQLite provides no row-level security here: the owning service and its
 filesystem boundary remain responsible for tenant and actor access. A raw actor

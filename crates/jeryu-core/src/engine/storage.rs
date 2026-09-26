@@ -11,6 +11,9 @@ use crate::model::*;
 mod codec;
 mod deployments;
 mod migrations;
+mod snapshot;
+#[cfg(test)]
+mod tests;
 
 use self::codec::*;
 use self::migrations::apply_migrations;
@@ -49,18 +52,21 @@ impl SqliteStore {
 
     pub(super) fn persist(&self, state: &State) -> Result<()> {
         let mut conn = self.connect()?;
+        // Staged account/session data stays private to this connection's memory.
+        conn.execute_batch("PRAGMA temp_store = MEMORY;")
+            .map_err(storage_error)?;
         let tx = conn.transaction().map_err(storage_error)?;
-        delete_all(&tx)?;
-        persist_state(&tx, state)?;
+        snapshot::create_tables(&tx)?;
+        stage_state(&tx, state)?;
+        snapshot::apply(&tx)?;
         tx.commit().map_err(storage_error)?;
         Ok(())
     }
 
     /// Append one audit receipt through a fresh connection.
     ///
-    /// `forge_audit_log` is intentionally NOT part of `persist`/`delete_all`:
-    /// the full-state rewrite must never wipe the trail, so audit writes take
-    /// this dedicated path instead of riding the state snapshot.
+    /// `forge_audit_log` is outside the explicitly State-owned table set. Its
+    /// rows use this dedicated path and survive ordinary snapshot persistence.
     pub(super) fn append_audit(&self, entry: &AuditEntry) -> Result<()> {
         let conn = self.connect()?;
         conn.execute(
@@ -120,48 +126,14 @@ impl SqliteStore {
     }
 }
 
-fn delete_all(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        DELETE FROM review_comments;
-        DELETE FROM issue_comments;
-        DELETE FROM commit_statuses;
-        DELETE FROM repository_aliases;
-        DELETE FROM repository_transfer_journal;
-        DELETE FROM codeowners;
-        DELETE FROM repository_readmes;
-        DELETE FROM labels;
-        DELETE FROM webhook_deliveries;
-        DELETE FROM webhook_metadata;
-        DELETE FROM webhooks;
-        DELETE FROM branch_protection_rules;
-        DELETE FROM jankurai_scores;
-        DELETE FROM check_runs;
-        DELETE FROM reviews;
-        DELETE FROM pull_requests;
-        DELETE FROM issues;
-        DELETE FROM repo_access_grants;
-        DELETE FROM repo_counters;
-        DELETE FROM repositories;
-        DELETE FROM teams;
-        DELETE FROM organizations;
-        DELETE FROM account_activation_challenges;
-        DELETE FROM account_invitations;
-        DELETE FROM owner_bootstrap_state;
-        DELETE FROM personal_access_tokens;
-        DELETE FROM web_sessions;
-        DELETE FROM user_accounts;
-        DELETE FROM users;
-        "#,
-    )
-    .map_err(storage_error)?;
-    Ok(())
-}
-
-fn persist_state(conn: &Connection, state: &State) -> Result<()> {
+/// Serialize every State-owned row into connection-local staging tables.
+///
+/// `snapshot::apply` then reconciles `main` against this staging set, so no
+/// row outside the owned column list is rewritten.
+fn stage_state(conn: &Connection, state: &State) -> Result<()> {
     for user in state.users.values() {
         conn.execute(
-            "INSERT INTO users (login, user_json) VALUES (?1, ?2)",
+            "INSERT INTO temp.users (login, user_json) VALUES (?1, ?2)",
             params![user.login, json(user)?],
         )
         .map_err(storage_error)?;
@@ -169,7 +141,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
     for account in state.accounts.values() {
         conn.execute(
             r#"
-            INSERT INTO user_accounts (
+            INSERT INTO temp.user_accounts (
               login, display_name, password_hash, role, status, auth_epoch,
               must_change_password, created_at, updated_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -191,7 +163,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
     for session in state.sessions.values() {
         conn.execute(
             r#"
-            INSERT INTO web_sessions (
+            INSERT INTO temp.web_sessions (
               id, login, auth_epoch, token_hash, csrf_token, created_at, expires_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
@@ -210,7 +182,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
     for token in state.personal_tokens.values() {
         conn.execute(
             r#"
-            INSERT INTO personal_access_tokens (
+            INSERT INTO temp.personal_access_tokens (
               id, login, auth_epoch, name, token_hash, created_at, expires_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
@@ -229,7 +201,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
     for invitation in state.invitations.values() {
         conn.execute(
             r#"
-            INSERT INTO account_invitations (
+            INSERT INTO temp.account_invitations (
               id, canonical_login, display_name, activation_secret_hash,
               issuer_principal, intended_role, intended_teams_json, created_at,
               expires_at, consumed_at, revoked_at, attempt_count, bootstrap_owner
@@ -256,7 +228,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
     for challenge in state.activation_challenges.values() {
         conn.execute(
             r#"
-            INSERT INTO account_activation_challenges (
+            INSERT INTO temp.account_activation_challenges (
               id, invitation_id, challenge_hash, created_at, expires_at, consumed_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
@@ -272,20 +244,20 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         .map_err(storage_error)?;
     }
     conn.execute(
-        "INSERT INTO owner_bootstrap_state (singleton, consumed) VALUES (1, ?1)",
+        "INSERT INTO temp.owner_bootstrap_state (singleton, consumed) VALUES (1, ?1)",
         params![bool_int(state.bootstrap_owner_consumed)],
     )
     .map_err(storage_error)?;
     for organization in state.organizations.values() {
         conn.execute(
-            "INSERT INTO organizations (login, organization_json) VALUES (?1, ?2)",
+            "INSERT INTO temp.organizations (login, organization_json) VALUES (?1, ?2)",
             params![organization.login, json(organization)?],
         )
         .map_err(storage_error)?;
     }
     for ((organization, slug), team) in &state.teams {
         conn.execute(
-            "INSERT INTO teams (organization, slug, team_json) VALUES (?1, ?2, ?3)",
+            "INSERT INTO temp.teams (organization, slug, team_json) VALUES (?1, ?2, ?3)",
             params![organization, slug, json(team)?],
         )
         .map_err(storage_error)?;
@@ -296,7 +268,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         repo_ids.insert((owner.clone(), name.clone()), repo.id.to_string());
         conn.execute(
             r#"
-            INSERT INTO repositories (
+            INSERT INTO temp.repositories (
               id, owner, name, full_name, private, description, default_branch,
               archived, disabled, created_at, updated_at, family, pushed_at,
               default_branch_protection_opt_out
@@ -325,7 +297,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
     for journal in state.repository_transfers.values() {
         conn.execute(
             r#"
-            INSERT INTO repository_transfer_journal (
+            INSERT INTO temp.repository_transfer_journal (
               transaction_id, idempotency_key, request_fingerprint, repository_id,
               source_owner, source_name, destination_owner, destination_name,
               status, prepared_at, completed_at, failure, receipt_json
@@ -352,7 +324,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
     for alias in state.repository_aliases.values() {
         conn.execute(
             r#"
-            INSERT INTO repository_aliases (
+            INSERT INTO temp.repository_aliases (
               old_owner, old_name, repository_id, canonical_owner, canonical_name,
               created_at, transaction_id, origin
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -375,7 +347,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         let repo_id = repo_id(&repo_ids, &grant.owner, &grant.repo)?;
         conn.execute(
             r#"
-            INSERT INTO repo_access_grants (
+            INSERT INTO temp.repo_access_grants (
               login, repo_id, access, granted_by, granted_at
             ) VALUES (?1, ?2, ?3, ?4, ?5)
             "#,
@@ -393,7 +365,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
     for ((owner, repo, name), label) in &state.labels {
         let repo_id = repo_id(&repo_ids, owner, repo)?;
         conn.execute(
-            "INSERT INTO labels (repo_id, name, label_json) VALUES (?1, ?2, ?3)",
+            "INSERT INTO temp.labels (repo_id, name, label_json) VALUES (?1, ?2, ?3)",
             params![repo_id, name, json(label)?],
         )
         .map_err(storage_error)?;
@@ -403,7 +375,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         let repo_id = repo_id(&repo_ids, &issue.owner, &issue.repo)?;
         conn.execute(
             r#"
-            INSERT INTO issues (
+            INSERT INTO temp.issues (
               id, repo_id, number, title, body, state, author, labels_json,
               assignees_json, milestone, comments, pull_request_json,
               created_at, updated_at, closed_at
@@ -434,7 +406,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         let repo_id = repo_id(&repo_ids, owner, repo)?;
         for comment in comments {
             conn.execute(
-                "INSERT INTO issue_comments (id, repo_id, issue_number, comment_json) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO temp.issue_comments (id, repo_id, issue_number, comment_json) VALUES (?1, ?2, ?3, ?4)",
                 params![comment.id.to_string(), repo_id, *issue_number as i64, json(comment)?],
             )
             .map_err(storage_error)?;
@@ -445,7 +417,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         let repo_id = repo_id(&repo_ids, &pr.owner, &pr.repo)?;
         conn.execute(
             r#"
-            INSERT INTO pull_requests (
+            INSERT INTO temp.pull_requests (
               id, repo_id, number, issue_number, title, body, state, draft,
               author, head_json, base_json, mergeable, mergeable_state, merged,
               merged_at, merge_commit_sha, commits_json, changed_files_json,
@@ -484,7 +456,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
             let repo_id = repo_id(&repo_ids, &review.owner, &review.repo)?;
             conn.execute(
                 r#"
-                INSERT INTO reviews (
+                INSERT INTO temp.reviews (
                   id, repo_id, pull_number, author, state, body, submitted_at,
                   head_sha, dismissed_review_id
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -510,7 +482,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         for comment in comments {
             conn.execute(
                 r#"
-                INSERT INTO review_comments (
+                INSERT INTO temp.review_comments (
                   id, review_id, repo_id, pull_number, comment_json
                 ) VALUES (?1, ?2, ?3, ?4, ?5)
                 "#,
@@ -529,7 +501,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
     for ((owner, repo, branch), rule) in &state.branch_protections {
         let repo_id = repo_id(&repo_ids, owner, repo)?;
         conn.execute(
-            "INSERT INTO branch_protection_rules (repo_id, branch, rule_json) VALUES (?1, ?2, ?3)",
+            "INSERT INTO temp.branch_protection_rules (repo_id, branch, rule_json) VALUES (?1, ?2, ?3)",
             params![repo_id, branch, json(rule)?],
         )
         .map_err(storage_error)?;
@@ -538,7 +510,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
     for ((owner, repo), contents) in &state.codeowners {
         let repo_id = repo_id(&repo_ids, owner, repo)?;
         conn.execute(
-            "INSERT INTO codeowners (repo_id, contents) VALUES (?1, ?2)",
+            "INSERT INTO temp.codeowners (repo_id, contents) VALUES (?1, ?2)",
             params![repo_id, contents],
         )
         .map_err(storage_error)?;
@@ -547,7 +519,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
     for ((owner, repo), contents) in &state.readmes {
         let repo_id = repo_id(&repo_ids, owner, repo)?;
         conn.execute(
-            "INSERT INTO repository_readmes (repo_id, contents) VALUES (?1, ?2)",
+            "INSERT INTO temp.repository_readmes (repo_id, contents) VALUES (?1, ?2)",
             params![repo_id, contents],
         )
         .map_err(storage_error)?;
@@ -557,7 +529,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         for status in statuses {
             let repo_id = repo_id(&repo_ids, &status.owner, &status.repo)?;
             conn.execute(
-                "INSERT INTO commit_statuses (id, repo_id, sha, status_json) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO temp.commit_statuses (id, repo_id, sha, status_json) VALUES (?1, ?2, ?3, ?4)",
                 params![status.id.to_string(), repo_id, status.sha, json(status)?],
             )
             .map_err(storage_error)?;
@@ -569,7 +541,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
             let repo_id = repo_id(&repo_ids, &run.owner, &run.repo)?;
             conn.execute(
                 r#"
-                INSERT INTO check_runs (
+                INSERT INTO temp.check_runs (
                   id, repo_id, name, head_sha, status, conclusion, details_url,
                   output_json, started_at, completed_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -596,7 +568,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
             let repo_id = repo_id(&repo_ids, &score.owner, &score.repo)?;
             conn.execute(
                 r#"
-                INSERT INTO jankurai_scores (
+                INSERT INTO temp.jankurai_scores (
                   id, repo_id, branch, commit_sha, score, hard_findings,
                   decision, caps_json, report_json, created_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -623,7 +595,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
             let repo_id = repo_id(&repo_ids, &hook.owner, &hook.repo)?;
             conn.execute(
                 r#"
-                INSERT INTO webhooks (
+                INSERT INTO temp.webhooks (
                   id, repo_id, config_json, events_json, active, created_at, updated_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 "#,
@@ -639,7 +611,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
             )
             .map_err(storage_error)?;
             conn.execute(
-                "INSERT INTO webhook_metadata (id, name) VALUES (?1, ?2)",
+                "INSERT INTO temp.webhook_metadata (id, name) VALUES (?1, ?2)",
                 params![hook.id.to_string(), hook.name],
             )
             .map_err(storage_error)?;
@@ -650,7 +622,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
         let repo_id = repo_id(&repo_ids, &delivery.owner, &delivery.repo)?;
         conn.execute(
             r#"
-            INSERT INTO webhook_deliveries (
+            INSERT INTO temp.webhook_deliveries (
               id, hook_id, repo_id, event, target_url, payload_json,
               signature_256, delivered, created_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -673,7 +645,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
     for ((owner, repo), counters) in &state.counters {
         let repo_id = repo_id(&repo_ids, owner, repo)?;
         conn.execute(
-            "INSERT INTO repo_counters (repo_id, issue_next, pull_next) VALUES (?1, ?2, ?3)",
+            "INSERT INTO temp.repo_counters (repo_id, issue_next, pull_next) VALUES (?1, ?2, ?3)",
             params![
                 repo_id,
                 (counters.issue + 1) as i64,
@@ -689,7 +661,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
             .contains_key(&(repo.owner.clone(), repo.name.clone()))
         {
             conn.execute(
-                "INSERT INTO repo_counters (repo_id, issue_next, pull_next) VALUES (?1, 1, 1)",
+                "INSERT INTO temp.repo_counters (repo_id, issue_next, pull_next) VALUES (?1, 1, 1)",
                 params![repo.id.to_string()],
             )
             .map_err(storage_error)?;

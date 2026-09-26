@@ -1,10 +1,10 @@
 -- Append-only forge audit trail for privileged mutations (repository deletes).
 --
--- Deliberately decoupled from the full-state-rewrite persistence path:
--- `SqliteStore::persist` rewrites every state table (DELETE FROM + reinsert)
--- on each mutation, so this table carries NO foreign key to repositories and
--- is never touched by delete_all/persist_state — rows are appended through a
--- fresh connection in `ForgeCore::append_audit` and survive every rewrite.
+-- Deliberately decoupled from the State-owned snapshot persistence path:
+-- `SqliteStore::persist` reconciles only the tables listed in
+-- `storage::snapshot`, so this table carries NO foreign key to repositories
+-- and is absent from that list — rows are appended through a fresh connection
+-- in `ForgeCore::append_audit` and survive every save.
 -- `subject` is the denormalized "owner/name" string so the trail outlives the
 -- repository row it describes.
 --

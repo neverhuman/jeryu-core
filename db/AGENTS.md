@@ -28,12 +28,12 @@ Migration 0005-0007 notes:
 - `repositories.family` (0005) is UI grouping data; its seed backfill runs only
   when the column is first added and must never overwrite operator edits.
 - `forge_audit_log` (0006) deliberately has NO repository FK and is excluded
-  from the full-rewrite persist (`delete_all`/`persist_state`) so delete
-  receipts survive both repository deletion and every state rewrite.
+  from the State-owned table list in `storage::snapshot`, so delete receipts
+  survive both repository deletion and every snapshot save.
 - `jankurai_scores` (0007) allows NULL `score` (decision `tool-failed` records
   an unscoreable audit); any new per-repo table MUST be threaded through
-  `State`, `load_state`, `persist_state`, and `delete_all`, or the next
-  mutation silently wipes it.
+  `State`, `load_state`, `stage_state`, and `storage::snapshot::OWNED_TABLES`,
+  or it is never saved.
 
 Live-readiness note:
 - When migrations or constraints change, include this guidance file in the
@@ -41,7 +41,7 @@ Live-readiness note:
 
 Migration 0016 review dismissal notes:
 - Preserve every nullable historical target; never infer a verdict UUID.
-- Persist and reload new dismissal targets through every full-state rewrite.
+- Persist and reload new dismissal targets through every snapshot save.
 - Keep incompatible older writers stopped: their rewrite loses target bindings.
 - Exercise migration_0016_preserves_unbound_dismissals and
   review_dismissal_survives_sqlite_reopen_and_unrelated_write with two Cargo jobs

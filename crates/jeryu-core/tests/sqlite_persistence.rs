@@ -838,8 +838,8 @@ fn sqlite_open_backfills_pull_request_source_repository() {
     );
 }
 
-/// `family` must survive the full-rewrite persist: every mutation rewrites the
-/// whole repositories table, so a field missed in persist/load silently wipes.
+/// `family` must survive the snapshot save: a field missed in the staged
+/// column list or in load silently wipes.
 #[test]
 fn sqlite_store_round_trips_repository_family() {
     let temp = tempfile::tempdir().unwrap();
@@ -912,7 +912,7 @@ fn create_demo_repo(core: &ForgeCore, name: &str) {
     .unwrap();
 }
 
-/// `pushed_at` rides the full-rewrite persist, only moves forward, and a
+/// `pushed_at` rides the snapshot save, only moves forward, and a
 /// missing repository is NotFound.
 #[test]
 fn repository_pushed_at_survives_sqlite_reopen() {
@@ -998,7 +998,7 @@ fn backfill_fills_only_unset_pushed_at() {
     assert_eq!(pushed_at("empty"), None);
 }
 
-/// Jankurai scores must survive the full-rewrite persist, replace records for
+/// Jankurai scores must survive the snapshot save, replace records for
 /// a re-ingested (branch, commit_sha), and vanish with their repository.
 #[test]
 fn sqlite_store_round_trips_jankurai_scores() {

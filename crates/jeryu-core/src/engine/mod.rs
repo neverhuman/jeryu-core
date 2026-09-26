@@ -83,7 +83,7 @@ struct State {
     repository_aliases: HashMap<(String, String), RepositoryAlias>,
     repository_transfers: HashMap<String, RepositoryTransferJournal>,
     /// Keyed by id, so iteration is creation order. Durable only through the
-    /// dedicated append path, never the full-state rewrite.
+    /// dedicated append path, never the State-owned snapshot.
     deployments: BTreeMap<u64, Deployment>,
     /// Append-only, oldest first per deployment.
     deployment_statuses: BTreeMap<u64, Vec<DeploymentStatus>>,

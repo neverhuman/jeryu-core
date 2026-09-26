@@ -1,9 +1,9 @@
-//! Durable deployment history: atomic append batches outside the full-state
-//! rewrite.
+//! Durable deployment history: atomic append batches outside the State-owned
+//! snapshot.
 //!
-//! `SqliteStore::persist` deletes and reinserts every state table on each
-//! mutation. `deployments` and `deployment_statuses` are deliberately not in
-//! that path (nor in `delete_all`), exactly like `forge_audit_log`, so an
+//! `SqliteStore::persist` reconciles only the State-owned tables listed in
+//! `storage::snapshot`. `deployments` and `deployment_statuses` are
+//! deliberately not in that list, exactly like `forge_audit_log`, so an
 //! unrelated forge write can never touch the deploy history. They are read back
 //! into memory on open by [`load_deployments`].
 

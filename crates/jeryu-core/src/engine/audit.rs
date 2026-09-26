@@ -1,10 +1,9 @@
 //! Append-only forge audit trail for privileged mutations.
 //!
-//! The `forge_audit_log` table is deliberately OUTSIDE the full-state-rewrite
-//! persistence path: `SqliteStore::persist` deletes and reinserts every state
-//! table on each mutation, so the audit table has no foreign key to
-//! `repositories` and is never touched by that rewrite. Appends and reads go
-//! through a fresh SQLite connection here instead.
+//! The `forge_audit_log` table is deliberately outside the State-owned table
+//! set and is never reconciled by ordinary snapshot persistence. It has no
+//! repository foreign key so historical records survive intentional repository
+//! deletion too. Appends and reads use a fresh SQLite connection.
 
 use chrono::Utc;
 use serde_json::Value;
@@ -40,7 +39,7 @@ impl ForgeCore {
     /// Append one audit receipt and return its generated id.
     ///
     /// Writes through a fresh SQLite connection so the row is never part of
-    /// the full-state rewrite. The in-memory core (`ForgeCore::new()`, no
+    /// the State-owned snapshot. The in-memory core (`ForgeCore::new()`, no
     /// SQLite store) has nowhere durable to write: there the append is a
     /// validated no-op that still returns the generated id, so callers keep
     /// one code path in tests and production alike.

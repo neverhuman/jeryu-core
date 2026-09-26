@@ -2,9 +2,9 @@
 //!
 //! Deployments live in memory like every other forge resource, but they are
 //! made durable through their own append path (see `SqliteStore::
-//! append_deployment`), never through the full-state rewrite: that rewrite
-//! deletes and reinserts every state table on each mutation, and the deploy
-//! history must not depend on it. Each transition commits its durable appends
+//! append_deployment`), never through the State-owned snapshot: that snapshot
+//! reconciles only the tables Core owns, and the deploy history must not
+//! depend on it. Each transition commits its durable appends
 //! atomically before memory is updated, under the state write lock so ids stay
 //! in order.
 //!

@@ -6,11 +6,11 @@
 -- the deploy history.
 --
 -- Like forge_audit_log (0006), neither table has a foreign key to
--- repositories: SqliteStore::persist deletes and reinserts every state table on
--- each mutation, and with foreign keys on, an ON DELETE CASCADE would wipe the
--- whole history on every forge write. Rows carry the repository's stable id and
--- a denormalized owner/name, and are written only through the dedicated append
--- path, never by the full-state rewrite.
+-- repositories: the deploy history must not depend on the repository row's
+-- lifetime at all. Neither table is in the State-owned table list that
+-- SqliteStore::persist reconciles. Rows carry the repository's stable id and a
+-- denormalized owner/name, and are written only through the dedicated append
+-- path.
 --
 -- timeout-guard:
 --   lock_timeout = '5s'

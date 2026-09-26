@@ -443,13 +443,10 @@ impl ForgeCore {
 
     /// Delete a repository and everything scoped to it from the live state.
     ///
-    /// Persistence is a full-state rewrite (`SqliteStore::persist` deletes and
-    /// reinserts every table), so removing the repo from EVERY `State` map and
-    /// persisting once is the complete, transactional registry deletion: the
-    /// rewrite simply never re-inserts the removed rows. Account-level state
-    /// (users, organizations, teams) is not repo-scoped and stays untouched;
-    /// the `forge_audit_log` table lives outside the rewrite by design and
-    /// keeps its trail for the deleted subject.
+    /// Persistence deletes the State-owned rows deliberately removed here in
+    /// one transaction, retaining unrelated rows and their stable identities.
+    /// Account-level state (users, organizations, teams) is not repo-scoped.
+    /// The independent `forge_audit_log` keeps its trail for the deleted subject.
     pub fn delete_repository(&self, owner: &str, repo: &str) -> Result<RepositoryDeletion> {
         let mut state = self.state.write();
         let key = (owner.to_string(), repo.to_string());
