@@ -486,8 +486,8 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
                 r#"
                 INSERT INTO reviews (
                   id, repo_id, pull_number, author, state, body, submitted_at,
-                  head_sha
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                  head_sha, dismissed_review_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                 "#,
                 params![
                     review.id.to_string(),
@@ -498,6 +498,7 @@ fn persist_state(conn: &Connection, state: &State) -> Result<()> {
                     review.body,
                     time(review.submitted_at),
                     review.head_sha,
+                    review.dismissed_review_id.map(|id| id.to_string()),
                 ],
             )
             .map_err(storage_error)?;
@@ -1186,7 +1187,7 @@ fn load_reviews(conn: &Connection, state: &mut State) -> Result<()> {
         .prepare(
             r#"
             SELECT r.owner, r.name, v.id, v.pull_number, v.author, v.state,
-                   v.body, v.submitted_at, v.head_sha
+                   v.body, v.submitted_at, v.head_sha, v.dismissed_review_id
             FROM reviews v
             JOIN repositories r ON r.id = v.repo_id
             ORDER BY v.rowid
@@ -1207,6 +1208,11 @@ fn load_reviews(conn: &Connection, state: &mut State) -> Result<()> {
             state: from_text(row.get(5).map_err(storage_error)?)?,
             body: row.get(6).map_err(storage_error)?,
             head_sha: row.get(8).map_err(storage_error)?,
+            dismissed_review_id: row
+                .get::<_, Option<String>>(9)
+                .map_err(storage_error)?
+                .map(parse_uuid)
+                .transpose()?,
             submitted_at: parse_time(row.get(7).map_err(storage_error)?)?,
         };
         state

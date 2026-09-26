@@ -928,7 +928,7 @@ impl ForgeCore {
     }
 }
 
-fn require_login(login: &str) -> Result<()> {
+pub(super) fn require_login(login: &str) -> Result<()> {
     require_name("login", login)?;
     if login.trim() != login
         || !login.bytes().all(|byte| {

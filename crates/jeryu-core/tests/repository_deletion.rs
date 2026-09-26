@@ -135,7 +135,7 @@ fn seed_full_repo(core: &ForgeCore, owner: &str, repo: &str) -> String {
         owner,
         repo,
         pr.number,
-        owner,
+        "reviewer",
         CreateReviewRequest {
             body: Some("looks fine".to_string()),
             event: ReviewState::Approved,

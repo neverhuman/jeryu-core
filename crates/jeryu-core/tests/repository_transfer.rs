@@ -100,7 +100,7 @@ fn seed_full_repo(core: &ForgeCore) -> uuid::Uuid {
         },
     )
     .unwrap();
-    core.set_codeowners("jeryu", "redline", "*.rs @operator")
+    core.set_codeowners("jeryu", "redline", "*.rs @reviewer")
         .unwrap();
     core.set_repository_readme("jeryu", "redline", "# Redline\n".to_string())
         .unwrap();
@@ -127,7 +127,7 @@ fn seed_full_repo(core: &ForgeCore) -> uuid::Uuid {
         "jeryu",
         "redline",
         pull.number,
-        "operator",
+        "reviewer",
         CreateReviewRequest {
             body: None,
             event: ReviewState::Approved,

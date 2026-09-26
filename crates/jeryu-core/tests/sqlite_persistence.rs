@@ -330,7 +330,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
             },
         )
         .unwrap();
-        core.set_codeowners("alice", "jeryu", "*.rs @alice")
+        core.set_codeowners("alice", "jeryu", "*.rs @reviewer")
             .unwrap();
         let pr = core
             .create_pull_request(
@@ -360,7 +360,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
             "alice",
             "jeryu",
             pr.number,
-            "alice",
+            "reviewer",
             CreateReviewRequest {
                 body: Some("approval receipt recorded".to_string()),
                 event: ReviewState::Approved,
@@ -522,7 +522,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
     );
     assert_eq!(
         reopened.get_codeowners("alice", "jeryu").unwrap(),
-        "*.rs @alice"
+        "*.rs @reviewer"
     );
     assert_eq!(
         reopened

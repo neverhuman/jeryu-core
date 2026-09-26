@@ -112,7 +112,7 @@ fn branch_protection_blocks_merge_until_review_and_status_pass() {
         "alice",
         "jeryu",
         pr.number,
-        "alice",
+        "reviewer",
         CreateReviewRequest {
             body: None,
             event: ReviewState::Approved,

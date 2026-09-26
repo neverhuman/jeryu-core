@@ -10,6 +10,8 @@ pub enum ForgeError {
     Conflict(String),
     #[error("validation failed: {0}")]
     Validation(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("branch protection blocked the operation: {0}")]
     BranchProtection(String),
     /// The repository is archived (read-only). The display text starts with the
