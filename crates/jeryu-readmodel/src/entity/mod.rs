@@ -43,6 +43,22 @@ mod tests {
     }
 
     #[test]
+    fn entity_kind_labels_and_route_segments_are_unique() {
+        // Labels key entity refs and route segments build URLs, so two kinds
+        // sharing either would alias distinct entities.
+        let mut labels = std::collections::HashSet::new();
+        let mut routes = std::collections::HashSet::new();
+        for kind in EntityKind::ALL {
+            assert!(labels.insert(kind.label()), "duplicate label {kind:?}");
+            assert!(
+                routes.insert(kind.route_segment()),
+                "duplicate route {kind:?}"
+            );
+            assert!(!kind.badge().is_empty(), "empty badge {kind:?}");
+        }
+    }
+
+    #[test]
     fn severity_orders_critical_first() {
         assert!(Severity::Critical < Severity::Error);
         assert!(Severity::Error < Severity::Warning);
