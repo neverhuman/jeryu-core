@@ -20,8 +20,13 @@ required_tool_version = "1.6.11"
 #   placeholder -> the HTML `<input placeholder>` attribute / React prop name.
 #   fallback    -> the React `<Suspense fallback>` / ErrorBoundary prop name.
 #   old         -> unified-diff side labels + git ref-update `<old-oid> <new-oid>`.
+#   temp        -> SQLite's spec-mandated `temp` schema name and `CREATE TEMP
+#                  TABLE` DDL: Core stages State in connection-local `temp.*`
+#                  tables before reconciling `main` (engine/storage/snapshot.rs).
+#                  Same term and rationale as the reviewed redline-core policy;
+#                  `temporary` stays flagged.
 [dead_language]
-allow_terms = ["stale", "placeholder", "fallback", "old"]
+allow_terms = ["stale", "placeholder", "fallback", "old", "temp"]
 
 [scan]
 # Excluded from scanning because it is NOT product code (carried over from the
