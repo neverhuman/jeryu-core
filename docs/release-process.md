@@ -44,8 +44,8 @@ Run these from the canonical repository root before creating a release receipt:
 - `just audit`
 
 Full mode runs `ops/ci/verify-jeryu-env.sh --build-local --release-guard`.
-Stop or quarantine retired-provider runners, `~/.jeryu`, old
-`/home/ubuntu/jeryu`, local `:2224`, and monitored retired listeners before
+Stop or quarantine retired-provider runners, `~/.jeryu`, the old
+monorepo checkout, the retired local SSH forge listener, and monitored retired listeners before
 recording release evidence.
 
 ## Local Merge Authority

@@ -175,7 +175,7 @@ is
 Full mode runs `ops/ci/verify-jeryu-env.sh --build-local --release-guard` and
 accepts either the canonical GitHub remote or the loopback local Jeryu remote on
 `127.0.0.1:8787`. It rejects retired-provider runners, stale `~/.jeryu`
-binaries, old `/home/ubuntu/jeryu`, and local `:2224` listener/remotes so
+binaries, the old monorepo checkout, and the retired local SSH forge listener/remotes so
 release evidence cannot be produced against the retired system. The local API
 install under `~/.jeryu/bin/jeryu-api` is accepted only when it byte-matches the
 repo-built API binary. Retired-CI sweeps of additional source roots run only
