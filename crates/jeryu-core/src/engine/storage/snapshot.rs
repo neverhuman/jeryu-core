@@ -55,6 +55,11 @@ const OWNED_TABLES: &[OwnedTable] = &[
         primary_key: "singleton",
     },
     OwnedTable {
+        name: "waitlist_signups",
+        columns: "email,name,created_at",
+        primary_key: "email",
+    },
+    OwnedTable {
         name: "organizations",
         columns: "login,organization_json",
         primary_key: "login",

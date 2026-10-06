@@ -37,6 +37,7 @@ mod repository_transfer;
 mod repository_transfer_state;
 mod reviews;
 mod storage;
+mod waitlist;
 mod webhooks;
 
 #[cfg(test)]
@@ -61,6 +62,8 @@ struct State {
     invitations: HashMap<Uuid, AccountInvitation>,
     activation_challenges: HashMap<String, ActivationChallenge>,
     bootstrap_owner_consumed: bool,
+    /// Keyed by the normalized email.
+    waitlist: BTreeMap<String, WaitlistSignup>,
     repo_grants: HashMap<(String, String, String), RepoAccessGrant>,
     organizations: HashMap<String, Organization>,
     teams: HashMap<(String, String), Team>,

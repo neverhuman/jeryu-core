@@ -56,6 +56,10 @@ const ROLLBACKS: &[(&str, &str)] = &[
         "0016_review_dismissal_target.sql",
         include_str!("../../../../../db/rollbacks/0016_review_dismissal_target.sql"),
     ),
+    (
+        "0018_waitlist_signups.sql",
+        include_str!("../../../../../db/rollbacks/0018_waitlist_signups.sql"),
+    ),
 ];
 
 fn db_dir(kind: &str) -> PathBuf {
@@ -215,6 +219,7 @@ fn rollback_scripts_execute_and_roll_forward() {
                 assert!(!table_exists(&conn, "deployments"));
                 assert!(!table_exists(&conn, "deployment_statuses"));
             }
+            "0018_waitlist_signups.sql" => assert!(!table_exists(&conn, "waitlist_signups")),
             _ => assert_eq!(
                 schema_snapshot(&conn),
                 before,

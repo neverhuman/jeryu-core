@@ -259,3 +259,18 @@ pub struct RepoAccessGrant {
     pub granted_by: String,
     pub granted_at: DateTime<Utc>,
 }
+
+/// One public waitlist address. This is not an account and cannot authenticate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WaitlistSignup {
+    pub email: String,
+    pub name: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Result of asking to join the waitlist.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WaitlistJoin {
+    Created(WaitlistSignup),
+    AlreadyListed(WaitlistSignup),
+}

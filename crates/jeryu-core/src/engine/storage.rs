@@ -248,6 +248,13 @@ fn stage_state(conn: &Connection, state: &State) -> Result<()> {
         params![bool_int(state.bootstrap_owner_consumed)],
     )
     .map_err(storage_error)?;
+    for signup in state.waitlist.values() {
+        conn.execute(
+            "INSERT INTO temp.waitlist_signups (email, name, created_at) VALUES (?1, ?2, ?3)",
+            params![signup.email, signup.name, time(signup.created_at)],
+        )
+        .map_err(storage_error)?;
+    }
     for organization in state.organizations.values() {
         conn.execute(
             "INSERT INTO temp.organizations (login, organization_json) VALUES (?1, ?2)",
@@ -680,6 +687,7 @@ fn load_state(conn: &Connection) -> Result<State> {
     load_invitations(conn, &mut state)?;
     load_activation_challenges(conn, &mut state)?;
     load_bootstrap_state(conn, &mut state)?;
+    load_waitlist(conn, &mut state)?;
     load_organizations(conn, &mut state)?;
     load_teams(conn, &mut state)?;
     load_repositories(conn, &mut state)?;
@@ -848,6 +856,22 @@ fn load_bootstrap_state(conn: &Connection, state: &mut State) -> Result<()> {
         )
         .map(int_bool)
         .map_err(storage_error)?;
+    Ok(())
+}
+
+fn load_waitlist(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare("SELECT email, name, created_at FROM waitlist_signups")
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let signup = WaitlistSignup {
+            email: row.get(0).map_err(storage_error)?,
+            name: row.get(1).map_err(storage_error)?,
+            created_at: parse_time(row.get(2).map_err(storage_error)?)?,
+        };
+        state.waitlist.insert(signup.email.clone(), signup);
+    }
     Ok(())
 }
 

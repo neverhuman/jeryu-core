@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Public waitlist signups (migration 0018): `ForgeCore::join_waitlist` stores a
+  normalized email and an optional name. A repeated email returns the original
+  row. Joining does not create an account or a session.
 - Branch protection carries its own `strict` (head up to date with base) flag,
   separate from `required_linear_history`, and `SetBranchProtectionRequest`
   requires `required_status_checks`, `required_approving_review_count` and
