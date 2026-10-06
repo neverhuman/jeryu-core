@@ -394,3 +394,32 @@ snapshot when no accepted bot row would be lost. After accepted bot mutations,
 recover forward. An older writer that snapshots State without these tables
 deletes the rows on its next save, so do not run that writer against a
 migrated database.
+
+## 0018 Waitlist signups
+
+The eighteenth migration creates `waitlist_signups`. A row is a normalized
+email, an optional display name, and the time it was first recorded. It is not
+an account, a session, or an invitation.
+
+This expansion follows `0017` account bots, which is on main. It does not
+depend on the bot tables.
+
+Constraint policy:
+- `email` is the primary key. It is stored trimmed and in ASCII lowercase, with
+  one `@`, no spaces, and a dotted domain. Core rejects any other shape before
+  insert.
+- `name` is null or a trimmed value of at most 80 characters. Blank input is
+  stored as null. Control characters are rejected.
+- A second join for the same email returns the original row. It does not change
+  the name or the time, and it does not create a user.
+- The table is threaded through `State`, `load_state`, `stage_state`, and
+  `storage::snapshot::OWNED_TABLES`. An unrelated snapshot save keeps the rows.
+  An older application that does not own the table leaves it untouched.
+
+Rollback/backfill:
+- There is no backfill. The table starts empty.
+- Before applying 0018 to a populated store, stop writers, hold the migration
+  lock, and keep a verified `VACUUM INTO` copy.
+- `db/rollbacks/0018_waitlist_signups.sql` drops the table and deletes every
+  stored address. Use that only before the rows are relied on. After signups
+  exist, recover forward.

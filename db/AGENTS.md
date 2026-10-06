@@ -58,3 +58,12 @@ Migration 0016 review dismissal notes:
 - Exercise migration_0016_preserves_unbound_dismissals and
   review_dismissal_survives_sqlite_reopen_and_unrelated_write with two Cargo jobs
   in the allocated CI window, then run the migration analysis lane above.
+
+Migration 0018 waitlist notes:
+- `waitlist_signups` is an email list, not an account. `join_waitlist` must not
+  create a user or a session.
+- Number 0017 is the account-bot migration, now on main. Do not reuse it.
+  0018 follows it and does not depend on the bot tables.
+- Persist and reload rows through every snapshot save.
+- Exercise waitlist_join_normalizes_and_keeps_the_first_signup and
+  waitlist_survives_sqlite_reopen_and_unrelated_write.

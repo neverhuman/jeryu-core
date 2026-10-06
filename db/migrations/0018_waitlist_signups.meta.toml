@@ -1,0 +1,22 @@
+# jankurai:migration v1
+id = "0018_waitlist_signups"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "old_app_new_db,new_app_old_db"
+requires = ["0016_review_dismissal_target"]
+rollback = "db/rollbacks/0018_waitlist_signups.sql"
+backfill = "none; the table starts empty and rows are inserted only by join_waitlist"
+data_classification = "personal"
+tenant_impact = "stores a normalized email and an optional name; it does not create an account"
+tests = [
+  "db-migration-analyze",
+  "waitlist_join_normalizes_and_keeps_the_first_signup",
+  "waitlist_survives_sqlite_reopen_and_unrelated_write",
+]
