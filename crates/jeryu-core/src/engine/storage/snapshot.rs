@@ -40,6 +40,31 @@ const OWNED_TABLES: &[OwnedTable] = &[
         primary_key: "id",
     },
     OwnedTable {
+        name: "bots",
+        columns: "id,owner,slug,display_name,kind,status,reach_json,auth_epoch,credential_generation,last_successful_access,last_auth,last_mutation,last_heartbeat,last_action,last_outcome,last_repo,created_at,updated_at",
+        primary_key: "id",
+    },
+    OwnedTable {
+        name: "bot_keys",
+        columns: "key_id,bot_id,secret_hash,env,created_at,retired_at,revoked_at",
+        primary_key: "key_id",
+    },
+    OwnedTable {
+        name: "bot_refresh_tokens",
+        columns: "token_hash,bot_id,key_id,generation,expires_at,used_at",
+        primary_key: "token_hash",
+    },
+    OwnedTable {
+        name: "bot_operations",
+        columns: "bot_id,operation,request_key,body_digest,result_json,created_at",
+        primary_key: "bot_id,operation,request_key",
+    },
+    OwnedTable {
+        name: "bot_activity",
+        columns: "id,bot_id,key_id,repo,session_id,action,outcome,scope,created_at",
+        primary_key: "id",
+    },
+    OwnedTable {
         name: "account_invitations",
         columns: "id,canonical_login,display_name,activation_secret_hash,issuer_principal,intended_role,intended_teams_json,created_at,expires_at,consumed_at,revoked_at,attempt_count,bootstrap_owner",
         primary_key: "id",

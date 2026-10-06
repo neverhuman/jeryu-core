@@ -1,0 +1,24 @@
+# jankurai:migration v1
+id = "0017_account_bots"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "new_app_old_db"
+requires = ["0016_review_dismissal_target"]
+rollback = "db/rollbacks/0017_account_bots.sql"
+backfill = "none; new tables start empty"
+data_classification = "credentials"
+tenant_impact = "Bots are isolated by owner login. Reach cannot exceed that account's repository grants."
+tests = [
+  "db-migration-analyze",
+  "bot_round_trip_survives_sqlite_reopen",
+  "unknown_and_wrong_enrollment_keys_are_the_same_error",
+  "reach_cannot_grant_a_repository_the_account_cannot_access",
+  "reused_refresh_token_revokes_the_family",
+]

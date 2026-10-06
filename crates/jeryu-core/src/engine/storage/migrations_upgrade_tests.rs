@@ -56,6 +56,10 @@ const ROLLBACKS: &[(&str, &str)] = &[
         "0016_review_dismissal_target.sql",
         include_str!("../../../../../db/rollbacks/0016_review_dismissal_target.sql"),
     ),
+    (
+        "0017_account_bots.sql",
+        include_str!("../../../../../db/rollbacks/0017_account_bots.sql"),
+    ),
 ];
 
 fn db_dir(kind: &str) -> PathBuf {

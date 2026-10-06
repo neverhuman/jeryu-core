@@ -1,0 +1,23 @@
+# jankurai:migration v1
+id = "0017_account_bots_rollback"
+owner = "forge-api"
+reviewer = "forge-api"
+approval = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "new_app_old_db"
+rollback = "restore the verified pre-0017 VACUUM INTO snapshot of forge.sqlite"
+roll_forward = "db/migrations/0017_account_bots.sql"
+backup = "VACUUM INTO copy of forge.sqlite before apply"
+restore = "restore that snapshot when no accepted bot row would be lost; otherwise recover forward"
+irreversible = false
+backfill = "none; this script does not drop tables or credentials"
+data_classification = "credentials"
+tenant_impact = "Bots stay isolated by owner login."
+verify = "SELECT rollback_notice FROM the script; bots table remains"
+tests = ["db-migration-analyze", "bot_round_trip_survives_sqlite_reopen"]

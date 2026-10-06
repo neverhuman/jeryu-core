@@ -368,3 +368,29 @@ data backfill. Do not start an older writer against the migrated database: its
 full-state rewrite erases target bindings. The rollback notice retains all audit
 rows; after accepted mutations, recover forward. Full state rollback is available
 only when it would lose no accepted mutation.
+
+## 0017 Account bots
+
+Adds `bots`, `bot_keys`, `bot_refresh_tokens`, `bot_operations`, and
+`bot_activity`. A bot belongs to one account. Its reach is general, a
+repository list, or one task, and Core rejects a reach that includes a
+repository the account cannot already read. Enrollment secrets are Argon2id
+PHC strings. Refresh tokens store only a SHA-256. Activity rows have no secret
+column. `(owner, slug)` is unique. `auth_epoch` copies the account epoch at
+enrollment. Password change, disable, and lock leave it stale, revoke
+enrollment keys, drop refresh tokens, and increase `credential_generation`.
+The owner recovers a bot with key rotation, which copies the current epoch
+and does not leave the previous key in the five-minute grace window.
+`credential_generation` starts at 1 and also increases when a rotated refresh
+token is reused or the bot is revoked, so previously issued access tokens
+fail the next check. An expired refresh token does not increase it. A bot's
+repository check uses explicit grants. Forge admin is not a grant. A public
+repository still allows a read.
+
+The tables are created with `IF NOT EXISTS` and start empty. No backfill.
+Take a `VACUUM INTO` copy before applying the migration to a populated store.
+`db/rollbacks/0017_account_bots.sql` does not drop the tables. Restore that
+snapshot when no accepted bot row would be lost. After accepted bot mutations,
+recover forward. An older writer that snapshots State without these tables
+deletes the rows on its next save, so do not run that writer against a
+migrated database.

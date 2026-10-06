@@ -39,6 +39,18 @@ Live-readiness note:
 - When migrations or constraints change, include this guidance file in the
   changed-fast audit so Jankurai can detect the local DB owner and proof lane.
 
+Migration 0017 account bot notes:
+- `bots` and its child tables are State-owned. Thread them through `State`,
+  `load_state`, `stage_state`, and `storage::snapshot::OWNED_TABLES`.
+- Reach checks use the account's explicit repository grants. Forge admin is
+  not a grant. A public repository still allows a read.
+- `bots.auth_epoch` must match the account epoch. Password change, disable,
+  and lock revoke bot keys and drop refresh tokens.
+- Enrollment key material is an Argon2id hash. Do not add a plaintext column.
+  Verify the hash before taking the forge write lock.
+- Activity rows stay secret-free. Heartbeats update `bots.last_heartbeat` and
+  do not insert an activity row.
+
 Migration 0016 review dismissal notes:
 - Preserve every nullable historical target; never infer a verdict UUID.
 - Persist and reload new dismissal targets through every snapshot save.

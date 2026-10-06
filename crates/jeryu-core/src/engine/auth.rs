@@ -141,6 +141,7 @@ impl ForgeCore {
         state
             .personal_tokens
             .retain(|_, token| token.login != login);
+        super::bots::invalidate_account_bots(&mut state, login, Utc::now());
         self.persist_after_mutation(&mut state, previous)?;
         Ok(updated.into())
     }
@@ -180,6 +181,7 @@ impl ForgeCore {
         state
             .personal_tokens
             .retain(|_, token| token.login != login);
+        super::bots::invalidate_account_bots(&mut state, login, Utc::now());
         self.persist_after_mutation(&mut state, previous)?;
         Ok(updated.into())
     }
@@ -205,6 +207,7 @@ impl ForgeCore {
             state
                 .personal_tokens
                 .retain(|_, token| token.login != login);
+            super::bots::invalidate_account_bots(&mut state, login, Utc::now());
         }
         self.persist_after_mutation(&mut state, previous)?;
         Ok(updated.into())
@@ -774,6 +777,7 @@ impl ForgeCore {
         state
             .personal_tokens
             .retain(|_, token| token.login != login);
+        super::bots::invalidate_account_bots(&mut state, login, Utc::now());
         self.persist_after_mutation(&mut state, previous)?;
         Ok(updated.into())
     }

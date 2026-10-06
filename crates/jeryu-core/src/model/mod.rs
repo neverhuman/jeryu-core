@@ -6,6 +6,7 @@
 //! `model.rs`.
 
 mod auth;
+mod bots;
 mod checks;
 mod deployments;
 mod issues;
@@ -17,6 +18,7 @@ mod repository_transfer;
 mod webhooks;
 
 pub use auth::*;
+pub use bots::*;
 pub use checks::*;
 pub use deployments::*;
 pub use issues::*;

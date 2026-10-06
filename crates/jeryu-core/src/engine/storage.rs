@@ -198,6 +198,7 @@ fn stage_state(conn: &Connection, state: &State) -> Result<()> {
         )
         .map_err(storage_error)?;
     }
+    stage_bots(conn, state)?;
     for invitation in state.invitations.values() {
         conn.execute(
             r#"
@@ -677,6 +678,11 @@ fn load_state(conn: &Connection) -> Result<State> {
     load_accounts(conn, &mut state)?;
     load_sessions(conn, &mut state)?;
     load_personal_tokens(conn, &mut state)?;
+    load_bots(conn, &mut state)?;
+    load_bot_keys(conn, &mut state)?;
+    load_bot_refresh(conn, &mut state)?;
+    load_bot_operations(conn, &mut state)?;
+    load_bot_activity(conn, &mut state)?;
     load_invitations(conn, &mut state)?;
     load_activation_challenges(conn, &mut state)?;
     load_bootstrap_state(conn, &mut state)?;
@@ -782,6 +788,248 @@ fn load_personal_tokens(conn: &Connection, state: &mut State) -> Result<()> {
             expires_at: parse_optional_time(row.get(6).map_err(storage_error)?)?,
         };
         state.personal_tokens.insert(token.id, token);
+    }
+    Ok(())
+}
+
+fn stage_bots(conn: &Connection, state: &State) -> Result<()> {
+    for bot in state.bots.values() {
+        conn.execute(
+            r#"
+            INSERT INTO temp.bots (
+              id, owner, slug, display_name, kind, status, reach_json, auth_epoch,
+              credential_generation, last_successful_access, last_auth, last_mutation,
+              last_heartbeat, last_action, last_outcome, last_repo, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            "#,
+            params![
+                bot.id.to_string(),
+                bot.owner,
+                bot.slug,
+                bot.display_name,
+                text(&bot.kind)?,
+                text(&bot.status)?,
+                json(&bot.reach)?,
+                bot.auth_epoch as i64,
+                bot.credential_generation as i64,
+                optional_time(bot.last_successful_access),
+                optional_time(bot.last_auth),
+                optional_time(bot.last_mutation),
+                optional_time(bot.last_heartbeat),
+                bot.last_action,
+                bot.last_outcome,
+                bot.last_repo,
+                time(bot.created_at),
+                time(bot.updated_at),
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+    for key in state.bot_keys.values() {
+        conn.execute(
+            r#"
+            INSERT INTO temp.bot_keys (
+              key_id, bot_id, secret_hash, env, created_at, retired_at, revoked_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                key.key_id,
+                key.bot_id.to_string(),
+                key.secret_hash,
+                key.env,
+                time(key.created_at),
+                optional_time(key.retired_at),
+                optional_time(key.revoked_at),
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+    for token in state.bot_refresh.values() {
+        conn.execute(
+            r#"
+            INSERT INTO temp.bot_refresh_tokens (
+              token_hash, bot_id, key_id, generation, expires_at, used_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                token.token_hash,
+                token.bot_id.to_string(),
+                token.key_id,
+                token.generation as i64,
+                time(token.expires_at),
+                optional_time(token.used_at),
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+    for operation in state.bot_operations.values() {
+        conn.execute(
+            r#"
+            INSERT INTO temp.bot_operations (
+              bot_id, operation, request_key, body_digest, result_json, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                operation.bot_id.to_string(),
+                operation.operation,
+                operation.request_key,
+                operation.body_digest,
+                operation.result_json,
+                time(operation.created_at),
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+    for event in &state.bot_activity {
+        conn.execute(
+            r#"
+            INSERT INTO temp.bot_activity (
+              id, bot_id, key_id, repo, session_id, action, outcome, scope, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+            params![
+                event.id.to_string(),
+                event.bot_id.to_string(),
+                event.key_id,
+                event.repo,
+                event.session_id,
+                event.action,
+                event.outcome,
+                event.scope,
+                time(event.created_at),
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
+fn load_bots(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, owner, slug, display_name, kind, status, reach_json, auth_epoch, credential_generation, last_successful_access, last_auth, last_mutation, last_heartbeat, last_action, last_outcome, last_repo, created_at, updated_at FROM bots",
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let epoch: i64 = row.get(7).map_err(storage_error)?;
+        let generation: i64 = row.get(8).map_err(storage_error)?;
+        let bot = super::bots::BotRecord {
+            id: parse_uuid(row.get(0).map_err(storage_error)?)?,
+            owner: row.get(1).map_err(storage_error)?,
+            slug: row.get(2).map_err(storage_error)?,
+            display_name: row.get(3).map_err(storage_error)?,
+            kind: from_text(row.get(4).map_err(storage_error)?)?,
+            status: from_text(row.get(5).map_err(storage_error)?)?,
+            reach: parse_json(row.get(6).map_err(storage_error)?)?,
+            auth_epoch: u64::try_from(epoch).map_err(storage_error)?,
+            credential_generation: u64::try_from(generation).map_err(storage_error)?,
+            last_successful_access: parse_optional_time(row.get(9).map_err(storage_error)?)?,
+            last_auth: parse_optional_time(row.get(10).map_err(storage_error)?)?,
+            last_mutation: parse_optional_time(row.get(11).map_err(storage_error)?)?,
+            last_heartbeat: parse_optional_time(row.get(12).map_err(storage_error)?)?,
+            last_action: row.get(13).map_err(storage_error)?,
+            last_outcome: row.get(14).map_err(storage_error)?,
+            last_repo: row.get(15).map_err(storage_error)?,
+            created_at: parse_time(row.get(16).map_err(storage_error)?)?,
+            updated_at: parse_time(row.get(17).map_err(storage_error)?)?,
+        };
+        state.bots.insert(bot.id, bot);
+    }
+    Ok(())
+}
+
+fn load_bot_keys(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT key_id, bot_id, secret_hash, env, created_at, retired_at, revoked_at FROM bot_keys",
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let key = super::bots::BotKeyRecord {
+            key_id: row.get(0).map_err(storage_error)?,
+            bot_id: parse_uuid(row.get(1).map_err(storage_error)?)?,
+            secret_hash: row.get(2).map_err(storage_error)?,
+            env: row.get(3).map_err(storage_error)?,
+            created_at: parse_time(row.get(4).map_err(storage_error)?)?,
+            retired_at: parse_optional_time(row.get(5).map_err(storage_error)?)?,
+            revoked_at: parse_optional_time(row.get(6).map_err(storage_error)?)?,
+        };
+        state.bot_keys.insert(key.key_id.clone(), key);
+    }
+    Ok(())
+}
+
+fn load_bot_refresh(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT token_hash, bot_id, key_id, generation, expires_at, used_at FROM bot_refresh_tokens",
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let generation: i64 = row.get(3).map_err(storage_error)?;
+        let token = super::bots::BotRefreshRecord {
+            token_hash: row.get(0).map_err(storage_error)?,
+            bot_id: parse_uuid(row.get(1).map_err(storage_error)?)?,
+            key_id: row.get(2).map_err(storage_error)?,
+            generation: u64::try_from(generation).map_err(storage_error)?,
+            expires_at: parse_time(row.get(4).map_err(storage_error)?)?,
+            used_at: parse_optional_time(row.get(5).map_err(storage_error)?)?,
+        };
+        state.bot_refresh.insert(token.token_hash.clone(), token);
+    }
+    Ok(())
+}
+
+fn load_bot_operations(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT bot_id, operation, request_key, body_digest, result_json, created_at FROM bot_operations",
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        let operation = super::bots::BotOperationRecord {
+            bot_id: parse_uuid(row.get(0).map_err(storage_error)?)?,
+            operation: row.get(1).map_err(storage_error)?,
+            request_key: row.get(2).map_err(storage_error)?,
+            body_digest: row.get(3).map_err(storage_error)?,
+            result_json: row.get(4).map_err(storage_error)?,
+            created_at: parse_time(row.get(5).map_err(storage_error)?)?,
+        };
+        state.bot_operations.insert(
+            (
+                operation.bot_id,
+                operation.operation.clone(),
+                operation.request_key.clone(),
+            ),
+            operation,
+        );
+    }
+    Ok(())
+}
+
+fn load_bot_activity(conn: &Connection, state: &mut State) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, bot_id, key_id, repo, session_id, action, outcome, scope, created_at FROM bot_activity ORDER BY created_at",
+        )
+        .map_err(storage_error)?;
+    let mut rows = stmt.query([]).map_err(storage_error)?;
+    while let Some(row) = rows.next().map_err(storage_error)? {
+        state.bot_activity.push(BotActivityEvent {
+            id: parse_uuid(row.get(0).map_err(storage_error)?)?,
+            bot_id: parse_uuid(row.get(1).map_err(storage_error)?)?,
+            key_id: row.get(2).map_err(storage_error)?,
+            repo: row.get(3).map_err(storage_error)?,
+            session_id: row.get(4).map_err(storage_error)?,
+            action: row.get(5).map_err(storage_error)?,
+            outcome: row.get(6).map_err(storage_error)?,
+            scope: row.get(7).map_err(storage_error)?,
+            created_at: parse_time(row.get(8).map_err(storage_error)?)?,
+        });
     }
     Ok(())
 }

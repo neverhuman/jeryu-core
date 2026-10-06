@@ -23,6 +23,7 @@ use crate::webhooks::{should_deliver, sign_webhook_payload};
 mod accounts;
 mod audit;
 mod auth;
+mod bots;
 mod branch_protection;
 mod check_runs;
 mod commit_status;
@@ -58,6 +59,11 @@ struct State {
     accounts: HashMap<String, UserAccount>,
     sessions: HashMap<String, WebSession>,
     personal_tokens: HashMap<Uuid, PersonalAccessToken>,
+    bots: HashMap<Uuid, bots::BotRecord>,
+    bot_keys: HashMap<String, bots::BotKeyRecord>,
+    bot_refresh: HashMap<String, bots::BotRefreshRecord>,
+    bot_operations: HashMap<(Uuid, String, String), bots::BotOperationRecord>,
+    bot_activity: Vec<BotActivityEvent>,
     invitations: HashMap<Uuid, AccountInvitation>,
     activation_challenges: HashMap<String, ActivationChallenge>,
     bootstrap_owner_consumed: bool,

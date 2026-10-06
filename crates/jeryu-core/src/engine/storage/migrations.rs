@@ -47,6 +47,7 @@ const MIGRATION_0015: &str =
     include_str!("../../../../../db/migrations/0015_repository_alias_origin.sql");
 const MIGRATION_0016: &str =
     include_str!("../../../../../db/migrations/0016_review_dismissal_target.sql");
+const MIGRATION_0017: &str = include_str!("../../../../../db/migrations/0017_account_bots.sql");
 
 pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     apply_migrations_through_0010(conn)?;
@@ -57,6 +58,8 @@ pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     apply_migration_0014(conn)?;
     apply_migration_0015(conn)?;
     apply_migration_0016(conn)?;
+    // 0017 is pure CREATE TABLE/INDEX IF NOT EXISTS: idempotent, no guard.
+    conn.execute_batch(MIGRATION_0017).map_err(storage_error)?;
     Ok(())
 }
 
