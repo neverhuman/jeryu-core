@@ -24,7 +24,10 @@
   normalized email, an optional name, an optional note, status `listed`, source
   `landing`, and the first request time. A repeated email keeps that row and
   does not write again. The list stops at 50,000 addresses
-  (`ForgeError::WaitlistFull`). `waitlist_len` reports the count without
+  (`ForgeError::WaitlistFull`). Classifying that error for a bot repair
+  returns a benign value and does not abort, and `explain_bot` leaves the
+  error unchanged. `docs/errors.md#waitlist` has a Waitlist heading.
+  `waitlist_len` reports the count without
   cloning the forge state. Joining does not create an account or a session.
 - Branch protection carries its own `strict` (head up to date with base) flag,
   separate from `required_linear_history`, and `SetBranchProtectionRequest`

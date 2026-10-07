@@ -135,3 +135,9 @@ for rotation.
 The forge could not read randomness or build the Argon2id hash for a new
 enrollment secret. Retry the enroll or rotate once. Do not keep the secret if
 the hash fails.
+
+## Waitlist
+
+The public waitlist cannot store another new address. A repeat of an address
+already stored is not this error. Keep the existing address. Do not retry a
+new one in a loop. An operator reviews the list.

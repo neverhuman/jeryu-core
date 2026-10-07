@@ -73,6 +73,15 @@ enum BotFailure {
     /// docs_url: docs/errors.md#bot-storage
     /// repair_hint: rerun cargo test -p jeryu-core --lib core::bots::tests
     Storage,
+    /// A full waitlist is not a bot failure. `classify` returns this instead of
+    /// aborting, and `explain_bot` leaves `ForgeError::WaitlistFull` unchanged.
+    ///
+    /// purpose: record a landing email without opening an account.
+    /// reason: the waitlist is at its row cap, which is not a bot failure.
+    /// common fixes: keep the existing address; do not retry a new one in a loop.
+    /// docs_url: docs/errors.md#waitlist
+    /// repair_hint: rerun cargo test -p jeryu-core waitlist
+    Benign,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,12 +106,7 @@ impl BotFailure {
             | ForgeError::RepositoryArchived(_) => Self::NotGranted,
             ForgeError::NotFound(_) => Self::Missing,
             ForgeError::Storage(_) => Self::Storage,
-            ForgeError::WaitlistFull => {
-                // A full waitlist is not a bot failure. `explain_bot` returns
-                // that error unchanged before classify. The arm keeps this
-                // match exhaustive.
-                unreachable!("waitlist_full is not a bot failure")
-            }
+            ForgeError::WaitlistFull => Self::Benign,
         }
     }
 
@@ -149,6 +153,13 @@ impl BotFailure {
                 common_fixes: "retry the enroll or rotate once; do not keep the secret if the hash fails",
                 docs_url: "docs/errors.md#bot-storage",
                 repair_hint: "rerun cargo test -p jeryu-core --lib core::bots::tests",
+            },
+            Self::Benign => BotFailureRepair {
+                purpose: "record a landing email without opening an account",
+                reason: "the waitlist is at its row cap, which is not a bot failure",
+                common_fixes: "keep the existing address; do not retry a new one in a loop",
+                docs_url: "docs/errors.md#waitlist",
+                repair_hint: "rerun cargo test -p jeryu-core waitlist",
             },
         }
     }
@@ -1704,6 +1715,25 @@ mod tests {
     }
 
     #[test]
+    fn classify_waitlist_full_is_benign_and_explain_leaves_it() {
+        let error = ForgeError::WaitlistFull;
+        assert_eq!(BotFailure::classify(&error), BotFailure::Benign);
+        let repair = BotFailure::Benign.repair();
+        assert!(
+            repair.reason.contains("not a bot failure"),
+            "{}",
+            repair.reason
+        );
+        assert_eq!(repair.docs_url, "docs/errors.md#waitlist");
+        let returned = explain_bot(error.clone());
+        assert_eq!(returned, error);
+        assert!(
+            !returned.to_string().contains("purpose:"),
+            "explain_bot attached a bot repair to {returned}"
+        );
+    }
+
+    #[test]
     fn bot_repair_docs_urls_name_a_heading() {
         const DOCS: &str = include_str!("../../../../docs/errors.md");
         let headings: Vec<String> = DOCS
@@ -1717,6 +1747,7 @@ mod tests {
             BotFailure::NotGranted,
             BotFailure::Missing,
             BotFailure::Storage,
+            BotFailure::Benign,
         ] {
             let docs_url = failure.repair().docs_url;
             let anchor = docs_url
