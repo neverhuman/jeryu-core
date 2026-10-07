@@ -294,4 +294,42 @@ mod tests {
         assert!(matches!(repeat, WaitlistJoin::AlreadyListed(_)));
         assert_eq!(core.waitlist_len(), MAX_WAITLIST);
     }
+
+    /// `db/constraints.md` says a second join keeps the stored request count.
+    /// Restoring the older increment sentence fails this test.
+    #[test]
+    fn waitlist_constraints_keep_the_stored_request_count() {
+        let policy = include_str!("../../../../db/constraints.md");
+        assert!(
+            policy.contains("stored row and does not write"),
+            "constraints.md must say a repeat returns the stored row and does not write"
+        );
+        assert!(
+            policy.contains("`request_count` stay as stored"),
+            "constraints.md must say request_count stays as stored"
+        );
+        assert!(
+            !policy.contains("increments the count"),
+            "constraints.md must not say a repeat increments the count"
+        );
+
+        let core = ForgeCore::new();
+        let WaitlistJoin::Created(signup) = core
+            .join_waitlist("ada@example.com", Some("Ada"), None)
+            .unwrap()
+        else {
+            panic!("first join creates a row");
+        };
+        assert_eq!(signup.request_count, 1);
+        let WaitlistJoin::AlreadyListed(listed) = core
+            .join_waitlist("ADA@example.com", Some("other"), Some("nope"))
+            .unwrap()
+        else {
+            panic!("a repeated address is already listed");
+        };
+        assert_eq!(listed.request_count, signup.request_count);
+        assert_eq!(listed.created_at, signup.created_at);
+        assert_eq!(listed.last_requested_at, signup.last_requested_at);
+        assert_eq!(core.waitlist_len(), 1);
+    }
 }
