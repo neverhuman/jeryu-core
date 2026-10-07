@@ -782,7 +782,7 @@ impl ForgeCore {
         Ok(updated.into())
     }
 
-    fn require_active_account(&self, login: &str) -> Result<AccountSummary> {
+    pub(super) fn require_active_account(&self, login: &str) -> Result<AccountSummary> {
         let account = self.get_account(login)?;
         if !account.status.permits_authentication() {
             return Err(ForgeError::Validation("account is not active".to_string()));

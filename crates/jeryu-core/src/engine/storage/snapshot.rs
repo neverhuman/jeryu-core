@@ -65,6 +65,11 @@ const OWNED_TABLES: &[OwnedTable] = &[
         primary_key: "id",
     },
     OwnedTable {
+        name: "provider_connections",
+        columns: "id,owner_id,provider,provider_account,credential_kind,state,connection_generation,secret_version,sealed_secret,created_at,updated_at,refreshed_at",
+        primary_key: "id",
+    },
+    OwnedTable {
         name: "account_invitations",
         columns: "id,canonical_login,display_name,activation_secret_hash,issuer_principal,intended_role,intended_teams_json,created_at,expires_at,consumed_at,revoked_at,attempt_count,bootstrap_owner",
         primary_key: "id",

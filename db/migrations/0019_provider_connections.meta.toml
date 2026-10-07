@@ -1,0 +1,22 @@
+# jankurai:migration v1
+id = "0019_provider_connections"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "old_app_new_db,new_app_old_db"
+requires = ["0018_waitlist_signups"]
+rollback = "db/rollbacks/0019_provider_connections.sql"
+backfill = "none; the table starts empty and rows are inserted only by connect_provider"
+data_classification = "secret"
+tenant_impact = "stores sealed (AES-256-GCM envelope) provider refresh tokens or API keys per user or service account, plus public account labels; plaintext secrets are never stored"
+tests = [
+  "db-migration-analyze",
+  "provider_connections_survive_sqlite_reopen_without_plaintext",
+  "disconnect_drops_the_secret_and_fences_the_generation",
+]

@@ -11,6 +11,7 @@ use crate::model::*;
 mod codec;
 mod deployments;
 mod migrations;
+mod provider_connections;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -199,6 +200,7 @@ fn stage_state(conn: &Connection, state: &State) -> Result<()> {
         .map_err(storage_error)?;
     }
     stage_bots(conn, state)?;
+    provider_connections::stage_provider_connections(conn, state)?;
     for invitation in state.invitations.values() {
         conn.execute(
             r#"
@@ -703,6 +705,7 @@ fn load_state(conn: &Connection) -> Result<State> {
     load_bot_refresh(conn, &mut state)?;
     load_bot_operations(conn, &mut state)?;
     load_bot_activity(conn, &mut state)?;
+    provider_connections::load_provider_connections(conn, &mut state)?;
     load_invitations(conn, &mut state)?;
     load_activation_challenges(conn, &mut state)?;
     load_bootstrap_state(conn, &mut state)?;

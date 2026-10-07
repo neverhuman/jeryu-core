@@ -30,6 +30,9 @@ mod commit_status;
 mod deployments;
 mod issues;
 mod jankurai;
+mod provider_connections;
+#[cfg(test)]
+mod provider_connections_tests;
 mod pull_requests;
 mod readmes;
 mod repositories;
@@ -38,6 +41,7 @@ mod repository_transfer;
 mod repository_transfer_state;
 mod reviews;
 mod storage;
+mod vault;
 mod waitlist;
 mod webhooks;
 
@@ -45,8 +49,10 @@ mod webhooks;
 mod tests;
 
 pub use audit::AuditEntry;
+pub use provider_connections::REFRESH_LOCK_TIMEOUT;
 pub use pull_requests::MergeReadiness;
 pub use repositories::RepositoryDeletion;
+pub use vault::VaultKey;
 
 #[derive(Debug, Clone, Default)]
 struct Counters {
@@ -65,6 +71,7 @@ struct State {
     bot_refresh: HashMap<String, bots::BotRefreshRecord>,
     bot_operations: HashMap<(Uuid, String, String), bots::BotOperationRecord>,
     bot_activity: Vec<BotActivityEvent>,
+    provider_connections: HashMap<String, provider_connections::ConnectionRecord>,
     invitations: HashMap<Uuid, AccountInvitation>,
     activation_challenges: HashMap<String, ActivationChallenge>,
     bootstrap_owner_consumed: bool,
@@ -246,6 +253,10 @@ pub struct ForgeCore {
     storage: Option<Arc<storage::SqliteStore>>,
     repo_materializer: Option<Arc<dyn RepoMaterializer>>,
     repo_relocator: Option<Arc<dyn RepoRelocator>>,
+    /// Seals and opens provider secrets; absent means connections are refused.
+    vault: Option<Arc<VaultKey>>,
+    /// One refresh at a time per connection (connection-v1 §3).
+    refresh_locks: provider_connections::RefreshLocks,
 }
 
 impl ForgeCore {
@@ -276,6 +287,8 @@ impl ForgeCore {
             storage: Some(Arc::new(storage)),
             repo_materializer: None,
             repo_relocator: None,
+            vault: None,
+            refresh_locks: Default::default(),
         })
     }
 

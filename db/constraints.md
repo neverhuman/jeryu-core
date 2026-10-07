@@ -430,3 +430,23 @@ Rollback/backfill:
 - `db/rollbacks/0018_waitlist_signups.sql` drops the table and deletes every
   stored address. Use that only before the rows are relied on. After signups
   exist, recover forward.
+
+## 0019 Provider Connections
+
+Connect-once credentials for managed agents (contracts connection-v1).
+
+Constraint policy:
+- One row per `(owner_id, provider, provider_account)`. `owner_id` starts with
+  `user/` or `service/`; it has no foreign key because service accounts are
+  not `user_accounts` rows.
+- `provider` is `claude`, `codex`, or `grok`; `credential_kind` is
+  `oauth_refresh` or `api_key`; `state` is `pending`, `connected`, or
+  `disconnected`.
+- A row holds a sealed secret exactly when it is `connected`. Disconnect drops
+  the secret and bumps `connection_generation` in the same commit.
+- `sealed_secret` is JSON of an AES-256-GCM envelope; plaintext secrets are
+  never stored. `secret_version` counts refresh rotations within a generation.
+
+Rollback/backfill:
+- No backfill: the table starts empty.
+- Rollback retains the table (see `db/rollbacks/0019_provider_connections.sql`).
