@@ -22,9 +22,10 @@
   unless the outcome changes; a heartbeat is stored at most once a minute.
 - Public waitlist signups (migration 0018): `ForgeCore::join_waitlist` stores a
   normalized email, an optional name, an optional note, status `listed`, source
-  `landing`, and the first and latest request times. A repeated email keeps the
-  original name, note, status, and created time, and increments the request
-  count. Joining does not create an account or a session.
+  `landing`, and the first request time. A repeated email keeps that row and
+  does not write again. The list stops at 50,000 addresses
+  (`ForgeError::WaitlistFull`). `waitlist_len` reports the count without
+  cloning the forge state. Joining does not create an account or a session.
 - Branch protection carries its own `strict` (head up to date with base) flag,
   separate from `required_linear_history`, and `SetBranchProtectionRequest`
   requires `required_status_checks`, `required_approving_review_count` and

@@ -1,4 +1,12 @@
 //! Public waitlist. An address here is not an account and cannot log in.
+//!
+//! A join failure is a repairable exception.
+//!
+//! purpose: record a landing email without opening an account.
+//! reason: the address is invalid, or the list cannot take a new row.
+//! common fixes: send one normal email address; a repeat does not write again; a full list waits for an operator.
+//! docs_url: docs/errors.md#waitlist
+//! repair_hint: rerun cargo test -p jeryu-core waitlist
 
 use chrono::Utc;
 
@@ -11,13 +19,17 @@ const LOCAL_MAX: usize = 64;
 const NAME_MAX: usize = 80;
 const NOTE_MAX: usize = 280;
 const WAITLIST_SOURCE: &str = "landing";
+/// Hard cap on stored addresses. Past this, a new address is
+/// [`ForgeError::WaitlistFull`] and nothing is written.
+pub const MAX_WAITLIST: usize = 50_000;
 
 impl ForgeCore {
-    /// Record an email, or count another request when that email is already listed.
+    /// Record an email, or report that the address is already listed.
     ///
-    /// The address is trimmed and compared in ASCII lowercase. A repeat keeps the
-    /// original name, note, status, and created time. It increments the request
-    /// count and moves `last_requested_at`. It does not create a user.
+    /// The address is trimmed and compared in ASCII lowercase. A repeat keeps
+    /// the original row and does not persist. A new address at [`MAX_WAITLIST`]
+    /// returns [`ForgeError::WaitlistFull`] and does not persist. Joining does
+    /// not create a user.
     pub fn join_waitlist(
         &self,
         email: &str,
@@ -28,14 +40,11 @@ impl ForgeCore {
         let name = normalize_waitlist_text(name, NAME_MAX, "name")?;
         let note = normalize_waitlist_text(note, NOTE_MAX, "note")?;
         let mut state = self.state.write();
-        if let Some(existing) = state.waitlist.get(&email).cloned() {
-            let mut updated = existing;
-            updated.request_count = updated.request_count.saturating_add(1);
-            updated.last_requested_at = Utc::now();
-            let previous = state.clone();
-            state.waitlist.insert(email, updated.clone());
-            self.persist_after_mutation(&mut state, previous)?;
-            return Ok(WaitlistJoin::AlreadyListed(updated));
+        if let Some(existing) = state.waitlist.get(&email) {
+            return Ok(WaitlistJoin::AlreadyListed(existing.clone()));
+        }
+        if state.waitlist.len() >= MAX_WAITLIST {
+            return Err(ForgeError::WaitlistFull);
         }
         let now = Utc::now();
         let signup = WaitlistSignup {
@@ -52,6 +61,13 @@ impl ForgeCore {
         state.waitlist.insert(email, signup.clone());
         self.persist_after_mutation(&mut state, previous)?;
         Ok(WaitlistJoin::Created(signup))
+    }
+
+    /// How many addresses are stored. This reads the map length and does not
+    /// clone the forge state.
+    #[must_use]
+    pub fn waitlist_len(&self) -> usize {
+        self.state.read().waitlist.len()
     }
 
     /// Every signup, oldest first.
@@ -159,7 +175,6 @@ mod tests {
         assert_eq!(signup.request_count, 1);
         assert_eq!(signup.last_requested_at, signup.created_at);
 
-        std::thread::sleep(std::time::Duration::from_millis(5));
         let again = core
             .join_waitlist(
                 "ADA@example.com",
@@ -174,8 +189,9 @@ mod tests {
         assert_eq!(listed.note, signup.note);
         assert_eq!(listed.status, signup.status);
         assert_eq!(listed.created_at, signup.created_at);
-        assert_eq!(listed.request_count, 2);
-        assert!(listed.last_requested_at > signup.created_at);
+        assert_eq!(listed.request_count, 1);
+        assert_eq!(listed.last_requested_at, signup.created_at);
+        assert_eq!(core.waitlist_len(), 1);
         assert_eq!(core.list_waitlist(), vec![listed]);
 
         let blank = core
@@ -223,5 +239,59 @@ mod tests {
         let reopened = ForgeCore::open_sqlite(&db_path).unwrap();
         assert_eq!(reopened.list_waitlist(), vec![signup]);
         assert_eq!(reopened.get_user("alice").unwrap().login, "alice");
+    }
+
+    #[test]
+    fn waitlist_repeat_does_not_rewrite_sqlite() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let db_path = tempdir.path().join("forge.sqlite");
+        let core = ForgeCore::open_sqlite(&db_path).unwrap();
+        core.join_waitlist("ada@example.com", Some("Ada"), Some("agents"))
+            .unwrap();
+        let before = std::fs::read(&db_path).unwrap();
+        let again = core
+            .join_waitlist("ADA@example.com", Some("other"), Some("nope"))
+            .unwrap();
+        let WaitlistJoin::AlreadyListed(row) = again else {
+            panic!("repeat");
+        };
+        assert_eq!(row.request_count, 1);
+        assert_eq!(row.name.as_deref(), Some("Ada"));
+        assert_eq!(std::fs::read(&db_path).unwrap(), before);
+        assert_eq!(core.waitlist_len(), 1);
+    }
+
+    #[test]
+    fn waitlist_cap_refuses_a_new_address_and_keeps_a_repeat() {
+        let core = ForgeCore::new();
+        let now = Utc::now();
+        {
+            let mut state = core.state.write();
+            for index in 0..MAX_WAITLIST {
+                let email = format!("u{index}@x.co");
+                state.waitlist.insert(
+                    email.clone(),
+                    WaitlistSignup {
+                        email,
+                        name: None,
+                        note: None,
+                        status: WaitlistStatus::Listed,
+                        source: WAITLIST_SOURCE.to_string(),
+                        request_count: 1,
+                        created_at: now,
+                        last_requested_at: now,
+                    },
+                );
+            }
+        }
+        assert_eq!(core.waitlist_len(), MAX_WAITLIST);
+        let refused = core
+            .join_waitlist("new@example.com", None, None)
+            .expect_err("the cap refuses a new address");
+        assert!(matches!(refused, ForgeError::WaitlistFull), "{refused:?}");
+        assert_eq!(core.waitlist_len(), MAX_WAITLIST);
+        let repeat = core.join_waitlist("u0@x.co", Some("nope"), None).unwrap();
+        assert!(matches!(repeat, WaitlistJoin::AlreadyListed(_)));
+        assert_eq!(core.waitlist_len(), MAX_WAITLIST);
     }
 }
