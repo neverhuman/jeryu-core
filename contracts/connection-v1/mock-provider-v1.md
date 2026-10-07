@@ -20,8 +20,9 @@ on because the binary is test-only.
 One mutex per `connection_id` covers refresh. The event log is the proof
 of order. `GET /events` returns `[{seq, kind}]` with kinds
 `refresh_persisted`, `access_lease_issued`, and `generation_bumped`.
-A lease event must not sit between the start of a refresh and
-`refresh_persisted`.
+`generation_bumped` is connect, credential replacement, and disconnect.
+A refresh does not emit it. A lease event must not sit between the start
+of a refresh and `refresh_persisted`.
 
 ## Endpoints
 
@@ -44,18 +45,20 @@ or `refresh_token`.
 - Refresh takes the connection lock, checks state, and checks that the
   presented refresh token is the stored one.
 - Disconnected returns `provider_not_connected` and does not mint.
-- A token that is not the stored refresh token returns
-  `connection_generation_stale`.
-- The new refresh token is written and fsynced, the generation bumps, and
-  only then is an access token returned.
+- A token that is not the stored refresh token returns `invalid_grant`.
+  `connection_generation` and `secret_version` stay unchanged.
+- The new refresh token is written and fsynced, `secret_version` increments,
+  `connection_generation` stays the same, and only then is an access token
+  returned.
 - `fail_persist_once` fails the write, mints nothing, and leaves the old
-  refresh token valid.
+  refresh token and `secret_version` valid.
 
 `POST /sessions` with `connection_id` and `connection_generation` mints an
 access lease for a new `session_id` without another refresh when the
 current access TTL is still valid. Three concurrent calls on one connection
-must all succeed. A stale generation increments `stale_generation_refusals`
-and returns `connection_generation_stale`.
+must all succeed. The same generation still succeeds after a refresh. A
+stale generation increments `stale_generation_refusals` and returns
+`connection_generation_stale`.
 
 `POST /connections/{id}/disconnect` bumps the generation, sets
 `disconnected`, and deletes the refresh token in one persist. Later token
@@ -80,13 +83,13 @@ body or in logs.
 | `concurrent_sessions_peak` | at least 3 |
 | `refreshes_persisted` | increments before `access_leases_issued` for that refresh |
 | `refresh_before_lease_ok` | increments once per successful refresh |
-| `stale_generation_refusals` | increments when generation N is used after N+1 |
+| `stale_generation_refusals` | increments when generation N is used after disconnect or replacement moved the identity to N+1 |
 | `chat_authorized` | increments only when the injected access token matches |
 | `chat_rejected` | increments for the refresh token, a missing header, and a stale token |
 | `outbound_dial_attempts` | 0 |
 
-One connection serves the three sessions. Disconnect fences the old
-generation. The test scans logs with `ops/ci/leak-oracle.sh` and does not
-print the tokens.
+One connection serves the three sessions. A refresh leaves that generation
+valid. Disconnect fences it. The test scans logs with `ops/ci/leak-oracle.sh`
+and does not print the tokens.
 
 This crate does not prove a real provider, a vsock, or KVM.

@@ -81,7 +81,9 @@
         "provider_unknown",
         "lease_binding_mismatch",
         "connection_busy",
-        "guest_authorization_rejected"
+        "guest_authorization_rejected",
+        "relay_idle_timeout",
+        "relay_stream_invalid"
       ]
     },
     "providerConnection": {

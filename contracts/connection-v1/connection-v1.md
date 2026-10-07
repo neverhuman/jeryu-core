@@ -83,30 +83,56 @@ the caller asks for that mode. The gateway does not switch modes.
 
 ## 3. Refresh, then lease
 
+`connection_generation` is the credential identity. It changes when a
+connection is created, replaced, or disconnected. A refresh does not change
+it, and a live lease stays valid across token rotation. A refresh does not
+need a new signed lease.
+
+`secret_version` counts durable rotations of the stored secret. A new secret
+starts at 0. It is vault-internal: not a lease field, not a capability
+field, and not sent to the guest. The seal associated data includes it. A
+blob sealed at `secret_version` N must not open when the row says N+1.
+
 Refresh serializes on `connection_id`.
 
 1. Take the lock. A waiter that cannot enter within 5 seconds gets
    `connection_busy` and no token.
-2. Re-read state, generation, and the stored refresh secret or API key.
+2. Re-read state, `connection_generation`, `secret_version`, and the stored
+   secret.
 3. If state is `disconnected`, return `provider_not_connected` and stop.
 4. Call the provider token endpoint from the vault, never from the guest.
-5. Persist the rotated refresh token and the new generation in one durable
-   commit. For an API key there is no rotation; the commit still records
-   the generation that the new access lease will carry.
+   The vault sends the stored secret. It does not take a caller-supplied
+   refresh token on this path.
+5. Persist the rotated refresh token and `secret_version + 1` in one durable
+   commit. `connection_generation` stays the same. An API key does not
+   rotate and does not bump `secret_version`.
 6. Only after that commit is durable, mint access material and capabilities
-   at the new generation.
+   at the same `connection_generation`. The gateway uses the current secret
+   at that generation. It does not keep a secret cached when the capability
+   was minted.
 7. Release the lock.
 
-If step 5 fails, mint nothing and leave the previous secret and generation
-valid (`refresh_persist_failed`). A refresh token that is not the stored one
-returns `connection_generation_stale`. Two refreshes cannot interleave a
-lease between the old secret and the new commit.
+If step 5 fails, mint nothing and leave the previous secret and
+`secret_version` valid (`refresh_persist_failed`). If the provider rejects
+the stored secret, leave the generation and `secret_version` unchanged and
+do not mint. That rejection is not `connection_generation_stale`. A
+presented refresh token that is not the stored one does not bump the
+generation. Two refreshes cannot interleave a lease between the old secret
+and the new commit.
+
+In `qualified_ram_token` mode the node replaces the tmpfs access token
+after step 6. The lease binding does not change. An old access token fails
+the gateway compare (`ram_token_not_permitted`) and does not end the
+session.
 
 ## 4. Disconnect and fencing
 
 Disconnect sets `disconnected`, bumps `connection_generation`, and drops the
-stored secret in the same commit. In-flight gateway calls re-read that
-generation. They do not trust a capability for the rest of its TTL.
+stored secret in the same commit. Replacing the credential does the same
+bump and resets `secret_version` to 0. A running session bound to the old
+generation needs a new signed lease. A refresh does not. In-flight gateway
+calls re-read state and generation on every relay line. They do not trust a
+capability for the rest of its TTL after a disconnect or a replacement.
 
 Error precedence:
 
@@ -126,6 +152,8 @@ Error precedence:
 12. `connection_busy`
 13. `refresh_persist_failed`
 14. `lease_binding_mismatch`
+15. `relay_idle_timeout`
+16. `relay_stream_invalid`
 
 ## 5. K1 lease binding
 
@@ -161,9 +189,11 @@ the `user/` or `service/` prefix.
 ## 6. K3 relay and capability
 
 Guest path: loopback HTTP to `127.0.0.1:1025`, then vsock host port 1025.
-No NIC. Lane R's `GuestRelayRequest` is the guest metadata. Accept and
-Content-Type are the only guest headers, at most one of each, 256 ASCII
-bytes. Authorization is not a guest metadata field.
+The execution channel stays on vsock port 1024. No NIC. Frame bytes, the
+flow window, and the gateway NDJSON hop are in `k3-relay-v1.md`. Lane R's
+`GuestRelayRequest` is the metadata the node builds for the gateway. Accept
+and Content-Type are the only guest headers, at most one of each, 256 ASCII
+bytes. Authorization is not a guest metadata field in `gateway_helper` mode.
 
 Reject paths that are not a single absolute path: no authority, userinfo,
 fragment, backslash, control byte, empty or dot segment, or `//`.

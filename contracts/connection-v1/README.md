@@ -12,6 +12,8 @@ review finding until both sides match.
 | --- | --- |
 | `connection-v1.md` | Normative rules. A message is valid only if it satisfies these rules and `connection-v1.schema.json`. |
 | `connection-v1.schema.json` | Closed JSON shapes. No secret fields. |
+| `k3-relay-v1.md` | Relay stream frames and the gateway hop. |
+| `k3-relay-v1.schema.json` | Closed frame shapes for that stream. |
 | `mock-provider-v1.md` | State machine Claude implements as a test crate in `jeryu-deploy`. |
 | `mock-agent-v1.md` | One binary, `argv[0]` selects mock-claude, mock-codex, or mock-grok. |
 | `leak-oracle-v1.md` | Canary rules for CI-A (no KVM) and CI-B (KVM). |

@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jeryu.dev/contracts/k3-relay-v1.schema.json",
+  "title": "JeRyu k3 relay frames",
+  "oneOf": [
+    {"$ref": "#/$defs/open"},
+    {"$ref": "#/$defs/requestBody"},
+    {"$ref": "#/$defs/requestEnd"},
+    {"$ref": "#/$defs/head"},
+    {"$ref": "#/$defs/responseBody"},
+    {"$ref": "#/$defs/responseEnd"},
+    {"$ref": "#/$defs/ack"},
+    {"$ref": "#/$defs/cancel"},
+    {"$ref": "#/$defs/errorFrame"},
+    {"$ref": "#/$defs/gatewayOpen"}
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:/-]*[A-Za-z0-9])?$"
+    },
+    "seq": {"type": "integer", "minimum": 1},
+    "bytesB64": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 48000,
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+    },
+    "header": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {
+        "name": {"enum": ["accept", "content-type"]},
+        "value": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "open": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "provider", "method", "path", "headers"],
+      "properties": {
+        "type": {"const": "open"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "provider": {"enum": ["claude", "codex", "grok"]},
+        "method": {"enum": ["GET", "POST"]},
+        "path": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "headers": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/header"}
+        },
+        "authorization": {"type": "string", "minLength": 1, "maxLength": 4096}
+      }
+    },
+    "requestBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "seq", "bytes_b64"],
+      "properties": {
+        "type": {"const": "request-body"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "seq": {"$ref": "#/$defs/seq"},
+        "bytes_b64": {"$ref": "#/$defs/bytesB64"}
+      }
+    },
+    "requestEnd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "seq_end"],
+      "properties": {
+        "type": {"const": "request-end"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "seq_end": {"type": "integer", "minimum": 0}
+      }
+    },
+    "head": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "status", "headers"],
+      "properties": {
+        "type": {"const": "head"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "status": {"type": "integer", "minimum": 100, "maximum": 599},
+        "headers": {
+          "type": "array",
+          "maxItems": 1,
+          "items": {"$ref": "#/$defs/header"}
+        }
+      }
+    },
+    "responseBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "seq", "bytes_b64"],
+      "properties": {
+        "type": {"const": "response-body"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "seq": {"$ref": "#/$defs/seq"},
+        "bytes_b64": {"$ref": "#/$defs/bytesB64"}
+      }
+    },
+    "responseEnd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "seq_end"],
+      "properties": {
+        "type": {"const": "response-end"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "seq_end": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "through_seq"],
+      "properties": {
+        "type": {"const": "ack"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "through_seq": {"$ref": "#/$defs/seq"}
+      }
+    },
+    "cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id"],
+      "properties": {
+        "type": {"const": "cancel"},
+        "request_id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "errorFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "error"],
+      "properties": {
+        "type": {"const": "error"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "error": {
+          "enum": [
+            "provider_not_connected",
+            "connection_generation_stale",
+            "connection_owner_mismatch",
+            "provider_mode_disabled",
+            "provider_mode_unqualified",
+            "helper_required",
+            "ram_token_not_permitted",
+            "capability_expired",
+            "capability_audience_mismatch",
+            "upstream_host_denied",
+            "refresh_persist_failed",
+            "provider_unknown",
+            "lease_binding_mismatch",
+            "connection_busy",
+            "guest_authorization_rejected",
+            "relay_idle_timeout",
+            "relay_stream_invalid"
+          ]
+        }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability_id",
+        "connection_id",
+        "connection_generation",
+        "provider",
+        "mode",
+        "owner_kind",
+        "owner_id",
+        "session_id",
+        "session_generation",
+        "lease_id",
+        "lease_epoch",
+        "audience",
+        "issued_at_unix_millis",
+        "expires_at_unix_millis",
+        "signature"
+      ],
+      "properties": {
+        "capability_id": {"$ref": "#/$defs/id"},
+        "connection_id": {"$ref": "#/$defs/id"},
+        "connection_generation": {"type": "integer", "minimum": 1},
+        "provider": {"enum": ["claude", "codex", "grok"]},
+        "mode": {"enum": ["gateway_helper", "qualified_ram_token"]},
+        "owner_kind": {"enum": ["user", "service_account"]},
+        "owner_id": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 128,
+          "pattern": "^(user|service)/[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+        },
+        "session_id": {"$ref": "#/$defs/id"},
+        "session_generation": {"type": "integer", "minimum": 1},
+        "lease_id": {"$ref": "#/$defs/id"},
+        "lease_epoch": {"type": "integer", "minimum": 1},
+        "audience": {"const": "jeryu.gateway"},
+        "issued_at_unix_millis": {"type": "integer", "minimum": 1},
+        "expires_at_unix_millis": {"type": "integer", "minimum": 1},
+        "signature": {"type": "string", "pattern": "^[a-f0-9]{128}$"}
+      }
+    },
+    "gatewayOpen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "request_id", "provider", "method", "path", "headers", "capability"],
+      "properties": {
+        "type": {"const": "gateway-open"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "provider": {"enum": ["claude", "codex", "grok"]},
+        "method": {"enum": ["GET", "POST"]},
+        "path": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "headers": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/header"}
+        },
+        "authorization": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "capability": {"$ref": "#/$defs/capability"}
+      }
+    }
+  }
+}
