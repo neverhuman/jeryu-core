@@ -94,3 +94,41 @@ return `not_found`; malformed bodies return `invalid_input`; unresolved refs
 return `invalid_ref`; checkout or index failures return codegraph-specific
 repair messages. Use `docs/codegraph-oracle.md` for the route contract and
 `docs/testing.md#codegraph-oracle` for rerun commands.
+
+## Bot enrollment
+
+Enrolling or rotating a Grokbot or Musebot rejected the slug, display name,
+reach, key environment, or account. Use a login-shaped slug, keep the display
+name within 80 characters, and choose general reach, at most 100 repositories,
+or one issue, pull, or branch.
+
+## Bot credential
+
+The enrollment key or refresh token is not current for an active Grokbot or
+Musebot. Present the one-time enrollment key or the latest refresh token. Do
+not send either as a bearer. A reused refresh token revokes the family.
+
+## Bot conflict
+
+The account already has that slug, or an idempotency key was replayed with a
+different body. Choose another slug, or resend the original body with the same
+idempotency key.
+
+## Bot reach
+
+The call sits outside the owner's non-admin grant. The repository is not
+granted, the task is not the granted one, or the effect exceeds the owner's
+rights. Narrow the call. Do not request forge admin, release, pin, or user
+administration.
+
+## Bot missing
+
+No Grokbot or Musebot credential exists for that id, or it has been revoked.
+Enroll again, or list the account roster. A revoked credential is not found
+for rotation.
+
+## Bot storage
+
+The forge could not read randomness or build the Argon2id hash for a new
+enrollment secret. Retry the enroll or rotate once. Do not keep the secret if
+the hash fails.

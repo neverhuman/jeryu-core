@@ -87,7 +87,9 @@ struct BotFailureRepair {
 impl BotFailure {
     fn classify(error: &ForgeError) -> Self {
         match error {
-            ForgeError::Validation(message) if message == INVALID => Self::InvalidCredential,
+            ForgeError::Validation(message) if ForgeError::machine_text(message) == INVALID => {
+                Self::InvalidCredential
+            }
             ForgeError::Validation(_) => Self::InvalidEnrollment,
             ForgeError::Conflict(_) => Self::Conflict,
             ForgeError::Forbidden(_)
@@ -146,17 +148,49 @@ impl BotFailure {
     }
 }
 
-/// Attach the repair for this failure. The returned error value is unchanged.
+/// Attach this failure's repair to the error callers match and display.
 fn explain_bot(error: ForgeError) -> ForgeError {
     let repair = BotFailure::classify(&error).repair();
-    let _ = (
-        repair.purpose,
-        repair.reason,
-        repair.common_fixes,
-        repair.docs_url,
-        repair.repair_hint,
+    let base = ForgeError::machine_text(message_of(&error));
+    let visible = format!(
+        "{base} purpose: {}; reason: {}; common fixes: {}; docs_url: {}; repair_hint: {}",
+        repair.purpose, repair.reason, repair.common_fixes, repair.docs_url, repair.repair_hint
     );
-    error
+    rewrite(error, visible)
+}
+
+fn message_of(error: &ForgeError) -> &str {
+    match error {
+        ForgeError::NotFound(message)
+        | ForgeError::Conflict(message)
+        | ForgeError::Validation(message)
+        | ForgeError::Forbidden(message)
+        | ForgeError::BranchProtection(message)
+        | ForgeError::RepositoryArchived(message)
+        | ForgeError::Storage(message) => message,
+    }
+}
+
+fn rewrite(error: ForgeError, message: String) -> ForgeError {
+    match error {
+        ForgeError::NotFound(_) => ForgeError::NotFound(message),
+        ForgeError::Conflict(_) => ForgeError::Conflict(message),
+        ForgeError::Validation(_) => ForgeError::Validation(message),
+        ForgeError::Forbidden(_) => ForgeError::Forbidden(message),
+        ForgeError::BranchProtection(_) => ForgeError::BranchProtection(message),
+        ForgeError::RepositoryArchived(_) => ForgeError::RepositoryArchived(message),
+        ForgeError::Storage(_) => ForgeError::Storage(message),
+    }
+}
+
+impl ForgeError {
+    /// Machine code before a bot repair suffix (` purpose:`).
+    pub fn machine_text(message: &str) -> &str {
+        message
+            .split_once(" purpose:")
+            .map(|(head, _)| head)
+            .unwrap_or(message)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1513,9 +1547,16 @@ mod tests {
                 repair.common_fixes
             );
             assert_eq!(repair.docs_url, docs_url);
+            // `engine/bots.rs` is `mod core` via `#[path]` in `lib.rs`, then
+            // `mod bots`. The cargo filter is that module path.
+            let filter = module_path!()
+                .strip_prefix("jeryu_core::")
+                .expect("bot tests are in crate jeryu_core");
+            assert_eq!(filter, "core::bots::tests");
             assert!(
-                repair.repair_hint.contains("core::bots::tests"),
-                "{failure:?} repair_hint"
+                repair.repair_hint.contains(filter),
+                "{failure:?} repair_hint {:?} does not select {filter}",
+                repair.repair_hint
             );
             assert!(!repair.reason.contains("waitlist"));
             assert!(!repair.common_fixes.contains("jbk_"));
@@ -1564,10 +1605,108 @@ mod tests {
             BotFailure::classify(&ForgeError::Storage("read randomness: closed".to_string())),
             BotFailure::Storage
         );
-        assert_eq!(
-            explain_bot(ForgeError::Validation(INVALID.to_string())),
-            ForgeError::Validation(INVALID.to_string())
-        );
+    }
+
+    #[test]
+    fn explain_bot_returns_purpose_reason_and_repair_hint() {
+        let cases = [
+            (
+                ForgeError::Validation("display name may not exceed 80 characters".to_string()),
+                BotFailure::InvalidEnrollment,
+            ),
+            (
+                ForgeError::Validation(INVALID.to_string()),
+                BotFailure::InvalidCredential,
+            ),
+            (
+                ForgeError::Conflict("idempotency_conflict".to_string()),
+                BotFailure::Conflict,
+            ),
+            (
+                ForgeError::Forbidden("repo_not_granted".to_string()),
+                BotFailure::NotGranted,
+            ),
+            (
+                ForgeError::NotFound("bot missing".to_string()),
+                BotFailure::Missing,
+            ),
+            (
+                ForgeError::Storage("read randomness: closed".to_string()),
+                BotFailure::Storage,
+            ),
+        ];
+        for (error, failure) in cases {
+            let repair = failure.repair();
+            let returned = explain_bot(error.clone());
+            let shown = returned.to_string();
+            assert!(
+                shown.contains(repair.purpose),
+                "{failure:?} purpose missing from {shown}"
+            );
+            assert!(
+                shown.contains(repair.reason),
+                "{failure:?} reason missing from {shown}"
+            );
+            assert!(
+                shown.contains(repair.repair_hint),
+                "{failure:?} repair_hint missing from {shown}"
+            );
+            assert!(
+                shown.contains(repair.docs_url),
+                "{failure:?} docs_url missing from {shown}"
+            );
+            assert!(!shown.contains("jbk_"), "{shown}");
+            assert!(!shown.contains("jbr_"), "{shown}");
+            assert!(!shown.contains("eyJ"), "{shown}");
+            assert_ne!(returned, error);
+            assert_eq!(BotFailure::classify(&returned), failure);
+            let code = ForgeError::machine_text(message_of(&returned));
+            assert_eq!(code, ForgeError::machine_text(message_of(&error)));
+        }
+    }
+
+    #[test]
+    fn bot_repair_docs_urls_name_a_heading() {
+        const DOCS: &str = include_str!("../../../../docs/errors.md");
+        let headings: Vec<String> = DOCS
+            .lines()
+            .filter_map(|line| line.strip_prefix("## ").map(heading_anchor))
+            .collect();
+        for failure in [
+            BotFailure::InvalidEnrollment,
+            BotFailure::InvalidCredential,
+            BotFailure::Conflict,
+            BotFailure::NotGranted,
+            BotFailure::Missing,
+            BotFailure::Storage,
+        ] {
+            let docs_url = failure.repair().docs_url;
+            let anchor = docs_url
+                .rsplit_once('#')
+                .map(|(_, anchor)| anchor)
+                .unwrap_or("");
+            assert!(
+                headings.iter().any(|heading| heading == anchor),
+                "{docs_url} does not match a heading in docs/errors.md"
+            );
+        }
+    }
+
+    fn heading_anchor(title: &str) -> String {
+        let mut anchor = String::new();
+        let mut pending_hyphen = false;
+        for ch in title.chars() {
+            if ch.is_ascii_alphanumeric() {
+                if pending_hyphen && !anchor.is_empty() {
+                    anchor.push('-');
+                }
+                pending_hyphen = false;
+                anchor.push(ch.to_ascii_lowercase());
+            } else if ch == ' ' || ch == '-' {
+                pending_hyphen = true;
+            }
+        }
+        anchor
     }
 
     const PASSWORD: &str = "correct-horse-battery";
@@ -1662,7 +1801,9 @@ mod tests {
         match (unknown, wrong) {
             (Err(ForgeError::Validation(left)), Err(ForgeError::Validation(right))) => {
                 assert_eq!(left, right);
-                assert_eq!(left, INVALID);
+                assert_eq!(ForgeError::machine_text(&left), INVALID);
+                assert!(left.contains("purpose:"));
+                assert!(left.contains("repair_hint:"));
             }
             other => panic!("expected matching validation errors, got {other:?}"),
         }
@@ -1739,7 +1880,7 @@ mod tests {
         };
         assert!(matches!(
             core.authorize_bot(&other),
-            Err(ForgeError::Forbidden(code)) if code == "repo_not_granted"
+            Err(ForgeError::Forbidden(code)) if ForgeError::machine_text(&code) == "repo_not_granted"
         ));
         core.grant_repo_access("alice", "alice", "alice", "other", RepoAccessLevel::Read)
             .unwrap();
@@ -1762,7 +1903,7 @@ mod tests {
         };
         assert!(matches!(
             core.authorize_bot(&listed_other),
-            Err(ForgeError::Forbidden(code)) if code == "repo_not_granted"
+            Err(ForgeError::Forbidden(code)) if ForgeError::machine_text(&code) == "repo_not_granted"
         ));
 
         let task_session = core
@@ -1792,7 +1933,7 @@ mod tests {
         };
         assert!(matches!(
             core.authorize_bot(&wrong_task),
-            Err(ForgeError::Forbidden(code)) if code == "task_not_granted"
+            Err(ForgeError::Forbidden(code)) if ForgeError::machine_text(&code) == "task_not_granted"
         ));
 
         let roster = core
@@ -2012,16 +2153,16 @@ mod tests {
         };
         assert!(matches!(
             core.authorize_bot(&call("secret", BotEffect::Write)),
-            Err(ForgeError::Forbidden(code)) if code == "repo_not_granted"
+            Err(ForgeError::Forbidden(code)) if ForgeError::machine_text(&code) == "repo_not_granted"
         ));
         assert!(matches!(
             core.authorize_bot(&call("secret", BotEffect::Read)),
-            Err(ForgeError::Forbidden(code)) if code == "repo_not_granted"
+            Err(ForgeError::Forbidden(code)) if ForgeError::machine_text(&code) == "repo_not_granted"
         ));
         assert!(core.authorize_bot(&call("open", BotEffect::Read)).is_ok());
         assert!(matches!(
             core.authorize_bot(&call("open", BotEffect::Write)),
-            Err(ForgeError::Forbidden(code)) if code == "insufficient_scope"
+            Err(ForgeError::Forbidden(code)) if ForgeError::machine_text(&code) == "insufficient_scope"
         ));
         let hash = core
             .state
@@ -2045,7 +2186,7 @@ mod tests {
         core.force_bot_refresh_expired(&first.refresh_token);
         assert!(matches!(
             core.rotate_bot_refresh_token(&first.refresh_token),
-            Err(ForgeError::Validation(message)) if message == INVALID
+            Err(ForgeError::Validation(message)) if ForgeError::machine_text(&message) == INVALID
         ));
         let renewed = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
@@ -2423,7 +2564,7 @@ mod tests {
         ] {
             assert!(matches!(
                 core.exchange_bot_enrollment_key(key),
-                Err(ForgeError::Validation(message)) if message == INVALID
+                Err(ForgeError::Validation(message)) if ForgeError::machine_text(&message) == INVALID
             ));
         }
 
@@ -2514,12 +2655,12 @@ mod tests {
         pull_call.repo = "other".to_string();
         assert!(matches!(
             core.authorize_bot(&pull_call),
-            Err(ForgeError::Forbidden(code)) if code == "repo_not_granted"
+            Err(ForgeError::Forbidden(code)) if ForgeError::machine_text(&code) == "repo_not_granted"
         ));
         pull_call.effect = BotEffect::Read;
         assert!(matches!(
             core.authorize_bot(&pull_call),
-            Err(ForgeError::Forbidden(code)) if code == "repo_not_granted"
+            Err(ForgeError::Forbidden(code)) if ForgeError::machine_text(&code) == "repo_not_granted"
         ));
         let mut branch_call = BotCall {
             bot_id: branch_session.bot.id,
@@ -2535,13 +2676,13 @@ mod tests {
         branch_call.task_id = Some("main".to_string());
         assert!(matches!(
             core.authorize_bot(&branch_call),
-            Err(ForgeError::Forbidden(code)) if code == "task_not_granted"
+            Err(ForgeError::Forbidden(code)) if ForgeError::machine_text(&code) == "task_not_granted"
         ));
         branch_call.task_kind = None;
         branch_call.task_id = None;
         assert!(matches!(
             core.authorize_bot(&branch_call),
-            Err(ForgeError::Forbidden(code)) if code == "task_not_granted"
+            Err(ForgeError::Forbidden(code)) if ForgeError::machine_text(&code) == "task_not_granted"
         ));
         let _ = issue;
 
@@ -2834,7 +2975,7 @@ mod tests {
         });
         assert!(matches!(
             denied,
-            Err(ForgeError::Forbidden(code)) if code == "repo_not_granted"
+            Err(ForgeError::Forbidden(code)) if ForgeError::machine_text(&code) == "repo_not_granted"
         ));
         let renewed = core
             .rotate_bot_refresh_token(&session.refresh_token)
