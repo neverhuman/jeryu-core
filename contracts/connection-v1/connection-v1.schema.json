@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jeryu.dev/contracts/connection-v1.schema.json",
+  "title": "JeRyu connection-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["document", "body"],
+  "properties": {
+    "document": {
+      "enum": [
+        "provider-connection",
+        "mode-qualification",
+        "connection-binding",
+        "gateway-capability",
+        "upstream-allowlist",
+        "relay-error"
+      ]
+    },
+    "body": true
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"document": {"const": "provider-connection"}}, "required": ["document"]},
+      "then": {"properties": {"body": {"$ref": "#/$defs/providerConnection"}}}
+    },
+    {
+      "if": {"properties": {"document": {"const": "mode-qualification"}}, "required": ["document"]},
+      "then": {"properties": {"body": {"$ref": "#/$defs/modeQualification"}}}
+    },
+    {
+      "if": {"properties": {"document": {"const": "connection-binding"}}, "required": ["document"]},
+      "then": {"properties": {"body": {"$ref": "#/$defs/connectionBinding"}}}
+    },
+    {
+      "if": {"properties": {"document": {"const": "gateway-capability"}}, "required": ["document"]},
+      "then": {"properties": {"body": {"$ref": "#/$defs/gatewayCapability"}}}
+    },
+    {
+      "if": {"properties": {"document": {"const": "upstream-allowlist"}}, "required": ["document"]},
+      "then": {"properties": {"body": {"$ref": "#/$defs/upstreamAllowlist"}}}
+    },
+    {
+      "if": {"properties": {"document": {"const": "relay-error"}}, "required": ["document"]},
+      "then": {"properties": {"body": {"$ref": "#/$defs/relayError"}}}
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9]([A-Za-z0-9._:/-]*[A-Za-z0-9])?$"
+    },
+    "ownerId": {
+      "type": "string",
+      "minLength": 6,
+      "maxLength": 128,
+      "pattern": "^(user|service)/[A-Za-z0-9]([A-Za-z0-9._:-]*[A-Za-z0-9])?$"
+    },
+    "provider": {"enum": ["claude", "codex", "grok"]},
+    "mode": {"enum": ["gateway_helper", "qualified_ram_token"]},
+    "ownerKind": {"enum": ["user", "service_account"]},
+    "credentialKind": {"enum": ["oauth_refresh", "api_key"]},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "unixMillis": {"type": "integer", "minimum": 1},
+    "generation": {"type": "integer", "minimum": 1},
+    "hexSignature": {"type": "string", "pattern": "^[a-f0-9]{128}$"},
+    "errorCode": {
+      "enum": [
+        "provider_not_connected",
+        "connection_generation_stale",
+        "connection_owner_mismatch",
+        "provider_mode_disabled",
+        "provider_mode_unqualified",
+        "helper_required",
+        "ram_token_not_permitted",
+        "capability_expired",
+        "capability_audience_mismatch",
+        "upstream_host_denied",
+        "refresh_persist_failed",
+        "provider_unknown",
+        "lease_binding_mismatch",
+        "connection_busy",
+        "guest_authorization_rejected"
+      ]
+    },
+    "providerConnection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "connection_id",
+        "connection_generation",
+        "provider",
+        "mode",
+        "credential_kind",
+        "owner_kind",
+        "owner_id",
+        "provider_account",
+        "state"
+      ],
+      "properties": {
+        "connection_id": {"$ref": "#/$defs/id"},
+        "connection_generation": {"$ref": "#/$defs/generation"},
+        "provider": {"$ref": "#/$defs/provider"},
+        "mode": {"$ref": "#/$defs/mode"},
+        "credential_kind": {"$ref": "#/$defs/credentialKind"},
+        "owner_kind": {"$ref": "#/$defs/ownerKind"},
+        "owner_id": {"$ref": "#/$defs/ownerId"},
+        "provider_account": {"$ref": "#/$defs/id"},
+        "state": {"enum": ["pending", "connected", "disconnected"]}
+      }
+    },
+    "modeQualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "mode",
+        "qualified",
+        "helper_unsupported",
+        "leak_scan",
+        "qualification_digest",
+        "max_access_ttl_seconds"
+      ],
+      "properties": {
+        "provider": {"$ref": "#/$defs/provider"},
+        "mode": {"const": "qualified_ram_token"},
+        "qualified": {"type": "boolean"},
+        "helper_unsupported": {"type": "boolean"},
+        "leak_scan": {"const": true},
+        "qualification_digest": {"$ref": "#/$defs/digest"},
+        "max_access_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 900}
+      }
+    },
+    "connectionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "connection_id", "connection_generation", "mode"],
+      "properties": {
+        "provider": {"$ref": "#/$defs/provider"},
+        "connection_id": {"$ref": "#/$defs/id"},
+        "connection_generation": {"$ref": "#/$defs/generation"},
+        "mode": {"$ref": "#/$defs/mode"}
+      }
+    },
+    "gatewayCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability_id",
+        "connection_id",
+        "connection_generation",
+        "provider",
+        "mode",
+        "owner_kind",
+        "owner_id",
+        "session_id",
+        "session_generation",
+        "lease_id",
+        "lease_epoch",
+        "audience",
+        "issued_at_unix_millis",
+        "expires_at_unix_millis",
+        "signature"
+      ],
+      "properties": {
+        "capability_id": {"$ref": "#/$defs/id"},
+        "connection_id": {"$ref": "#/$defs/id"},
+        "connection_generation": {"$ref": "#/$defs/generation"},
+        "provider": {"$ref": "#/$defs/provider"},
+        "mode": {"$ref": "#/$defs/mode"},
+        "owner_kind": {"$ref": "#/$defs/ownerKind"},
+        "owner_id": {"$ref": "#/$defs/ownerId"},
+        "session_id": {"$ref": "#/$defs/id"},
+        "session_generation": {"$ref": "#/$defs/generation"},
+        "lease_id": {"$ref": "#/$defs/id"},
+        "lease_epoch": {"$ref": "#/$defs/generation"},
+        "audience": {"const": "jeryu.gateway"},
+        "issued_at_unix_millis": {"$ref": "#/$defs/unixMillis"},
+        "expires_at_unix_millis": {"$ref": "#/$defs/unixMillis"},
+        "signature": {"$ref": "#/$defs/hexSignature"}
+      }
+    },
+    "upstreamAllowlist": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claude", "codex", "grok"],
+      "properties": {
+        "claude": {"const": ["api.anthropic.com:443"]},
+        "codex": {"const": ["api.openai.com:443"]},
+        "grok": {"const": ["api.x.ai:443", "us.api.x.ai:443"]}
+      }
+    },
+    "relayError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["error"],
+      "properties": {
+        "error": {"$ref": "#/$defs/errorCode"},
+        "connection_id": {"$ref": "#/$defs/id"},
+        "connection_generation": {"$ref": "#/$defs/generation"},
+        "session_id": {"$ref": "#/$defs/id"}
+      }
+    }
+  }
+}

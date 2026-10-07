@@ -1,0 +1,6 @@
+# launch-inventory.allow — lane A. Owners review every change.
+# Six tab-separated fields: path, rule, class, owner, expires, reason.
+# debt + M6 hides a finding only while the script is report-only.
+# not-agent + permanent hides a finding in report-only and in --enforce.
+# A new finding needs a reviewed row in the same change. Milestone M6 passes --enforce.
+# This commit of jeryu-core has no managed-launch findings.
