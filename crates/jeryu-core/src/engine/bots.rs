@@ -24,6 +24,8 @@ const REFRESH_TTL_HOURS: i64 = 12;
 const ROTATION_GRACE_MINUTES: i64 = 5;
 const OPERATION_TTL_HOURS: i64 = 24;
 const ACTIVITY_TTL_DAYS: i64 = 90;
+const ACTIVITY_COALESCE_SECS: i64 = 60;
+const ACTIVITY_CAP: usize = 500;
 const MAX_REPOS: usize = 100;
 const MAX_LIVE_REFRESH: usize = 5;
 const INVALID: &str = "invalid bot credential";
@@ -195,6 +197,18 @@ impl ForgeCore {
         state.bot_keys.insert(key.key_id.clone(), key);
         state.bots.insert(bot.id, bot.clone());
         self.persist_after_mutation(&mut state, previous)?;
+        let subject = format!("{}/{}", bot.owner, bot.slug);
+        let bot_id = bot.id;
+        drop(state);
+        self.record_bot_audit(
+            &account.login,
+            "bot.enroll",
+            &subject,
+            "completed",
+            bot_id,
+            Some(&key_id),
+            None,
+        )?;
         Ok(BotEnrollment {
             bot: BotSummary::from(&bot),
             key_id,
@@ -301,6 +315,17 @@ impl ForgeCore {
         let summary = BotSummary::from(&bot);
         state.bots.insert(bot_id, bot);
         self.persist_after_mutation(&mut state, previous)?;
+        let subject = format!("{}/{}", summary.owner, summary.slug);
+        drop(state);
+        self.record_bot_audit(
+            actor,
+            "bot.rotate",
+            &subject,
+            "completed",
+            bot_id,
+            Some(&key_id),
+            None,
+        )?;
         Ok(BotEnrollment {
             bot: summary,
             key_id,
@@ -316,6 +341,7 @@ impl ForgeCore {
         let now = Utc::now();
         let mut state = self.state.write();
         let mut bot = owned_bot(&state, actor, bot_id)?;
+        let key_id = live_key_id(&state, bot_id);
         let previous = state.clone();
         bot.status = BotStatus::Revoked;
         bot.credential_generation = bot.credential_generation.saturating_add(1);
@@ -329,6 +355,17 @@ impl ForgeCore {
         }
         state.bot_refresh.retain(|_, token| token.bot_id != bot_id);
         self.persist_after_mutation(&mut state, previous)?;
+        let subject = format!("{}/{}", summary.owner, summary.slug);
+        drop(state);
+        self.record_bot_audit(
+            actor,
+            "bot.revoke",
+            &subject,
+            "completed",
+            bot_id,
+            key_id.as_deref(),
+            None,
+        )?;
         Ok(summary)
     }
 
@@ -376,6 +413,20 @@ impl ForgeCore {
             stored.updated_at = now;
         }
         self.persist_after_mutation(&mut state, previous)?;
+        let subject = format!("{}/{}", bot.owner, bot.slug);
+        let bot_id = bot.id;
+        let audit_key = key.key_id.clone();
+        let actor = bot.owner.clone();
+        drop(state);
+        self.record_bot_audit(
+            &actor,
+            "bot.token.exchange",
+            &subject,
+            "completed",
+            bot_id,
+            Some(&audit_key),
+            None,
+        )?;
         Ok(session)
     }
 
@@ -389,9 +440,25 @@ impl ForgeCore {
         // Reuse of a token that was already rotated revokes the family. An
         // expired token is only an invalid credential.
         if existing.used_at.is_some() {
+            let bot_id = existing.bot_id;
+            let key_id = existing.key_id.clone();
+            let (actor, subject) = match state.bots.get(&bot_id) {
+                Some(bot) => (bot.owner.clone(), format!("{}/{}", bot.owner, bot.slug)),
+                None => ("bot".into(), bot_id.to_string()),
+            };
             let previous = state.clone();
-            revoke_refresh_family(&mut state, existing.bot_id, now);
+            revoke_refresh_family(&mut state, bot_id, now);
             self.persist_after_mutation(&mut state, previous)?;
+            drop(state);
+            self.record_bot_audit(
+                &actor,
+                "bot.refresh.reuse",
+                &subject,
+                "failed",
+                bot_id,
+                Some(&key_id),
+                None,
+            )?;
             return invalid();
         }
         if existing.expires_at <= now {
@@ -473,32 +540,34 @@ impl ForgeCore {
         let _ = key;
         let can_read = owner_grant_allows(&state, &bot.owner, &call.owner, &call.repo, false);
         let can_write = owner_grant_allows(&state, &bot.owner, &call.owner, &call.repo, true);
-        if call.effect == BotEffect::Write {
-            if !can_write {
-                let code = if can_read {
-                    "insufficient_scope"
-                } else {
-                    "repo_not_granted"
-                };
-                return Err(ForgeError::Forbidden(code.to_string()));
-            }
-        } else if !can_read {
-            return Err(ForgeError::Forbidden("repo_not_granted".to_string()));
-        }
-        if !reach_allows(&bot.reach, call) {
-            let wrong_task = match &bot.reach {
-                BotReach::Task { repo, .. } => {
-                    call.effect == BotEffect::Write
-                        && repo.owner == call.owner
-                        && repo.name == call.repo
-                }
-                _ => false,
-            };
-            let code = if wrong_task {
-                "task_not_granted"
+        let denied = if call.effect == BotEffect::Write && !can_write {
+            Some(if can_read {
+                "insufficient_scope"
             } else {
                 "repo_not_granted"
-            };
+            })
+        } else if call.effect == BotEffect::Read && !can_read {
+            Some("repo_not_granted")
+        } else if !reach_allows(&bot.reach, call) {
+            Some(reach_denial_code(&bot.reach, call))
+        } else {
+            None
+        };
+        if let Some(code) = denied {
+            let owner = bot.owner.clone();
+            let slug = bot.slug.clone();
+            let bot_id = bot.id;
+            let key_id = call.key_id.clone();
+            drop(state);
+            self.record_bot_audit(
+                &owner,
+                "bot.authorize",
+                &format!("{owner}/{slug}"),
+                "failed",
+                bot_id,
+                Some(&key_id),
+                Some(code),
+            )?;
             return Err(ForgeError::Forbidden(code.to_string()));
         }
         Ok(BotSummary::from(bot))
@@ -516,18 +585,27 @@ impl ForgeCore {
         let Some(bot) = state.bots.get(&bot_id).cloned() else {
             return Err(ForgeError::NotFound(format!("bot {bot_id}")));
         };
-        let previous = state.clone();
         if observation.heartbeat {
+            // The window is anchored on the last persisted heartbeat. Moving
+            // that timestamp without a write would keep every later beat inside
+            // the window.
+            if bot
+                .last_heartbeat
+                .is_some_and(|previous| within_coalesce(now, previous))
+            {
+                return Ok(());
+            }
+            let previous = state.clone();
             if let Some(stored) = state.bots.get_mut(&bot_id) {
                 stored.last_heartbeat = Some(now);
-                stored.updated_at = now;
             }
-        } else {
+            return self.persist_after_mutation(&mut state, previous);
+        }
+        let same_outcome = bot.last_outcome.as_deref() == Some(observation.outcome.as_str());
+        if same_outcome && within_coalesce(now, bot.updated_at) {
             if let Some(stored) = state.bots.get_mut(&bot_id) {
-                stored.last_action = Some(observation.action.clone());
-                stored.last_outcome = Some(observation.outcome.clone());
-                stored.last_repo = observation.repo.clone();
-                stored.updated_at = now;
+                stored.last_action = Some(observation.action);
+                stored.last_repo = observation.repo;
                 if observation.success {
                     stored.last_successful_access = Some(now);
                     stored.last_auth = Some(now);
@@ -536,22 +614,38 @@ impl ForgeCore {
                     stored.last_mutation = Some(now);
                 }
             }
-            state.bot_activity.push(BotActivityEvent {
-                id: Uuid::new_v4(),
-                bot_id,
-                key_id: observation.key_id,
-                repo: observation.repo,
-                session_id: observation.session_id,
-                action: observation.action,
-                outcome: observation.outcome,
-                scope: observation.scope,
-                created_at: now,
-            });
-            let cutoff = now - Duration::days(ACTIVITY_TTL_DAYS);
-            state
-                .bot_activity
-                .retain(|event| event.bot_id != bot.id || event.created_at >= cutoff);
+            return Ok(());
         }
+        let previous = state.clone();
+        if let Some(stored) = state.bots.get_mut(&bot_id) {
+            stored.last_action = Some(observation.action.clone());
+            stored.last_outcome = Some(observation.outcome.clone());
+            stored.last_repo = observation.repo.clone();
+            stored.updated_at = now;
+            if observation.success {
+                stored.last_successful_access = Some(now);
+                stored.last_auth = Some(now);
+            }
+            if observation.mutation {
+                stored.last_mutation = Some(now);
+            }
+        }
+        state.bot_activity.push(BotActivityEvent {
+            id: Uuid::new_v4(),
+            bot_id,
+            key_id: observation.key_id,
+            repo: observation.repo,
+            session_id: observation.session_id,
+            action: observation.action,
+            outcome: observation.outcome,
+            scope: observation.scope,
+            created_at: now,
+        });
+        let cutoff = now - Duration::days(ACTIVITY_TTL_DAYS);
+        state
+            .bot_activity
+            .retain(|event| event.bot_id != bot.id || event.created_at >= cutoff);
+        cap_bot_activity(&mut state.bot_activity, bot.id);
         self.persist_after_mutation(&mut state, previous)
     }
 
@@ -682,6 +776,19 @@ impl ForgeCore {
     }
 
     #[cfg(test)]
+    pub fn force_bot_activity_window_elapsed(&self, bot_id: Uuid) {
+        let mut state = self.state.write();
+        let Some(bot) = state.bots.get_mut(&bot_id) else {
+            return;
+        };
+        let shift = Duration::seconds(ACTIVITY_COALESCE_SECS + 1);
+        bot.updated_at -= shift;
+        if let Some(beat) = bot.last_heartbeat.as_mut() {
+            *beat -= shift;
+        }
+    }
+
+    #[cfg(test)]
     pub fn force_bot_refresh_expired(&self, refresh_token: &str) {
         let hash = token_hash(refresh_token);
         let mut state = self.state.write();
@@ -696,13 +803,68 @@ impl ForgeCore {
         if bot.status == BotStatus::Revoked {
             return Err(ForgeError::NotFound(format!("bot {bot_id}")));
         }
+        let key_id = live_key_id(&state, bot_id);
         let previous = state.clone();
         bot.status = status;
         bot.updated_at = Utc::now();
         let summary = BotSummary::from(&bot);
         state.bots.insert(bot_id, bot);
         self.persist_after_mutation(&mut state, previous)?;
+        let subject = format!("{}/{}", summary.owner, summary.slug);
+        let action = match status {
+            BotStatus::Suspended => "bot.suspend",
+            BotStatus::Revoked => "bot.revoke",
+            BotStatus::Active => "bot.activate",
+        };
+        drop(state);
+        self.record_bot_audit(
+            actor,
+            action,
+            &subject,
+            "completed",
+            bot_id,
+            key_id.as_deref(),
+            None,
+        )?;
         Ok(summary)
+    }
+
+    fn record_bot_audit(
+        &self,
+        actor: &str,
+        action: &str,
+        subject: &str,
+        phase: &str,
+        bot_id: Uuid,
+        key_id: Option<&str>,
+        code: Option<&str>,
+    ) -> Result<()> {
+        let mut detail = serde_json::Map::new();
+        detail.insert(
+            "bot_id".to_string(),
+            serde_json::Value::String(bot_id.to_string()),
+        );
+        if let Some(key_id) = key_id {
+            detail.insert(
+                "key_id".to_string(),
+                serde_json::Value::String(key_id.to_string()),
+            );
+        }
+        if let Some(code) = code {
+            detail.insert(
+                "code".to_string(),
+                serde_json::Value::String(code.to_string()),
+            );
+        }
+        let detail = serde_json::Value::Object(detail);
+        let rendered = detail.to_string();
+        if rendered.contains("jbk_") || rendered.contains("jbr_") || rendered.contains("eyJ") {
+            return Err(ForgeError::Validation(
+                "audit detail must not contain a bot credential".to_string(),
+            ));
+        }
+        self.append_audit_as(actor, action, subject, phase, detail)?;
+        Ok(())
     }
 
     fn active_account(&self, actor: &str) -> Result<AccountSummary> {
@@ -869,6 +1031,49 @@ fn bot_account_matches(state: &super::State, bot: &BotRecord) -> bool {
     state.accounts.get(&bot.owner).is_some_and(|account| {
         account.status.permits_authentication() && account.auth_epoch == bot.auth_epoch
     })
+}
+
+fn within_coalesce(now: DateTime<Utc>, then: DateTime<Utc>) -> bool {
+    now.signed_duration_since(then) < Duration::seconds(ACTIVITY_COALESCE_SECS)
+}
+
+fn live_key_id(state: &super::State, bot_id: Uuid) -> Option<String> {
+    state
+        .bot_keys
+        .values()
+        .filter(|key| key.bot_id == bot_id && key.revoked_at.is_none())
+        .max_by_key(|key| key.created_at)
+        .map(|key| key.key_id.clone())
+}
+
+/// Events are appended in time order, so the prefix for one bot is the oldest.
+fn cap_bot_activity(events: &mut Vec<BotActivityEvent>, bot_id: Uuid) {
+    let count = events.iter().filter(|event| event.bot_id == bot_id).count();
+    if count <= ACTIVITY_CAP {
+        return;
+    }
+    let mut drop_remaining = count - ACTIVITY_CAP;
+    events.retain(|event| {
+        if event.bot_id != bot_id || drop_remaining == 0 {
+            return true;
+        }
+        drop_remaining -= 1;
+        false
+    });
+}
+
+fn reach_denial_code(reach: &BotReach, call: &BotCall) -> &'static str {
+    let wrong_task = match reach {
+        BotReach::Task { repo, .. } => {
+            call.effect == BotEffect::Write && repo.owner == call.owner && repo.name == call.repo
+        }
+        _ => false,
+    };
+    if wrong_task {
+        "task_not_granted"
+    } else {
+        "repo_not_granted"
+    }
 }
 
 fn observation_contains_secret(observation: &BotObservation) -> bool {
@@ -2261,5 +2466,174 @@ mod tests {
                 .unwrap(),
             BotOperationGate::Replay { .. }
         ));
+    }
+
+    fn observation(key_id: &str, action: &str, outcome: &str) -> BotObservation {
+        BotObservation {
+            key_id: key_id.to_string(),
+            action: action.to_string(),
+            outcome: outcome.to_string(),
+            scope: "general".to_string(),
+            repo: None,
+            session_id: None,
+            success: true,
+            mutation: false,
+            heartbeat: false,
+        }
+    }
+
+    #[test]
+    fn activity_coalesces_until_the_outcome_changes_or_the_window_elapses() {
+        let (core, _) = fixture();
+        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let id = enrolled.bot.id;
+        core.note_bot_observation(id, observation(&enrolled.key_id, "whoami", "ok"))
+            .unwrap();
+        core.note_bot_observation(id, observation(&enrolled.key_id, "whoami-again", "ok"))
+            .unwrap();
+        let events = core.list_bot_activity("alice", id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, "whoami");
+        assert_eq!(
+            core.list_account_bots("alice").unwrap()[0]
+                .last_action
+                .as_deref(),
+            Some("whoami-again")
+        );
+        core.note_bot_observation(id, observation(&enrolled.key_id, "whoami", "denied"))
+            .unwrap();
+        assert_eq!(core.list_bot_activity("alice", id).unwrap().len(), 2);
+        core.force_bot_activity_window_elapsed(id);
+        core.note_bot_observation(id, observation(&enrolled.key_id, "whoami", "denied"))
+            .unwrap();
+        assert_eq!(core.list_bot_activity("alice", id).unwrap().len(), 3);
+
+        let beat = BotObservation {
+            action: "ping".to_string(),
+            outcome: "alive".to_string(),
+            success: false,
+            heartbeat: true,
+            ..observation(&enrolled.key_id, "ping", "alive")
+        };
+        core.note_bot_observation(id, beat.clone()).unwrap();
+        let first = core.list_account_bots("alice").unwrap()[0].last_heartbeat;
+        core.note_bot_observation(id, beat.clone()).unwrap();
+        assert_eq!(
+            core.list_account_bots("alice").unwrap()[0].last_heartbeat,
+            first
+        );
+        core.force_bot_activity_window_elapsed(id);
+        core.note_bot_observation(id, beat).unwrap();
+        assert_ne!(
+            core.list_account_bots("alice").unwrap()[0].last_heartbeat,
+            first
+        );
+    }
+
+    #[test]
+    fn activity_keeps_the_newest_five_hundred_events_for_that_bot() {
+        let (core, _) = fixture();
+        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let other = enroll(&core, "nova", BotReach::General);
+        core.note_bot_observation(other.bot.id, observation(&other.key_id, "stay", "ok"))
+            .unwrap();
+        for index in 0..=ACTIVITY_CAP {
+            core.note_bot_observation(
+                enrolled.bot.id,
+                observation(&enrolled.key_id, "edit", &format!("n{index}")),
+            )
+            .unwrap();
+        }
+        let events = core.list_bot_activity("alice", enrolled.bot.id).unwrap();
+        assert_eq!(events.len(), ACTIVITY_CAP);
+        assert!(events.iter().all(|event| event.outcome != "n0"));
+        let newest = format!("n{ACTIVITY_CAP}");
+        assert!(events.iter().any(|event| event.outcome == newest));
+        assert_eq!(
+            core.list_bot_activity("alice", other.bot.id).unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn bot_lifecycle_audits_actor_and_ids_without_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forge.sqlite");
+        let core = ForgeCore::open_sqlite(&path).unwrap();
+        core.create_account("alice", PASSWORD, UserRole::User)
+            .unwrap();
+        for name in ["widgets", "other"] {
+            core.create_repository(
+                "alice",
+                CreateRepositoryRequest {
+                    name: name.to_string(),
+                    private: true,
+                    description: None,
+                    default_branch: Some("main".to_string()),
+                },
+            )
+            .unwrap();
+        }
+        core.grant_repo_access("alice", "alice", "alice", "widgets", RepoAccessLevel::Write)
+            .unwrap();
+        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let session = core
+            .exchange_bot_enrollment_key(&enrolled.enrollment_key)
+            .unwrap();
+        let rotated = core.rotate_bot_key("alice", enrolled.bot.id).unwrap();
+        let denied = core.authorize_bot(&BotCall {
+            bot_id: session.bot.id,
+            generation: session.generation,
+            key_id: session.key_id.clone(),
+            owner: "alice".to_string(),
+            repo: "other".to_string(),
+            effect: BotEffect::Write,
+            task_kind: None,
+            task_id: None,
+        });
+        assert!(matches!(
+            denied,
+            Err(ForgeError::Forbidden(code)) if code == "repo_not_granted"
+        ));
+        let renewed = core
+            .rotate_bot_refresh_token(&session.refresh_token)
+            .unwrap();
+        assert!(
+            core.rotate_bot_refresh_token(&session.refresh_token)
+                .is_err()
+        );
+        core.suspend_bot("alice", enrolled.bot.id).unwrap();
+        core.revoke_bot("alice", enrolled.bot.id).unwrap();
+
+        let trail = core.list_audit("alice/atlas").unwrap();
+        let rendered = format!("{trail:?}");
+        assert!(!rendered.contains(&enrolled.enrollment_key));
+        assert!(!rendered.contains(&rotated.enrollment_key));
+        assert!(!rendered.contains(&session.refresh_token));
+        assert!(!rendered.contains(&renewed.refresh_token));
+        assert!(!rendered.contains("jbk_"));
+        assert!(!rendered.contains("jbr_"));
+        let actions: Vec<&str> = trail.iter().map(|entry| entry.action.as_str()).collect();
+        for action in [
+            "bot.enroll",
+            "bot.token.exchange",
+            "bot.rotate",
+            "bot.authorize",
+            "bot.refresh.reuse",
+            "bot.suspend",
+            "bot.revoke",
+        ] {
+            assert!(actions.contains(&action), "missing {action} in {actions:?}");
+        }
+        let denial = trail
+            .iter()
+            .find(|entry| entry.action == "bot.authorize")
+            .unwrap();
+        assert_eq!(denial.actor, "alice");
+        assert_eq!(denial.phase, "failed");
+        assert_eq!(denial.detail["code"], "repo_not_granted");
+        assert_eq!(denial.detail["bot_id"], enrolled.bot.id.to_string());
+        assert_eq!(denial.detail["key_id"], session.key_id);
+        assert!(trail.iter().all(|entry| entry.actor == "alice"));
     }
 }

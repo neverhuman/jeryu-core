@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- Account Grokbot and Musebot credentials record lifecycle audit rows for
+  enroll, key rotation, suspend, revoke, enrollment-key exchange, refresh
+  reuse, and authorization denial. Each row names the actor, bot id, and key
+  id, and never the enrollment key or refresh token. Activity keeps the newest
+  500 events for each bot. The same outcome is stored at most once a minute
+  unless the outcome changes; a heartbeat is stored at most once a minute.
 - Branch protection carries its own `strict` (head up to date with base) flag,
   separate from `required_linear_history`, and `SetBranchProtectionRequest`
   requires `required_status_checks`, `required_approving_review_count` and
