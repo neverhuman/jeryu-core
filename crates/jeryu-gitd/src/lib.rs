@@ -34,4 +34,4 @@ pub use config::GitdConfig;
 pub use error::{GitdError, Result};
 pub use push::PushObserver;
 pub use refs::{GitRef, MergeOutcome, RefService};
-pub use repo::{RepoId, RepoManager, RepoRedirects};
+pub use repo::{HeadReconcile, RepoId, RepoManager, RepoRedirects};

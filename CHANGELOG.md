@@ -1,6 +1,19 @@
 # Changelog
 
 ## Unreleased
+- A repository's default branch now also decides the bare repository's `HEAD`.
+  `ForgeCore::set_repository_default_branch` points `HEAD` at
+  `refs/heads/<branch>` through `RepoBranches`, and setting the branch the forge
+  already stores repairs a `HEAD` that disagrees instead of returning early.
+  `ForgeCore::reconcile_repository_heads` is the repair pass over every
+  repository: it fixes each `HEAD` whose default branch exists, leaves one whose
+  default branch does not and reports it, and never creates a branch.
+  `RepoManager` gained `head_branch`, `set_head_branch`, `reconcile_head`,
+  `branch_exists` and `create_bare_with_head`, so a created repository starts
+  with `HEAD` on its default branch; an import points `HEAD` at the source's
+  default branch. A repository whose `HEAD` named a branch that was never
+  pushed advertised no `HEAD` at all, so `git clone` called it empty — the same
+  answer as a missing read grant.
 - A repository's bot roster lists a general-reach Grokbot or Musebot only when
   its owner has an explicit grant on that repository; a public read no longer
   puts every general bot on every public roster. Roster rows drop the last

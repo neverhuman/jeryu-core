@@ -226,6 +226,50 @@ pub trait RepoPushHistory: std::fmt::Debug + Send + Sync {
 pub trait RepoBranches: std::fmt::Debug + Send + Sync {
     /// `true` when `refs/heads/<branch>` exists in `owner/name`.
     fn branch_exists(&self, owner: &str, name: &str, branch: &str) -> Result<bool>;
+
+    /// Branch the bare repository's `HEAD` points at, or `None` when it is
+    /// detached, unreadable, or the repository has no bare storage.
+    ///
+    /// A `HEAD` naming a branch that does not exist makes git advertise no
+    /// `HEAD` at all, so a clone reports an empty repository; the forge repairs
+    /// that through [`Self::point_head_at`]. An implementation without git
+    /// storage keeps the metadata-only default: no `HEAD`, nothing to write.
+    fn head_branch(&self, owner: &str, name: &str) -> Result<Option<String>> {
+        let _ = (owner, name);
+        Ok(None)
+    }
+
+    /// Point the bare repository's `HEAD` at `refs/heads/<branch>`.
+    fn point_head_at(&self, owner: &str, name: &str, branch: &str) -> Result<()> {
+        let _ = (owner, name, branch);
+        Ok(())
+    }
+}
+
+/// What a [`ForgeCore::reconcile_repository_heads`] pass did to one repository.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HeadReconciled {
+    /// `HEAD` now points at the default branch; it named `previous` before.
+    Repaired {
+        /// Branch `HEAD` named before the repair, `None` when it had none.
+        previous: Option<String>,
+    },
+    /// The default branch does not exist in git storage, so `HEAD` was left
+    /// alone. The repository needs a human decision, not an invented branch.
+    DefaultBranchMissing,
+}
+
+/// One repository the reconcile pass touched or skipped, for the caller's log.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeadReconcileReport {
+    /// Repository owner.
+    pub owner: String,
+    /// Repository name.
+    pub name: String,
+    /// The repository's stored default branch.
+    pub default_branch: String,
+    /// What happened.
+    pub outcome: HeadReconciled,
 }
 
 /// Moves a repository's bare git directory on disk for a rename or transfer.

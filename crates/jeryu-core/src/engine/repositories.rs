@@ -6,7 +6,10 @@ use std::hash::Hash;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::{Counters, ForgeCore, RepoBranches, RepoPushHistory, require_name};
+use super::{
+    Counters, ForgeCore, HeadReconcileReport, HeadReconciled, RepoBranches, RepoPushHistory,
+    require_name,
+};
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
 
@@ -263,9 +266,14 @@ impl ForgeCore {
     /// Change the repository's default branch to an existing `branch`.
     ///
     /// The branch must exist in git storage (`branches`); a missing branch is
-    /// `NotFound`, a blank or unchanged one is `Validation`. The new default
-    /// branch receives the same automatic protection as on create (unless the
-    /// repository has opted out); rules on the previous default stay as-is.
+    /// `NotFound`, a blank one is `Validation`. The new default branch receives
+    /// the same automatic protection as on create (unless the repository has
+    /// opted out); rules on the previous default stay as-is.
+    ///
+    /// The bare repository's `HEAD` follows: it is pointed at
+    /// `refs/heads/<branch>` so `git ls-remote --symref` advertises it and a
+    /// clone checks it out. Setting the branch the repository already stores is
+    /// therefore not a no-op but the repair for a `HEAD` that disagrees.
     pub fn set_repository_default_branch(
         &self,
         owner: &str,
@@ -280,13 +288,19 @@ impl ForgeCore {
             ));
         }
         let current = self.canonical_repository(owner, repo)?;
-        if current.default_branch == branch {
-            return Ok(current);
-        }
+        // Git storage lives under the current slug, so a rename alias is
+        // resolved before anything reads or writes refs.
+        let (owner, repo) = (current.owner.as_str(), current.name.as_str());
         if !branches.branch_exists(owner, repo, branch)? {
             return Err(ForgeError::NotFound(format!(
                 "branch {branch} in repository {owner}/{repo}"
             )));
+        }
+        if branches.head_branch(owner, repo)?.as_deref() != Some(branch) {
+            branches.point_head_at(owner, repo, branch)?;
+        }
+        if current.default_branch == branch {
+            return Ok(current);
         }
         let mut state = self.state.write();
         let key = (owner.to_string(), repo.to_string());
@@ -301,6 +315,43 @@ impl ForgeCore {
         super::ensure_default_branch_protection(&mut state, &updated);
         self.persist_after_mutation(&mut state, previous)?;
         Ok(updated)
+    }
+
+    /// Point every repository's bare `HEAD` at its stored default branch.
+    ///
+    /// The repair pass for repositories whose `HEAD` still names the branch
+    /// `git init --bare` chose: those advertise no `HEAD`, so a clone of them
+    /// reports an empty repository and cannot be told from one the caller may
+    /// not read. A repository whose `HEAD` already agrees is left untouched and
+    /// not reported. A repository whose default branch does not exist in git
+    /// storage keeps its `HEAD` and is reported as
+    /// [`HeadReconciled::DefaultBranchMissing`] — the branch is never created.
+    /// Stored metadata is not changed either way; the caller logs the report.
+    pub fn reconcile_repository_heads(
+        &self,
+        branches: &dyn RepoBranches,
+    ) -> Result<Vec<HeadReconcileReport>> {
+        let mut reports = Vec::new();
+        for repo in self.list_repositories(None) {
+            let branch = repo.default_branch.as_str();
+            let outcome = if branches.branch_exists(&repo.owner, &repo.name, branch)? {
+                let previous = branches.head_branch(&repo.owner, &repo.name)?;
+                if previous.as_deref() == Some(branch) {
+                    continue;
+                }
+                branches.point_head_at(&repo.owner, &repo.name, branch)?;
+                HeadReconciled::Repaired { previous }
+            } else {
+                HeadReconciled::DefaultBranchMissing
+            };
+            reports.push(HeadReconcileReport {
+                owner: repo.owner.clone(),
+                name: repo.name.clone(),
+                default_branch: repo.default_branch.clone(),
+                outcome,
+            });
+        }
+        Ok(reports)
     }
 
     /// Opt `owner/repo` in or out of automatic default-branch protection.

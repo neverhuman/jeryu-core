@@ -46,6 +46,27 @@ impl Display for RepoId {
     }
 }
 
+/// Outcome of pointing a bare repository's `HEAD` at a branch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HeadReconcile {
+    /// `HEAD` already pointed at the branch; nothing was written.
+    AlreadySet,
+    /// `HEAD` now points at the branch. `previous` is the branch it named
+    /// before, `None` when it was detached or unreadable.
+    Repaired {
+        /// Branch `HEAD` named before the repair.
+        previous: Option<String>,
+    },
+    /// The branch does not exist in the repository, so `HEAD` was left as it
+    /// was. Report it; do not create the branch.
+    BranchMissing,
+}
+
+/// Fully qualified ref name of a branch.
+fn head_ref(branch: &str) -> String {
+    format!("refs/heads/{branch}")
+}
+
 /// Resolved repository on disk.
 #[derive(Clone, Debug)]
 pub struct Repository {
@@ -163,7 +184,22 @@ impl RepoManager {
     }
 
     /// Create a bare repository and install Phase 1 metadata.
+    ///
+    /// `HEAD` is whatever `git init` picks (`init.defaultBranch`), which is not
+    /// necessarily the branch the forge calls default; use
+    /// [`Self::create_bare_with_head`] when the default branch is known.
     pub fn create_bare(&self, id: &RepoId) -> Result<Repository> {
+        self.init_bare(id, None)
+    }
+
+    /// Create a bare repository whose `HEAD` already points at
+    /// `default_branch`, so a clone checks that branch out as soon as it has a
+    /// commit and `ls-remote --symref` advertises it.
+    pub fn create_bare_with_head(&self, id: &RepoId, default_branch: &str) -> Result<Repository> {
+        self.init_bare(id, Some(default_branch))
+    }
+
+    fn init_bare(&self, id: &RepoId, default_branch: Option<&str>) -> Result<Repository> {
         let repo = self.resolve(id)?;
         if repo.path.exists() {
             return Err(GitdError::InvalidInput(format!(
@@ -176,9 +212,75 @@ impl RepoManager {
             .ok_or_else(|| GitdError::InvalidPath("missing repository parent".to_string()))?;
         std::fs::create_dir_all(parent)?;
         let path_arg = repo.path.to_string_lossy().to_string();
-        run_capture(&self.config.git_bin, &["init", "--bare", &path_arg], None)?;
+        let mut args = vec!["init", "--bare"];
+        if let Some(branch) = default_branch {
+            crate::refs::validate_ref_name(&self.config.git_bin, &head_ref(branch))?;
+            args.push("--initial-branch");
+            args.push(branch);
+        }
+        args.push(&path_arg);
+        run_capture(&self.config.git_bin, &args, None)?;
         self.write_metadata(&repo)?;
         Ok(repo)
+    }
+
+    /// The branch `HEAD` points at, or `None` when `HEAD` is detached or
+    /// unreadable. The branch itself may not exist: a bare repository created
+    /// before its first push advertises no `HEAD` to `git ls-remote --symref`,
+    /// and a clone of it reports an empty repository.
+    pub fn head_branch(&self, repo: &Repository) -> Result<Option<String>> {
+        let head = match std::fs::read_to_string(repo.path.join("HEAD")) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        Ok(head
+            .trim()
+            .strip_prefix("ref: refs/heads/")
+            .map(str::to_string)
+            .filter(|branch| !branch.is_empty()))
+    }
+
+    /// Point `HEAD` at `refs/heads/<branch>` (`git symbolic-ref`). The branch
+    /// need not exist yet; [`Self::reconcile_head`] is the checked form.
+    pub fn set_head_branch(&self, repo: &Repository, branch: &str) -> Result<()> {
+        let target = head_ref(branch);
+        crate::refs::validate_ref_name(&self.config.git_bin, &target)?;
+        run_capture(
+            &self.config.git_bin,
+            &["symbolic-ref", "HEAD", &target],
+            Some(&repo.path),
+        )
+        .map(|_| ())
+    }
+
+    /// Make `HEAD` point at `branch` when the branch exists.
+    ///
+    /// This is the repair for a bare repository whose `HEAD` names a branch
+    /// that was never created (`git init --bare` leaves `master` behind while
+    /// the pushed branch is `main`): such a repository advertises no `HEAD`, so
+    /// a clone cannot tell it from one it may not read. A branch that does not
+    /// exist leaves `HEAD` alone — the caller logs
+    /// [`HeadReconcile::BranchMissing`] rather than creating the branch.
+    pub fn reconcile_head(&self, repo: &Repository, branch: &str) -> Result<HeadReconcile> {
+        let current = self.head_branch(repo)?;
+        if current.as_deref() == Some(branch) {
+            return Ok(HeadReconcile::AlreadySet);
+        }
+        if !self.branch_exists(repo, branch)? {
+            return Ok(HeadReconcile::BranchMissing);
+        }
+        self.set_head_branch(repo, branch)?;
+        Ok(HeadReconcile::Repaired { previous: current })
+    }
+
+    /// Whether `refs/heads/<branch>` resolves in `repo` (loose or packed).
+    pub fn branch_exists(&self, repo: &Repository, branch: &str) -> Result<bool> {
+        let out = std::process::Command::new(&self.config.git_bin)
+            .args(["show-ref", "--verify", "--quiet", &head_ref(branch)])
+            .current_dir(&repo.path)
+            .output()?;
+        Ok(out.status.success())
     }
 
     /// Open an existing repository.
@@ -342,5 +444,111 @@ impl Repository {
             return Err(GitdError::RepositoryArchived(self.id.to_string()));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::GitdConfig;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "{prefix}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        base
+    }
+
+    fn manager(root: &Path) -> RepoManager {
+        RepoManager::new(GitdConfig::new(root.to_path_buf()))
+    }
+
+    /// Commit an empty tree on `branch` so the branch exists.
+    fn commit_on(manager: &RepoManager, repo: &Repository, branch: &str) {
+        let git = &manager.config().git_bin;
+        let tree = run_capture(
+            git,
+            &["hash-object", "-t", "tree", "-w", "--stdin"],
+            Some(&repo.path),
+        )
+        .expect("write empty tree");
+        let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+        let commit = run_capture(git, &["commit-tree", &tree, "-m", "seed"], Some(&repo.path))
+            .expect("commit tree");
+        let commit = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+        run_capture(
+            git,
+            &["update-ref", &format!("refs/heads/{branch}"), &commit],
+            Some(&repo.path),
+        )
+        .expect("create branch");
+    }
+
+    #[test]
+    fn create_bare_with_head_points_head_at_the_default_branch() {
+        let base = temp_dir("jeryu-head-create");
+        let manager = manager(&base);
+        let id = RepoId::new("veox-ai", "ai-veox-www").expect("id");
+        let repo = manager
+            .create_bare_with_head(&id, "main")
+            .expect("create bare");
+        assert_eq!(
+            manager.head_branch(&repo).expect("read head").as_deref(),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn reconcile_head_repairs_a_head_naming_a_branch_that_never_existed() {
+        let base = temp_dir("jeryu-head-repair");
+        let manager = manager(&base);
+        let id = RepoId::new("veox-ai", "ai-veox-app").expect("id");
+        let repo = manager.create_bare(&id).expect("create bare");
+        // The import left HEAD on a branch that was never pushed; only `main`
+        // arrived, so git advertises no HEAD and a clone looks empty.
+        manager
+            .set_head_branch(&repo, "import-default")
+            .expect("set head");
+        commit_on(&manager, &repo, "main");
+
+        assert_eq!(
+            manager.reconcile_head(&repo, "main").expect("reconcile"),
+            HeadReconcile::Repaired {
+                previous: Some("import-default".to_string())
+            }
+        );
+        assert_eq!(
+            manager.head_branch(&repo).expect("read head").as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            manager.reconcile_head(&repo, "main").expect("reconcile"),
+            HeadReconcile::AlreadySet
+        );
+    }
+
+    #[test]
+    fn reconcile_head_leaves_head_alone_when_the_branch_is_absent() {
+        let base = temp_dir("jeryu-head-absent");
+        let manager = manager(&base);
+        let id = RepoId::new("veox", "todo-queue").expect("id");
+        let repo = manager.create_bare(&id).expect("create bare");
+        manager.set_head_branch(&repo, "queue").expect("set head");
+        commit_on(&manager, &repo, "queue");
+
+        assert_eq!(
+            manager.reconcile_head(&repo, "main").expect("reconcile"),
+            HeadReconcile::BranchMissing
+        );
+        assert_eq!(
+            manager.head_branch(&repo).expect("read head").as_deref(),
+            Some("queue")
+        );
     }
 }

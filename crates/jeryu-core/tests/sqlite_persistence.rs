@@ -7,9 +7,9 @@ use jeryu_core::{
     CreateCommentRequest, CreateCommitStatusRequest, CreateIssueRequest, CreateLabelRequest,
     CreateOrganizationRequest, CreatePullRequestRequest, CreateRepositoryRequest,
     CreateReviewRequest, CreateTeamRequest, CreateUserRequest, CreateWebhookRequest, ForgeCore,
-    ForgeError, PullRequestCommit, RepoAccessLevel, RepoBranches, RepoPushHistory,
-    ReviewCommentInput, ReviewState, SetBranchProtectionRequest, UserRole, WebhookConfig,
-    effective_reviews_for_head,
+    ForgeError, HeadReconcileReport, HeadReconciled, PullRequestCommit, RepoAccessLevel,
+    RepoBranches, RepoPushHistory, ReviewCommentInput, ReviewState, SetBranchProtectionRequest,
+    UserRole, WebhookConfig, effective_reviews_for_head,
 };
 use rusqlite::Connection;
 
@@ -1179,6 +1179,130 @@ impl RepoBranches for KnownBranches {
     fn branch_exists(&self, _owner: &str, _name: &str, branch: &str) -> jeryu_core::Result<bool> {
         Ok(self.0.contains(&branch))
     }
+}
+
+/// Branch set plus the bare repositories' `HEAD`, so a test can watch the
+/// symref the forge writes. Keyed by `owner/name`.
+#[derive(Debug, Default)]
+struct TrackedHeads {
+    branches: std::collections::BTreeMap<String, Vec<String>>,
+    heads: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+}
+
+impl TrackedHeads {
+    fn with(repo: &str, branches: &[&str], head: &str) -> Self {
+        let mut tracked = Self::default();
+        tracked.add(repo, branches, head);
+        tracked
+    }
+
+    fn add(&mut self, repo: &str, branches: &[&str], head: &str) {
+        self.branches.insert(
+            repo.to_string(),
+            branches.iter().map(|b| (*b).to_string()).collect(),
+        );
+        self.heads
+            .lock()
+            .unwrap()
+            .insert(repo.to_string(), head.to_string());
+    }
+
+    fn head(&self, repo: &str) -> String {
+        self.heads.lock().unwrap().get(repo).cloned().unwrap()
+    }
+}
+
+impl RepoBranches for TrackedHeads {
+    fn branch_exists(&self, owner: &str, name: &str, branch: &str) -> jeryu_core::Result<bool> {
+        Ok(self
+            .branches
+            .get(&format!("{owner}/{name}"))
+            .is_some_and(|branches| branches.iter().any(|known| known == branch)))
+    }
+
+    fn head_branch(&self, owner: &str, name: &str) -> jeryu_core::Result<Option<String>> {
+        Ok(self
+            .heads
+            .lock()
+            .unwrap()
+            .get(&format!("{owner}/{name}"))
+            .cloned())
+    }
+
+    fn point_head_at(&self, owner: &str, name: &str, branch: &str) -> jeryu_core::Result<()> {
+        self.heads
+            .lock()
+            .unwrap()
+            .insert(format!("{owner}/{name}"), branch.to_string());
+        Ok(())
+    }
+}
+
+/// The default branch decides what a clone checks out, so the bare repo's HEAD
+/// follows it — including when the stored value does not change, which is the
+/// repair for a HEAD that disagrees.
+#[test]
+fn default_branch_change_moves_head_and_resetting_it_repairs_head() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = ForgeCore::open_sqlite(temp.path().join("forge.sqlite")).unwrap();
+    create_repo_on(&core, "demo-todo", "main");
+    let branches = TrackedHeads::with("jeryu/demo-todo", &["main", "queue"], "main");
+
+    core.set_repository_default_branch("jeryu", "demo-todo", "queue", &branches)
+        .unwrap();
+    assert_eq!(branches.head("jeryu/demo-todo"), "queue");
+
+    // HEAD drifted (an import left it on a branch that never arrived): setting
+    // the branch the forge already stores must still repair it.
+    branches
+        .point_head_at("jeryu", "demo-todo", "master")
+        .unwrap();
+    let updated = core
+        .set_repository_default_branch("jeryu", "demo-todo", "queue", &branches)
+        .unwrap();
+    assert_eq!(updated.default_branch, "queue");
+    assert_eq!(branches.head("jeryu/demo-todo"), "queue");
+}
+
+/// The repair pass fixes every repository whose default branch exists and
+/// leaves one whose default branch does not, reporting both.
+#[test]
+fn reconcile_repository_heads_repairs_only_repos_whose_default_branch_exists() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = ForgeCore::open_sqlite(temp.path().join("forge.sqlite")).unwrap();
+    create_repo_on(&core, "ai-veox-www", "main");
+    create_repo_on(&core, "todo-queue", "main");
+    create_repo_on(&core, "already-right", "main");
+    let mut branches = TrackedHeads::default();
+    // HEAD names a branch the repository never had.
+    branches.add("jeryu/ai-veox-www", &["main"], "master");
+    // Only a `queue` branch exists, so the stored default cannot be honoured.
+    branches.add("jeryu/todo-queue", &["queue"], "master");
+    branches.add("jeryu/already-right", &["main"], "main");
+
+    let reports = core.reconcile_repository_heads(&branches).unwrap();
+    assert_eq!(
+        reports,
+        vec![
+            HeadReconcileReport {
+                owner: "jeryu".to_string(),
+                name: "ai-veox-www".to_string(),
+                default_branch: "main".to_string(),
+                outcome: HeadReconciled::Repaired {
+                    previous: Some("master".to_string())
+                },
+            },
+            HeadReconcileReport {
+                owner: "jeryu".to_string(),
+                name: "todo-queue".to_string(),
+                default_branch: "main".to_string(),
+                outcome: HeadReconciled::DefaultBranchMissing,
+            },
+        ]
+    );
+    assert_eq!(branches.head("jeryu/ai-veox-www"), "main");
+    assert_eq!(branches.head("jeryu/todo-queue"), "master");
+    assert_eq!(branches.head("jeryu/already-right"), "main");
 }
 
 fn create_repo_on(core: &ForgeCore, name: &str, branch: &str) {

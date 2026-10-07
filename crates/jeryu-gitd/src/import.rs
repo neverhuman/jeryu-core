@@ -160,6 +160,21 @@ impl LocalGitImporter {
         Ok(report)
     }
 
+    /// Branch the source repository's `HEAD` names (its default branch), or
+    /// `None` when the source `HEAD` is detached or unreadable.
+    fn source_head_branch(&self, source: &Path) -> Option<String> {
+        let out = std::process::Command::new(&self.manager.config().git_bin)
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .current_dir(source)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!branch.is_empty()).then_some(branch)
+    }
+
     /// Import one path into the provided repository id.
     pub fn import_repo(&self, source_path: &Path, id: &RepoId) -> Result<GitImportEntry> {
         let canonical = source_path.canonicalize()?;
@@ -187,6 +202,13 @@ impl LocalGitImporter {
             }
             Err(err) => return Err(err),
         };
+        // A bare repository created before its first push keeps the `HEAD` git
+        // init chose, which is often a branch the source never had; such a
+        // repository advertises no `HEAD` and clones as empty. Point it at the
+        // source's own default branch when that branch arrived with the refs.
+        if let Some(branch) = self.source_head_branch(&canonical) {
+            self.manager.reconcile_head(&repo, &branch)?;
+        }
         Ok(GitImportEntry {
             source_path: canonical.display().to_string(),
             owner: id.owner.clone(),
@@ -279,6 +301,53 @@ mod tests {
         ));
         std::fs::create_dir_all(&base).expect("create temp dir");
         base
+    }
+
+    /// A destination bare repo made by `git init --bare` keeps the HEAD git
+    /// chose; after an import it must name the source's default branch, or the
+    /// repository advertises no HEAD and clones as empty.
+    #[test]
+    fn import_points_head_at_the_source_default_branch() {
+        let base = temp_dir("jeryu-import-head");
+        let source_root = base.join("source");
+        let storage = base.join("storage");
+        let source_manager = RepoManager::new(GitdConfig::new(source_root.clone()));
+        let source_id = RepoId::new("veox-ai", "ai-veox-www").expect("source id");
+        let source = source_manager
+            .create_bare_with_head(&source_id, "main")
+            .expect("source bare");
+        let git = &source_manager.config().git_bin;
+        let tree = crate::command::run_capture(
+            git,
+            &["hash-object", "-t", "tree", "-w", "--stdin"],
+            Some(&source.path),
+        )
+        .expect("empty tree");
+        let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+        let commit = crate::command::run_capture(
+            git,
+            &["commit-tree", &tree, "-m", "seed"],
+            Some(&source.path),
+        )
+        .expect("seed commit");
+        let commit = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+        crate::command::run_capture(
+            git,
+            &["update-ref", "refs/heads/main", &commit],
+            Some(&source.path),
+        )
+        .expect("seed branch");
+
+        let manager = RepoManager::new(GitdConfig::new(storage));
+        let id = RepoId::new("veox-ai", "ai-veox-www").expect("id");
+        LocalGitImporter::new(manager.clone())
+            .import_repo(&source.path, &id)
+            .expect("import");
+        let imported = manager.open(&id).expect("open imported");
+        assert_eq!(
+            manager.head_branch(&imported).expect("head").as_deref(),
+            Some("main")
+        );
     }
 
     #[test]
