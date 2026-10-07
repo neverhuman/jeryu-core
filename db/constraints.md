@@ -372,8 +372,9 @@ only when it would lose no accepted mutation.
 ## 0018 Waitlist signups
 
 The eighteenth migration creates `waitlist_signups`. A row is a normalized
-email, an optional display name, and the time it was first recorded. It is not
-an account, a session, or an invitation.
+email, an optional display name, an optional note, a status, a source, a
+request count, and the first and latest request times. It is not an account,
+a session, or an invitation.
 
 `0017` is reserved by the unmerged account-bot migration. This expansion
 requires `0016` and does not depend on that bot table.
@@ -382,10 +383,15 @@ Constraint policy:
 - `email` is the primary key. It is stored trimmed and in ASCII lowercase, with
   one `@`, no spaces, and a dotted domain. Core rejects any other shape before
   insert.
-- `name` is null or a trimmed value of at most 80 characters. Blank input is
-  stored as null. Control characters are rejected.
-- A second join for the same email returns the original row. It does not change
-  the name or the time, and it does not create a user.
+- `name` is null or a trimmed value of at most 80 characters. `note` is null or
+  a trimmed value of at most 280 characters. Blank input is stored as null.
+  Control characters are rejected.
+- `status` is `listed`, `invited`, or `declined`. A public join creates `listed`
+  and does not change an existing status.
+- `source` is `landing`.
+- `request_count` starts at 1. A second join for the same email keeps the
+  original name, note, status, and `created_at`, increments the count, and
+  moves `last_requested_at`. It does not create a user.
 - The table is threaded through `State`, `load_state`, `stage_state`, and
   `storage::snapshot::OWNED_TABLES`. An unrelated snapshot save keeps the rows.
   An older application that does not own the table leaves it untouched.

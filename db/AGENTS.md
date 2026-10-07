@@ -49,7 +49,8 @@ Migration 0016 review dismissal notes:
 
 Migration 0018 waitlist notes:
 - `waitlist_signups` is an email list, not an account. `join_waitlist` must not
-  create a user or a session.
+  create a user or a session. A repeat keeps the original name, note, status,
+  and created time.
 - Number 0017 belongs to the unmerged account-bot migration. Do not reuse it.
 - Persist and reload rows through every snapshot save.
 - Exercise waitlist_join_normalizes_and_keeps_the_first_signup and

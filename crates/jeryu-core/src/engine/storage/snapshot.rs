@@ -56,7 +56,7 @@ const OWNED_TABLES: &[OwnedTable] = &[
     },
     OwnedTable {
         name: "waitlist_signups",
-        columns: "email,name,created_at",
+        columns: "email,name,note,status,source,request_count,created_at,last_requested_at",
         primary_key: "email",
     },
     OwnedTable {

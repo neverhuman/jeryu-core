@@ -250,8 +250,21 @@ fn stage_state(conn: &Connection, state: &State) -> Result<()> {
     .map_err(storage_error)?;
     for signup in state.waitlist.values() {
         conn.execute(
-            "INSERT INTO temp.waitlist_signups (email, name, created_at) VALUES (?1, ?2, ?3)",
-            params![signup.email, signup.name, time(signup.created_at)],
+            r#"
+            INSERT INTO temp.waitlist_signups (
+              email, name, note, status, source, request_count, created_at, last_requested_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                signup.email,
+                signup.name,
+                signup.note,
+                text(&signup.status)?,
+                signup.source,
+                signup.request_count,
+                time(signup.created_at),
+                time(signup.last_requested_at),
+            ],
         )
         .map_err(storage_error)?;
     }
@@ -861,14 +874,22 @@ fn load_bootstrap_state(conn: &Connection, state: &mut State) -> Result<()> {
 
 fn load_waitlist(conn: &Connection, state: &mut State) -> Result<()> {
     let mut stmt = conn
-        .prepare("SELECT email, name, created_at FROM waitlist_signups")
+        .prepare(
+            "SELECT email, name, note, status, source, request_count, created_at, last_requested_at FROM waitlist_signups",
+        )
         .map_err(storage_error)?;
     let mut rows = stmt.query([]).map_err(storage_error)?;
     while let Some(row) = rows.next().map_err(storage_error)? {
+        let count: i64 = row.get(5).map_err(storage_error)?;
         let signup = WaitlistSignup {
             email: row.get(0).map_err(storage_error)?,
             name: row.get(1).map_err(storage_error)?,
-            created_at: parse_time(row.get(2).map_err(storage_error)?)?,
+            note: row.get(2).map_err(storage_error)?,
+            status: from_text(row.get(3).map_err(storage_error)?)?,
+            source: row.get(4).map_err(storage_error)?,
+            request_count: u32::try_from(count).map_err(storage_error)?,
+            created_at: parse_time(row.get(6).map_err(storage_error)?)?,
+            last_requested_at: parse_time(row.get(7).map_err(storage_error)?)?,
         };
         state.waitlist.insert(signup.email.clone(), signup);
     }
