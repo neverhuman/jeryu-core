@@ -1,0 +1,26 @@
+# jankurai:migration v1
+id = "0018_waitlist_signups_rollback"
+owner = "forge-api"
+reviewer = "forge-api"
+approval = "forge-api"
+change_type = "contract"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "contract"
+app_compatibility = "old_app_new_db"
+rollback = "db/rollbacks/0018_waitlist_signups.sql"
+roll_forward = "db/migrations/0018_waitlist_signups.sql"
+backup = "sqlite .backup of forge.sqlite before apply (ops runbook: ~/.jeryu/backups/)"
+restore = "restore the pre-apply .backup snapshot; waitlist emails are not re-derivable from other tables"
+irreversible = true
+backfill = "none; dropping the table removes the signup list"
+data_classification = "personal"
+tenant_impact = "removes stored waitlist emails; accounts and sessions stay"
+verify = "sqlite_master no longer lists waitlist_signups; accounts and sessions are unchanged"
+tests = [
+  "db-migration-analyze",
+  "waitlist_survives_sqlite_reopen_and_unrelated_write",
+]
