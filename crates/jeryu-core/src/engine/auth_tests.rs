@@ -934,3 +934,195 @@ fn checked_grant_operations_require_repo_admin() {
             .unwrap()
     );
 }
+
+#[test]
+fn checked_access_refuses_an_unknown_or_blank_repository_scope() {
+    let core = core_with_repo();
+    core.create_account("maintainer", PASSWORD, UserRole::User)
+        .unwrap();
+    core.create_account("root", PASSWORD, UserRole::Admin)
+        .unwrap();
+    core.create_account("bob", PASSWORD, UserRole::User)
+        .unwrap();
+    core.grant_repo_access(
+        "alice",
+        "maintainer",
+        "alice",
+        "jeryu",
+        RepoAccessLevel::Admin,
+    )
+    .unwrap();
+
+    // A scope that names no repository is `NotFound` before any decision is
+    // reached, for a repository admin and for a global admin alike.
+    for (owner, repo) in [
+        ("alice", "missing"),
+        ("alice", ""),
+        ("alice", " "),
+        ("", "jeryu"),
+        ("", ""),
+    ] {
+        for actor in ["maintainer", "root"] {
+            assert!(
+                matches!(
+                    core.list_repo_access_checked(actor, owner, repo),
+                    Err(ForgeError::NotFound(_))
+                ),
+                "list {actor} {owner}/{repo} must be NotFound"
+            );
+            assert!(
+                matches!(
+                    core.grant_repo_access_checked(actor, "bob", owner, repo, RepoAccessLevel::Read),
+                    Err(ForgeError::NotFound(_))
+                ),
+                "grant {actor} {owner}/{repo} must be NotFound"
+            );
+            assert!(
+                matches!(
+                    core.revoke_repo_access_checked(actor, "bob", owner, repo),
+                    Err(ForgeError::NotFound(_))
+                ),
+                "revoke {actor} {owner}/{repo} must be NotFound"
+            );
+        }
+        // A refused grant never becomes a stored grant for the named scope.
+        assert!(core.list_repo_access(owner, repo).is_empty());
+        assert!(!core.user_can_read_repo("bob", owner, repo));
+    }
+}
+
+#[test]
+fn a_grant_authorizes_only_the_repository_it_names() {
+    let core = core_with_repo();
+    core.create_repository(
+        "alice",
+        CreateRepositoryRequest {
+            name: "other".to_string(),
+            private: true,
+            description: None,
+            default_branch: Some("main".to_string()),
+        },
+    )
+    .unwrap();
+    core.create_user(CreateUserRequest {
+        login: "bob".to_string(),
+        name: None,
+        email: None,
+    })
+    .unwrap();
+    core.create_repository(
+        "bob",
+        CreateRepositoryRequest {
+            name: "jeryu".to_string(),
+            private: true,
+            description: None,
+            default_branch: Some("main".to_string()),
+        },
+    )
+    .unwrap();
+    core.create_account("reader", PASSWORD, UserRole::User)
+        .unwrap();
+    core.grant_repo_access("alice", "reader", "alice", "jeryu", RepoAccessLevel::Admin)
+        .unwrap();
+
+    assert!(core.user_can_read_repo("reader", "alice", "jeryu"));
+    // A sibling repository of the same owner, the same slug under another
+    // owner, and an empty scope are all outside the grant.
+    for (owner, repo) in [
+        ("alice", "other"),
+        ("bob", "jeryu"),
+        ("alice", ""),
+        ("", "jeryu"),
+    ] {
+        assert_eq!(core.repo_access_for("reader", owner, repo), None);
+        assert!(!core.user_can_read_repo("reader", owner, repo));
+        assert!(!core.user_can_write_repo("reader", owner, repo));
+        assert!(!core.user_can_admin_repo("reader", owner, repo));
+        assert!(
+            core.list_repo_access_checked("reader", owner, repo).is_err(),
+            "listing {owner}/{repo} must be refused"
+        );
+    }
+}
+
+#[test]
+fn renamed_repository_access_does_not_follow_the_former_name() {
+    let core = core_with_repo();
+    core.create_account("maintainer", PASSWORD, UserRole::User)
+        .unwrap();
+    core.grant_repo_access(
+        "alice",
+        "maintainer",
+        "alice",
+        "jeryu",
+        RepoAccessLevel::Admin,
+    )
+    .unwrap();
+    core.rename_repository("alice", "alice", "jeryu", "alice", "forge")
+        .unwrap();
+
+    // Access moves with the repository.
+    assert!(core.user_can_admin_repo("maintainer", "alice", "forge"));
+    // The former slug still resolves as an alias for lookups...
+    assert_eq!(
+        core.get_repository("alice", "jeryu").unwrap().name,
+        "forge"
+    );
+    // ...but it is not a repository scope anyone is authorized for: an
+    // authorization decision is never taken through an alias.
+    assert_eq!(core.repo_access_for("maintainer", "alice", "jeryu"), None);
+    assert!(!core.user_can_read_repo("maintainer", "alice", "jeryu"));
+    assert!(
+        matches!(
+            core.list_repo_access_checked("maintainer", "alice", "jeryu"),
+            Err(ForgeError::NotFound(_))
+        ),
+        "the former name must not name an authorizable repository"
+    );
+    assert!(core.list_repo_access("alice", "jeryu").is_empty());
+}
+
+#[test]
+fn only_an_explicit_allow_passes_the_checked_repository_gate() {
+    let core = core_with_repo();
+    core.create_account("maintainer", PASSWORD, UserRole::User)
+        .unwrap();
+    core.create_account("bob", PASSWORD, UserRole::User)
+        .unwrap();
+    core.grant_repo_access(
+        "alice",
+        "maintainer",
+        "alice",
+        "jeryu",
+        RepoAccessLevel::Admin,
+    )
+    .unwrap();
+    core.grant_repo_access("alice", "bob", "alice", "jeryu", RepoAccessLevel::Write)
+        .unwrap();
+
+    // Write is not admin: a decision short of admin is a refusal.
+    assert!(matches!(
+        core.list_repo_access_checked("bob", "alice", "jeryu"),
+        Err(ForgeError::BranchProtection(_))
+    ));
+    // A revoked grant is no decision at all.
+    assert!(core.revoke_repo_access("bob", "alice", "jeryu").unwrap());
+    assert_eq!(core.repo_access_for("bob", "alice", "jeryu"), None);
+    assert!(matches!(
+        core.list_repo_access_checked("bob", "alice", "jeryu"),
+        Err(ForgeError::BranchProtection(_))
+    ));
+    // An account that may no longer authenticate holds no access, even with a
+    // live admin grant.
+    core.lock_account("maintainer").unwrap();
+    assert_eq!(core.repo_access_for("maintainer", "alice", "jeryu"), None);
+    assert!(matches!(
+        core.list_repo_access_checked("maintainer", "alice", "jeryu"),
+        Err(ForgeError::BranchProtection(_))
+    ));
+    // An actor with no account at all is refused the same way.
+    assert!(matches!(
+        core.grant_repo_access_checked("nobody", "bob", "alice", "jeryu", RepoAccessLevel::Read),
+        Err(ForgeError::BranchProtection(_))
+    ));
+}
