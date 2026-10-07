@@ -890,6 +890,10 @@ impl ForgeCore {
         Ok(self.list_repo_access(owner, repo))
     }
 
+    /// The access `login` holds on `owner/repo`, without checking that the
+    /// repository exists: an active global admin is `Admin` on any scope.
+    /// Callers that must refuse an unknown repository use the `*_checked`
+    /// wrappers, which canonicalize the scope first.
     pub fn repo_access_for(&self, login: &str, owner: &str, repo: &str) -> Option<RepoAccessLevel> {
         let state = self.state.read();
         let account = state.accounts.get(login)?;

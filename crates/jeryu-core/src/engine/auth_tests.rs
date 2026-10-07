@@ -972,7 +972,13 @@ fn checked_access_refuses_an_unknown_or_blank_repository_scope() {
             );
             assert!(
                 matches!(
-                    core.grant_repo_access_checked(actor, "bob", owner, repo, RepoAccessLevel::Read),
+                    core.grant_repo_access_checked(
+                        actor,
+                        "bob",
+                        owner,
+                        repo,
+                        RepoAccessLevel::Read,
+                    ),
                     Err(ForgeError::NotFound(_))
                 ),
                 "grant {actor} {owner}/{repo} must be NotFound"
@@ -985,10 +991,26 @@ fn checked_access_refuses_an_unknown_or_blank_repository_scope() {
                 "revoke {actor} {owner}/{repo} must be NotFound"
             );
         }
-        // A refused grant never becomes a stored grant for the named scope.
         assert!(core.list_repo_access(owner, repo).is_empty());
         assert!(!core.user_can_read_repo("bob", owner, repo));
     }
+    // A refused grant never leaks into the real scope either: the only grant
+    // on alice/jeryu is still the maintainer's.
+    let logins: Vec<_> = core
+        .list_repo_access("alice", "jeryu")
+        .into_iter()
+        .map(|grant| grant.login)
+        .collect();
+    assert_eq!(logins, vec!["maintainer"]);
+    // The bare predicates do not check that a repository exists: an active
+    // global admin is admin on every scope, named or not. Only the `*_checked`
+    // wrappers refuse an unknown scope, so a caller that needs existence must
+    // use them.
+    assert_eq!(
+        core.repo_access_for("root", "alice", "missing"),
+        Some(RepoAccessLevel::Admin)
+    );
+    assert_eq!(core.repo_access_for("bob", "alice", "missing"), None);
 }
 
 #[test]
@@ -1083,7 +1105,7 @@ fn renamed_repository_access_does_not_follow_the_former_name() {
 }
 
 #[test]
-fn only_an_explicit_allow_passes_the_checked_repository_gate() {
+fn only_a_live_admin_grant_passes_the_checked_repository_gate() {
     let core = core_with_repo();
     core.create_account("maintainer", PASSWORD, UserRole::User)
         .unwrap();
@@ -1100,6 +1122,10 @@ fn only_an_explicit_allow_passes_the_checked_repository_gate() {
     core.grant_repo_access("alice", "bob", "alice", "jeryu", RepoAccessLevel::Write)
         .unwrap();
 
+    // An explicit admin grant is the allow that passes the gate.
+    assert!(core
+        .list_repo_access_checked("maintainer", "alice", "jeryu")
+        .is_ok());
     // Write is not admin: a decision short of admin is a refusal.
     assert!(matches!(
         core.list_repo_access_checked("bob", "alice", "jeryu"),
@@ -1122,7 +1148,13 @@ fn only_an_explicit_allow_passes_the_checked_repository_gate() {
     ));
     // An actor with no account at all is refused the same way.
     assert!(matches!(
-        core.grant_repo_access_checked("nobody", "bob", "alice", "jeryu", RepoAccessLevel::Read),
+        core.grant_repo_access_checked(
+            "nobody",
+            "bob",
+            "alice",
+            "jeryu",
+            RepoAccessLevel::Read,
+        ),
         Err(ForgeError::BranchProtection(_))
     ));
 }
