@@ -1494,7 +1494,7 @@ mod tests {
             (
                 BotFailure::Storage,
                 "Argon2id",
-                "randomness",
+                "hash fails",
                 "docs/errors.md#bot-storage",
             ),
         ];
