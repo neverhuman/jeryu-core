@@ -244,8 +244,8 @@ impl ForgeCore {
             .provider_connections
             .get_mut(&binding.connection_id)
             .ok_or_else(|| not_connected(binding.provider))?;
-        record.sealed = Some(vault.seal(&seal_binding(&record.connection), rotated.expose())?);
         record.connection.secret_version += 1;
+        record.sealed = Some(vault.seal(&seal_binding(&record.connection), rotated.expose())?);
         record.connection.refreshed_at = Some(Utc::now());
         record.connection.updated_at = Utc::now();
         let connection = record.connection.clone();
@@ -334,6 +334,7 @@ pub(super) fn seal_binding(connection: &ProviderConnection) -> SealBinding<'_> {
         owner_id: &connection.owner_id,
         provider: connection.provider.as_str(),
         generation: connection.connection_generation,
+        secret_version: connection.secret_version,
     }
 }
 

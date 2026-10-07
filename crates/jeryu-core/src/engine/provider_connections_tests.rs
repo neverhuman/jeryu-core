@@ -316,3 +316,29 @@ fn vault_key_files_must_be_private() {
     assert_eq!(loaded.id(), key(3).id());
     assert!(VaultKey::from_bytes(&[1; 16]).is_err());
 }
+
+#[test]
+fn a_secret_sealed_before_a_rotation_does_not_open_after_it() {
+    let core = core_with_vault();
+    connect(&core, "user/alice", "alice@example.com");
+    let binding = core
+        .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
+        .expect("binding");
+    let before = core.state.read().provider_connections[&binding.connection_id]
+        .sealed
+        .clone();
+    core.refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
+        Ok(ProviderSecret::new(b"rotated".to_vec()))
+    })
+    .expect("refresh");
+    core.state
+        .write()
+        .provider_connections
+        .get_mut(&binding.connection_id)
+        .expect("row")
+        .sealed = before;
+    let replayed = core
+        .unseal_provider_secret("user/alice", &binding)
+        .unwrap_err();
+    assert!(code(replayed).contains("vault_secret_unreadable"));
+}

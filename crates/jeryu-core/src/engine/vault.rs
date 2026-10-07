@@ -3,8 +3,8 @@
 //! Each sealed secret gets a fresh 256-bit data key. The secret is encrypted
 //! with AES-256-GCM under that data key; the data key is encrypted under the
 //! deployment vault key. Both encryptions bind the same associated data
-//! (connection, owner, provider, generation), so a sealed value copied onto
-//! another row, or replayed into a later generation, fails to open.
+//! (connection, owner, provider, generation, secret version), so a sealed
+//! value copied onto another row, or replayed after a rotation, fails to open.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -144,6 +144,9 @@ pub(crate) struct SealBinding<'a> {
     pub(crate) owner_id: &'a str,
     pub(crate) provider: &'a str,
     pub(crate) generation: u64,
+    /// Refresh rotations within the generation: a value sealed at version N
+    /// does not open once the row says N+1 (connection-v1 §3).
+    pub(crate) secret_version: u64,
 }
 
 impl SealBinding<'_> {
@@ -154,6 +157,7 @@ impl SealBinding<'_> {
             aad.push(0);
         }
         aad.extend_from_slice(&self.generation.to_be_bytes());
+        aad.extend_from_slice(&self.secret_version.to_be_bytes());
         aad
     }
 }
