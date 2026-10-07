@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- A Grokbot or Musebot failure names its repair: purpose, reason, common
+  fixes, and a repair hint. The failures are a rejected enrollment, an invalid
+  credential, a slug or idempotency conflict, a reach denial, a missing or
+  revoked credential, and a randomness or Argon2id failure. The repair never
+  includes the enrollment key or refresh token.
 - Account Grokbot and Musebot credentials record lifecycle audit rows for
   enroll, key rotation, suspend, revoke, enrollment-key exchange, refresh
   reuse, and authorization denial. Each row names the actor, bot id, and key

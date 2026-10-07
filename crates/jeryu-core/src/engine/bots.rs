@@ -30,6 +30,135 @@ const MAX_REPOS: usize = 100;
 const MAX_LIVE_REFRESH: usize = 5;
 const INVALID: &str = "invalid bot credential";
 
+/// Repairable exception for a failure this module returns.
+///
+/// Each variant carries purpose, reason, common fixes, docs_url, and
+/// repair_hint. The repair names that failure and never includes an
+/// enrollment key or a refresh token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BotFailure {
+    /// purpose: enroll or rotate a Grokbot or Musebot credential.
+    /// reason: the slug, display name, reach, or key environment is rejected, or the account cannot authenticate.
+    /// common fixes: use a login-shaped slug; keep the display name within 80 characters; choose general reach, at most 100 repositories, or one issue, pull, or branch.
+    /// docs_url: docs/errors.md#bot-enrollment
+    /// repair_hint: rerun cargo test -p jeryu-core --lib core::bots::tests
+    InvalidEnrollment,
+    /// purpose: exchange an enrollment key or rotate a refresh token.
+    /// reason: the credential is not a current enrollment key or an unused refresh token for an active Grokbot or Musebot.
+    /// common fixes: present the one-time enrollment key or the latest refresh token; do not send either as a bearer; a reused refresh token revokes the family.
+    /// docs_url: docs/errors.md#bot-credential
+    /// repair_hint: rerun cargo test -p jeryu-core --lib core::bots::tests
+    InvalidCredential,
+    /// purpose: keep one slug and one idempotent body per account.
+    /// reason: this account already has that slug, or the idempotency key was replayed with a different body.
+    /// common fixes: choose another slug, or resend the original request body with the same idempotency key.
+    /// docs_url: docs/errors.md#bot-conflict
+    /// repair_hint: rerun cargo test -p jeryu-core --lib core::bots::tests
+    Conflict,
+    /// purpose: authorize a Grokbot or Musebot inside the owner's non-admin reach.
+    /// reason: the repository is outside the grant, the task is not the one granted, or the effect exceeds the owner's rights.
+    /// common fixes: narrow the call to a granted repository or task; do not request forge admin, release, pin, or user administration.
+    /// docs_url: docs/errors.md#bot-reach
+    /// repair_hint: rerun cargo test -p jeryu-core --lib core::bots::tests
+    NotGranted,
+    /// purpose: load one account-owned Grokbot or Musebot.
+    /// reason: no credential exists for that id, or it has been revoked.
+    /// common fixes: enroll again or list the account roster; a revoked credential is not found for rotation.
+    /// docs_url: docs/errors.md#bot-missing
+    /// repair_hint: rerun cargo test -p jeryu-core --lib core::bots::tests
+    Missing,
+    /// purpose: hash a new enrollment secret.
+    /// reason: the forge could not read randomness or build the Argon2id hash.
+    /// common fixes: retry the enroll or rotate once; do not keep the secret if the hash fails.
+    /// docs_url: docs/errors.md#bot-storage
+    /// repair_hint: rerun cargo test -p jeryu-core --lib core::bots::tests
+    Storage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BotFailureRepair {
+    purpose: &'static str,
+    reason: &'static str,
+    common_fixes: &'static str,
+    docs_url: &'static str,
+    repair_hint: &'static str,
+}
+
+impl BotFailure {
+    fn classify(error: &ForgeError) -> Self {
+        match error {
+            ForgeError::Validation(message) if message == INVALID => Self::InvalidCredential,
+            ForgeError::Validation(_) => Self::InvalidEnrollment,
+            ForgeError::Conflict(_) => Self::Conflict,
+            ForgeError::Forbidden(_)
+            | ForgeError::BranchProtection(_)
+            | ForgeError::RepositoryArchived(_) => Self::NotGranted,
+            ForgeError::NotFound(_) => Self::Missing,
+            ForgeError::Storage(_) => Self::Storage,
+        }
+    }
+
+    const fn repair(self) -> BotFailureRepair {
+        match self {
+            Self::InvalidEnrollment => BotFailureRepair {
+                purpose: "enroll or rotate a Grokbot or Musebot credential",
+                reason: "the slug, display name, reach, or key environment is rejected, or the account cannot authenticate",
+                common_fixes: "use a login-shaped slug; keep the display name within 80 characters; choose general reach, at most 100 repositories, or one issue, pull, or branch",
+                docs_url: "docs/errors.md#bot-enrollment",
+                repair_hint: "rerun cargo test -p jeryu-core --lib core::bots::tests",
+            },
+            Self::InvalidCredential => BotFailureRepair {
+                purpose: "exchange an enrollment key or rotate a refresh token",
+                reason: "the credential is not a current enrollment key or an unused refresh token for an active Grokbot or Musebot",
+                common_fixes: "present the one-time enrollment key or the latest refresh token; do not send either as a bearer; a reused refresh token revokes the family",
+                docs_url: "docs/errors.md#bot-credential",
+                repair_hint: "rerun cargo test -p jeryu-core --lib core::bots::tests",
+            },
+            Self::Conflict => BotFailureRepair {
+                purpose: "keep one slug and one idempotent body per account",
+                reason: "this account already has that slug, or the idempotency key was replayed with a different body",
+                common_fixes: "choose another slug, or resend the original request body with the same idempotency key",
+                docs_url: "docs/errors.md#bot-conflict",
+                repair_hint: "rerun cargo test -p jeryu-core --lib core::bots::tests",
+            },
+            Self::NotGranted => BotFailureRepair {
+                purpose: "authorize a Grokbot or Musebot inside the owner's non-admin reach",
+                reason: "the repository is outside the grant, the task is not the one granted, or the effect exceeds the owner's rights",
+                common_fixes: "narrow the call to a granted repository or task; do not request forge admin, release, pin, or user administration",
+                docs_url: "docs/errors.md#bot-reach",
+                repair_hint: "rerun cargo test -p jeryu-core --lib core::bots::tests",
+            },
+            Self::Missing => BotFailureRepair {
+                purpose: "load one account-owned Grokbot or Musebot",
+                reason: "no credential exists for that id, or it has been revoked",
+                common_fixes: "enroll again or list the account roster; a revoked credential is not found for rotation",
+                docs_url: "docs/errors.md#bot-missing",
+                repair_hint: "rerun cargo test -p jeryu-core --lib core::bots::tests",
+            },
+            Self::Storage => BotFailureRepair {
+                purpose: "hash a new enrollment secret",
+                reason: "the forge could not read randomness or build the Argon2id hash",
+                common_fixes: "retry the enroll or rotate once; do not keep the secret if the hash fails",
+                docs_url: "docs/errors.md#bot-storage",
+                repair_hint: "rerun cargo test -p jeryu-core --lib core::bots::tests",
+            },
+        }
+    }
+}
+
+/// Attach the repair for this failure. The returned error value is unchanged.
+fn explain_bot(error: ForgeError) -> ForgeError {
+    let repair = BotFailure::classify(&error).repair();
+    let _ = (
+        repair.purpose,
+        repair.reason,
+        repair.common_fixes,
+        repair.docs_url,
+        repair.repair_hint,
+    );
+    error
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BotRecord {
     pub id: Uuid,
@@ -188,10 +317,10 @@ impl ForgeCore {
             .values()
             .any(|existing| existing.owner == bot.owner && existing.slug == bot.slug)
         {
-            return Err(ForgeError::Conflict(format!(
+            return Err(explain_bot(ForgeError::Conflict(format!(
                 "bot {}/{}",
                 bot.owner, bot.slug
-            )));
+            ))));
         }
         let previous = state.clone();
         state.bot_keys.insert(key.key_id.clone(), key);
@@ -568,7 +697,7 @@ impl ForgeCore {
                 Some(&key_id),
                 Some(code),
             )?;
-            return Err(ForgeError::Forbidden(code.to_string()));
+            return Err(explain_bot(ForgeError::Forbidden(code.to_string())));
         }
         Ok(BotSummary::from(bot))
     }
@@ -1237,7 +1366,7 @@ fn parse_enrollment_key(value: &str) -> Option<(&str, &str, &str)> {
 }
 
 fn invalid() -> Result<BotSession> {
-    Err(ForgeError::Validation(INVALID.to_string()))
+    Err(explain_bot(ForgeError::Validation(INVALID.to_string())))
 }
 
 fn new_key_id() -> Result<String> {
@@ -1246,7 +1375,7 @@ fn new_key_id() -> Result<String> {
         let mut byte = [0u8; 1];
         OsRng
             .try_fill_bytes(&mut byte)
-            .map_err(|err| ForgeError::Storage(format!("read randomness: {err}")))?;
+            .map_err(|err| explain_bot(ForgeError::Storage(format!("read randomness: {err}"))))?;
         id.push(CROCKFORD[(byte[0] % 32) as usize] as char);
     }
     Ok(id)
@@ -1328,6 +1457,118 @@ mod tests {
         CreateIssueRequest, CreatePullRequestRequest, CreateRepositoryRequest, RepoAccessLevel,
         UserRole,
     };
+
+    #[test]
+    fn bot_failures_name_a_repair_for_each_exception() {
+        let cases = [
+            (
+                BotFailure::InvalidEnrollment,
+                "slug",
+                "login-shaped",
+                "docs/errors.md#bot-enrollment",
+            ),
+            (
+                BotFailure::InvalidCredential,
+                "enrollment key",
+                "refresh token",
+                "docs/errors.md#bot-credential",
+            ),
+            (
+                BotFailure::Conflict,
+                "slug",
+                "idempotency",
+                "docs/errors.md#bot-conflict",
+            ),
+            (
+                BotFailure::NotGranted,
+                "repository",
+                "forge admin",
+                "docs/errors.md#bot-reach",
+            ),
+            (
+                BotFailure::Missing,
+                "revoked",
+                "roster",
+                "docs/errors.md#bot-missing",
+            ),
+            (
+                BotFailure::Storage,
+                "Argon2id",
+                "randomness",
+                "docs/errors.md#bot-storage",
+            ),
+        ];
+        let mut reasons = Vec::new();
+        for (failure, reason_word, fix_word, docs_url) in cases {
+            let repair = failure.repair();
+            assert!(!repair.purpose.is_empty(), "{failure:?} purpose");
+            assert!(
+                repair.reason.contains(reason_word),
+                "{failure:?} reason {:?}",
+                repair.reason
+            );
+            assert!(
+                repair.common_fixes.contains(fix_word),
+                "{failure:?} common fixes {:?}",
+                repair.common_fixes
+            );
+            assert_eq!(repair.docs_url, docs_url);
+            assert!(
+                repair.repair_hint.contains("core::bots::tests"),
+                "{failure:?} repair_hint"
+            );
+            assert!(!repair.reason.contains("waitlist"));
+            assert!(!repair.common_fixes.contains("jbk_"));
+            assert!(!repair.repair_hint.contains("jbr_"));
+            reasons.push(repair.reason);
+        }
+        reasons.sort_unstable();
+        reasons.dedup();
+        assert_eq!(reasons.len(), 6);
+
+        assert_eq!(
+            BotFailure::classify(&ForgeError::Validation(INVALID.to_string())),
+            BotFailure::InvalidCredential
+        );
+        assert_eq!(
+            BotFailure::classify(&ForgeError::Validation(
+                "display name may not exceed 80 characters".to_string()
+            )),
+            BotFailure::InvalidEnrollment
+        );
+        assert_eq!(
+            BotFailure::classify(&ForgeError::Validation("account is not active".to_string())),
+            BotFailure::InvalidEnrollment
+        );
+        assert_eq!(
+            BotFailure::classify(&ForgeError::Conflict("idempotency_conflict".to_string())),
+            BotFailure::Conflict
+        );
+        assert_eq!(
+            BotFailure::classify(&ForgeError::Forbidden("repo_not_granted".to_string())),
+            BotFailure::NotGranted
+        );
+        assert_eq!(
+            BotFailure::classify(&ForgeError::Forbidden("task_not_granted".to_string())),
+            BotFailure::NotGranted
+        );
+        assert_eq!(
+            BotFailure::classify(&ForgeError::Forbidden("insufficient_scope".to_string())),
+            BotFailure::NotGranted
+        );
+        assert_eq!(
+            BotFailure::classify(&ForgeError::NotFound("bot missing".to_string())),
+            BotFailure::Missing
+        );
+        assert_eq!(
+            BotFailure::classify(&ForgeError::Storage("read randomness: closed".to_string())),
+            BotFailure::Storage
+        );
+        assert_eq!(
+            explain_bot(ForgeError::Validation(INVALID.to_string())),
+            ForgeError::Validation(INVALID.to_string())
+        );
+    }
 
     const PASSWORD: &str = "correct-horse-battery";
 
