@@ -97,6 +97,12 @@ impl BotFailure {
             | ForgeError::RepositoryArchived(_) => Self::NotGranted,
             ForgeError::NotFound(_) => Self::Missing,
             ForgeError::Storage(_) => Self::Storage,
+            ForgeError::WaitlistFull => {
+                // A full waitlist is not a bot failure. `explain_bot` returns
+                // that error unchanged before classify. The arm keeps this
+                // match exhaustive.
+                unreachable!("waitlist_full is not a bot failure")
+            }
         }
     }
 
@@ -150,6 +156,9 @@ impl BotFailure {
 
 /// Attach this failure's repair to the error callers match and display.
 fn explain_bot(error: ForgeError) -> ForgeError {
+    if matches!(error, ForgeError::WaitlistFull) {
+        return error;
+    }
     let repair = BotFailure::classify(&error).repair();
     let base = ForgeError::machine_text(message_of(&error));
     let visible = format!(
@@ -168,6 +177,7 @@ fn message_of(error: &ForgeError) -> &str {
         | ForgeError::BranchProtection(message)
         | ForgeError::RepositoryArchived(message)
         | ForgeError::Storage(message) => message,
+        ForgeError::WaitlistFull => "waitlist_full: the waitlist is not accepting new addresses",
     }
 }
 
@@ -180,6 +190,7 @@ fn rewrite(error: ForgeError, message: String) -> ForgeError {
         ForgeError::BranchProtection(_) => ForgeError::BranchProtection(message),
         ForgeError::RepositoryArchived(_) => ForgeError::RepositoryArchived(message),
         ForgeError::Storage(_) => ForgeError::Storage(message),
+        ForgeError::WaitlistFull => ForgeError::WaitlistFull,
     }
 }
 
