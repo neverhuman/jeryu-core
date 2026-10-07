@@ -14,7 +14,7 @@ requires = ["0016_review_dismissal_target"]
 rollback = "db/rollbacks/0018_waitlist_signups.sql"
 backfill = "none; the table starts empty and rows are inserted only by join_waitlist"
 data_classification = "personal"
-tenant_impact = "stores a normalized email and an optional name; it does not create an account"
+tenant_impact = "stores a normalized email, optional name and note, status, source, and request times; it does not create an account"
 tests = [
   "db-migration-analyze",
   "waitlist_join_normalizes_and_keeps_the_first_signup",

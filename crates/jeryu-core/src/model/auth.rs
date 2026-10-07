@@ -260,12 +260,26 @@ pub struct RepoAccessGrant {
     pub granted_at: DateTime<Utc>,
 }
 
+/// Where a waitlist address sits. A public join only creates `listed`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitlistStatus {
+    Listed,
+    Invited,
+    Declined,
+}
+
 /// One public waitlist address. This is not an account and cannot authenticate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WaitlistSignup {
     pub email: String,
     pub name: Option<String>,
+    pub note: Option<String>,
+    pub status: WaitlistStatus,
+    pub source: String,
+    pub request_count: u32,
     pub created_at: DateTime<Utc>,
+    pub last_requested_at: DateTime<Utc>,
 }
 
 /// Result of asking to join the waitlist.

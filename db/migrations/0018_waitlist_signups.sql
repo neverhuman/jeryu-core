@@ -14,5 +14,10 @@ CREATE TABLE IF NOT EXISTS waitlist_signups (
     AND instr(email, '@') > 1
   ),
   name TEXT CHECK (name IS NULL OR (length(trim(name)) > 0 AND length(name) <= 80)),
-  created_at TEXT NOT NULL
+  note TEXT CHECK (note IS NULL OR (length(trim(note)) > 0 AND length(note) <= 280)),
+  status TEXT NOT NULL DEFAULT 'listed' CHECK (status IN ('listed', 'invited', 'declined')),
+  source TEXT NOT NULL DEFAULT 'landing' CHECK (source = 'landing'),
+  request_count INTEGER NOT NULL DEFAULT 1 CHECK (request_count >= 1),
+  created_at TEXT NOT NULL,
+  last_requested_at TEXT NOT NULL
 );
