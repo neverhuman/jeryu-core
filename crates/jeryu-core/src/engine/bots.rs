@@ -413,6 +413,7 @@ impl ForgeCore {
             .map(|bot| {
                 let mut summary = BotSummary::from(bot);
                 summary.reach = clip_reach(&summary.reach, owner, repo);
+                clip_activity(&mut summary, owner, repo);
                 summary
             })
             .collect();
@@ -1130,7 +1131,10 @@ fn owned_bot(state: &super::State, actor: &str, bot_id: Uuid) -> Result<BotRecor
 
 fn reach_lists_repo(state: &super::State, bot: &BotRecord, owner: &str, repo: &str) -> bool {
     match &bot.reach {
-        BotReach::General => owner_grant_allows(state, &bot.owner, owner, repo, false),
+        // A public repository is readable by every account, so a public read
+        // would list every general bot on the forge. Only an explicit grant
+        // puts a general bot on this roster.
+        BotReach::General => owner_has_grant(state, &bot.owner, owner, repo),
         BotReach::Repositories { repos } => repos
             .iter()
             .any(|item| item.owner == owner && item.name == repo),
@@ -1150,6 +1154,28 @@ fn clip_reach(reach: &BotReach, owner: &str, repo: &str) -> BotReach {
         },
         other => other.clone(),
     }
+}
+
+/// Activity names the repository a bot last touched, which may be one the
+/// roster viewer cannot read. Keep it only when it is this repository.
+fn clip_activity(summary: &mut BotSummary, owner: &str, repo: &str) {
+    let here = format!("{owner}/{repo}");
+    if summary.last_repo.as_deref() != Some(here.as_str()) {
+        summary.last_repo = None;
+        summary.last_action = None;
+        summary.last_outcome = None;
+        summary.last_mutation = None;
+    }
+}
+
+fn owner_has_grant(state: &super::State, login: &str, owner: &str, repo: &str) -> bool {
+    state.accounts.get(login).is_some_and(|account| {
+        account.status.permits_authentication()
+            && state
+                .repo_grants
+                .get(&(login.to_string(), owner.to_string(), repo.to_string()))
+                .is_some_and(|grant| grant.access.allows_read())
+    })
 }
 
 /// Explicit repository grant, plus a public read for any active account.
@@ -2278,6 +2304,58 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn public_roster_hides_foreign_general_bots_and_other_repo_activity() {
+        let (core, _) = fixture();
+        core.grant_repo_access("alice", "alice", "alice", "other", RepoAccessLevel::Write)
+            .unwrap();
+        let enrolled = enroll(&core, "atlas", BotReach::General);
+        core.note_bot_observation(
+            enrolled.bot.id,
+            BotObservation {
+                key_id: enrolled.key_id.clone(),
+                action: "edit".to_string(),
+                outcome: "wrote".to_string(),
+                scope: "general".to_string(),
+                repo: Some("alice/other".to_string()),
+                session_id: None,
+                success: true,
+                mutation: true,
+                heartbeat: false,
+            },
+        )
+        .unwrap();
+        let roster = core
+            .list_repository_bots("alice", "alice", "widgets")
+            .unwrap();
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].last_repo, None);
+        assert_eq!(roster[0].last_action, None);
+        assert_eq!(roster[0].last_outcome, None);
+        assert_eq!(roster[0].last_mutation, None);
+        let there = core
+            .list_repository_bots("alice", "alice", "other")
+            .unwrap();
+        assert_eq!(there[0].last_repo.as_deref(), Some("alice/other"));
+
+        core.create_account("bob", PASSWORD, UserRole::User)
+            .unwrap();
+        core.create_repository(
+            "bob",
+            CreateRepositoryRequest {
+                name: "docs".to_string(),
+                private: false,
+                description: None,
+                default_branch: Some("main".to_string()),
+            },
+        )
+        .unwrap();
+        core.grant_repo_access("bob", "bob", "bob", "docs", RepoAccessLevel::Write)
+            .unwrap();
+        let public = core.list_repository_bots("bob", "bob", "docs").unwrap();
+        assert!(public.iter().all(|bot| bot.owner != "alice"));
     }
 
     #[test]

@@ -105,8 +105,11 @@ or one issue, pull, or branch.
 ## Bot credential
 
 The enrollment key or refresh token is not current for an active Grokbot or
-Musebot. Present the one-time enrollment key or the latest refresh token. Do
-not send either as a bearer. A reused refresh token revokes the family.
+Musebot. Present the enrollment key or the latest refresh token. The enrollment
+key is shown once and stays valid until it is rotated or revoked, or the
+account's password changes or it is disabled or locked; treat it as the bot
+host's long-lived secret. Do not send either as a bearer. A reused refresh
+token revokes the family; exchange the enrollment key again to recover.
 
 ## Bot conflict
 

@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- A repository's bot roster lists a general-reach Grokbot or Musebot only when
+  its owner has an explicit grant on that repository; a public read no longer
+  puts every general bot on every public roster. Roster rows drop the last
+  action, outcome, repository, and mutation time unless they concern the
+  viewed repository, so a roster never names a repository the viewer cannot
+  read.
 - A Grokbot or Musebot failure names its repair: purpose, reason, common
   fixes, and a repair hint. The returned error carries that text, and the
   machine code stays the prefix callers already match. The failures are a
