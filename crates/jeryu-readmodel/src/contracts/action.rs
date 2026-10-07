@@ -62,7 +62,8 @@ mod tests {
     #[test]
     fn payload_without_route_fields_still_deserializes() {
         let action: AvailableAction =
-            serde_json::from_str(r#"{"action_id":"repo.open","label":"Open","risk":null}"#).unwrap();
+            serde_json::from_str(r#"{"action_id":"repo.open","label":"Open","risk":null}"#)
+                .unwrap();
         assert_eq!(action, AvailableAction::new("repo.open", "Open", None));
     }
 }

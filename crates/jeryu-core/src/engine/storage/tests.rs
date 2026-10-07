@@ -173,10 +173,7 @@ fn serialized_successor_before_expired_row_preserves_live_login_constraint() {
     drop(connection);
 
     let reopened = ForgeCore::open_sqlite(&fixture.database).unwrap();
-    assert_eq!(
-        reopened.state.read().invitations,
-        desired.invitations
-    );
+    assert_eq!(reopened.state.read().invitations, desired.invitations);
     assert_evidence(
         &Connection::open(&fixture.database).unwrap(),
         fixture.id,
@@ -241,10 +238,7 @@ fn invalid_final_invitation_uniqueness_rolls_back_existing_updates_and_shared_st
     assert_eq!(other_handle.list_account_invitations(), previous);
     let connection = Connection::open(&fixture.database).unwrap();
     let durable = load_state(&connection).unwrap();
-    assert_eq!(
-        durable.invitations,
-        fixture.core.state.read().invitations
-    );
+    assert_eq!(durable.invitations, fixture.core.state.read().invitations);
     assert_evidence(&connection, fixture.id, &fixture.original_row);
     drop(connection);
     drop(other_handle);

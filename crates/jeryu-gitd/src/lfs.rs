@@ -663,7 +663,11 @@ mod tests {
             .verify(&oid, data.len() as u64)
             .unwrap_or_else(|err| panic!("verify failed: {err}"));
         assert_eq!(
-            sha256_hex(&store.get(&oid).unwrap_or_else(|err| panic!("get failed: {err}"))),
+            sha256_hex(
+                &store
+                    .get(&oid)
+                    .unwrap_or_else(|err| panic!("get failed: {err}"))
+            ),
             oid
         );
         let parent = store
@@ -677,7 +681,10 @@ mod tests {
             .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
             .filter(|name| name.to_string_lossy() != oid)
             .collect();
-        assert!(leftovers.is_empty(), "temporary files left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "temporary files left behind: {leftovers:?}"
+        );
 
         let _ = fs::remove_dir_all(base);
     }

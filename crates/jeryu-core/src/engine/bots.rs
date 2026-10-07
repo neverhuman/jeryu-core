@@ -561,10 +561,10 @@ impl ForgeCore {
                 .map(|key| key.secret_hash.clone())
         };
         let Some(verified_hash) = verified_hash else {
-            let _ = verify_secret(&secret, dummy_secret_hash().as_str());
+            let _ = verify_secret(secret, dummy_secret_hash().as_str());
             return invalid();
         };
-        if verify_secret(&secret, &verified_hash).is_err() {
+        if verify_secret(secret, &verified_hash).is_err() {
             return invalid();
         }
         let now = Utc::now();
@@ -1004,6 +1004,7 @@ impl ForgeCore {
         Ok(summary)
     }
 
+    #[allow(clippy::too_many_arguments)] // One flat audit row per bot action.
     fn record_bot_audit(
         &self,
         actor: &str,
@@ -1921,7 +1922,7 @@ mod tests {
         ));
         core.grant_repo_access("alice", "alice", "alice", "other", RepoAccessLevel::Read)
             .unwrap();
-        assert!(core.authorize_bot(&other).is_ok() == false);
+        assert!(core.authorize_bot(&other).is_err());
         let read_other = BotCall {
             effect: BotEffect::Read,
             ..other

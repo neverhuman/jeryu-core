@@ -93,8 +93,3 @@ pub struct ApprovalsSummary {
     pub checks_failing: u32,
     pub high_risk_count: u32,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}

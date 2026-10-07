@@ -1061,7 +1061,8 @@ fn a_grant_authorizes_only_the_repository_it_names() {
         assert!(!core.user_can_write_repo("reader", owner, repo));
         assert!(!core.user_can_admin_repo("reader", owner, repo));
         assert!(
-            core.list_repo_access_checked("reader", owner, repo).is_err(),
+            core.list_repo_access_checked("reader", owner, repo)
+                .is_err(),
             "listing {owner}/{repo} must be refused"
         );
     }
@@ -1086,10 +1087,7 @@ fn renamed_repository_access_does_not_follow_the_former_name() {
     // Access moves with the repository.
     assert!(core.user_can_admin_repo("maintainer", "alice", "forge"));
     // The former slug still resolves as an alias for lookups...
-    assert_eq!(
-        core.get_repository("alice", "jeryu").unwrap().name,
-        "forge"
-    );
+    assert_eq!(core.get_repository("alice", "jeryu").unwrap().name, "forge");
     // ...but it is not a repository scope anyone is authorized for: an
     // authorization decision is never taken through an alias.
     assert_eq!(core.repo_access_for("maintainer", "alice", "jeryu"), None);
@@ -1123,9 +1121,10 @@ fn only_a_live_admin_grant_passes_the_checked_repository_gate() {
         .unwrap();
 
     // An explicit admin grant is the allow that passes the gate.
-    assert!(core
-        .list_repo_access_checked("maintainer", "alice", "jeryu")
-        .is_ok());
+    assert!(
+        core.list_repo_access_checked("maintainer", "alice", "jeryu")
+            .is_ok()
+    );
     // Write is not admin: a decision short of admin is a refusal.
     assert!(matches!(
         core.list_repo_access_checked("bob", "alice", "jeryu"),
@@ -1148,13 +1147,7 @@ fn only_a_live_admin_grant_passes_the_checked_repository_gate() {
     ));
     // An actor with no account at all is refused the same way.
     assert!(matches!(
-        core.grant_repo_access_checked(
-            "nobody",
-            "bob",
-            "alice",
-            "jeryu",
-            RepoAccessLevel::Read,
-        ),
+        core.grant_repo_access_checked("nobody", "bob", "alice", "jeryu", RepoAccessLevel::Read,),
         Err(ForgeError::BranchProtection(_))
     ));
 }

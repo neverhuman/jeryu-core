@@ -194,7 +194,9 @@ fn parent_rows(connection: &Connection, parents: &Parents) -> Vec<(String, i64, 
 
 fn count(connection: &Connection, table: &str) -> i64 {
     connection
-        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
         .unwrap()
 }
 
@@ -358,7 +360,10 @@ fn changed_owned_fields_and_transfer_preserve_parent_keys_and_future_columns() {
     let moved = reopened.get_repository("destination", "demo").unwrap();
     assert_eq!(moved.id, parents.repository);
     assert!(moved.default_branch_protection_opt_out);
-    assert_eq!(moved.pushed_at.map(|at| at.timestamp()), Some(pushed_at.timestamp()));
+    assert_eq!(
+        moved.pushed_at.map(|at| at.timestamp()),
+        Some(pushed_at.timestamp())
+    );
     assert!(moved.family.is_none());
     // The alias left behind by the rename carries its origin discriminator.
     let connection = Connection::open(&database).unwrap();
