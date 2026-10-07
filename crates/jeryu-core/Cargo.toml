@@ -12,6 +12,7 @@ hex.workspace = true
 hmac.workspace = true
 parking_lot.workspace = true
 ring = "0.17"
+rustix = { version = "1", features = ["fs", "process"] }
 zeroize = "1"
 rand_core = { version = "0.6", features = ["getrandom"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

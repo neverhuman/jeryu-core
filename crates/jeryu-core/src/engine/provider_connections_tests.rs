@@ -342,3 +342,115 @@ fn a_secret_sealed_before_a_rotation_does_not_open_after_it() {
         .unwrap_err();
     assert!(code(replayed).contains("vault_secret_unreadable"));
 }
+
+// Regressions from the lane C red-team review of the vault.
+
+#[test]
+fn api_keys_do_not_rotate_on_refresh() {
+    let core = core_with_vault();
+    core.connect_provider(
+        "user/alice",
+        AgentProvider::Grok,
+        "xai-org",
+        CredentialKind::ApiKey,
+        &ProviderSecret::new(CANARY.to_vec()),
+    )
+    .expect("connect");
+    let binding = core
+        .resolve_provider_binding("user/alice", AgentProvider::Grok, None)
+        .expect("binding");
+    let refused = core
+        .refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
+            panic!("an API key is never sent to a token endpoint")
+        })
+        .unwrap_err();
+    assert!(code(refused).contains("credential_not_refreshable"));
+    assert_eq!(
+        core.list_provider_connections("user/alice")[0].secret_version,
+        0
+    );
+}
+
+#[test]
+fn owner_ids_follow_the_contract_identifier_rules() {
+    let core = core_with_vault();
+    for owner in [
+        "service/..",
+        "service/-x",
+        "service/a..b",
+        "service/x-",
+        "service/a/b",
+    ] {
+        let error = core
+            .connect_provider(
+                owner,
+                AgentProvider::Codex,
+                "acct",
+                CredentialKind::ApiKey,
+                &ProviderSecret::new(b"k".to_vec()),
+            )
+            .unwrap_err();
+        assert!(code(error).contains("connection_owner_invalid"), "{owner}");
+    }
+    for owner in ["service/pr-redteam", "service/ci.repair:1"] {
+        core.connect_provider(
+            owner,
+            AgentProvider::Codex,
+            "acct",
+            CredentialKind::ApiKey,
+            &ProviderSecret::new(b"k".to_vec()),
+        )
+        .unwrap_or_else(|error| panic!("{owner}: {error}"));
+    }
+}
+
+#[test]
+fn a_stranger_refresh_is_refused_by_ownership_not_busyness() {
+    let core = core_with_vault();
+    connect(&core, "user/alice", "alice@example.com");
+    let binding = core
+        .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
+        .expect("binding");
+    let stranger = core
+        .refresh_provider_secret("user/bob", &binding, REFRESH_LOCK_TIMEOUT, |_| {
+            panic!("a stranger must not reach the provider")
+        })
+        .unwrap_err();
+    assert!(code(stranger).contains("connection_owner_mismatch"));
+    core.refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
+        Ok(ProviderSecret::new(b"rotated".to_vec()))
+    })
+    .expect("refresh");
+    assert!(
+        core.refresh_locks.is_empty(),
+        "refresh locks are dropped when no refresh holds them"
+    );
+}
+
+#[test]
+fn a_disabled_owner_loses_access_to_their_connections() {
+    let core = core_with_vault();
+    connect(&core, "user/alice", "alice@example.com");
+    let binding = core
+        .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
+        .expect("binding");
+    core.disable_account("alice").expect("disable");
+    let refused = core
+        .unseal_provider_secret("user/alice", &binding)
+        .unwrap_err();
+    assert!(code(refused).contains("provider_not_connected"));
+}
+
+#[test]
+fn a_symlinked_vault_key_file_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().expect("root");
+    let real = root.path().join("real.key");
+    std::fs::write(&real, [5_u8; 32]).expect("write");
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    let link = root.path().join("vault.key");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    assert!(code(VaultKey::from_file(&link).unwrap_err()).contains("vault_key_unavailable"));
+    let raw = VaultKey::from_file(&real).expect("a raw 32-byte key loads");
+    assert_eq!(raw.id(), key(5).id());
+}

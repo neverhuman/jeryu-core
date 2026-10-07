@@ -19,6 +19,7 @@ use crate::model::*;
 
 /// How long a refresh waits for another refresh of the same connection.
 pub const REFRESH_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_SECRET_BYTES: usize = 16 * 1024;
 
 /// Durable row: the public connection plus its sealed secret, if connected.
 #[derive(Debug, Clone)]
@@ -34,6 +35,23 @@ pub(super) struct RefreshLocks(Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>);
 impl RefreshLocks {
     fn for_connection(&self, id: &str) -> Arc<Mutex<()>> {
         self.0.lock().entry(id.to_string()).or_default().clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.lock().is_empty()
+    }
+
+    /// Drop the entry once no other refresh holds or waits on it.
+    fn release(&self, id: &str, lock: Arc<Mutex<()>>) {
+        let mut locks = self.0.lock();
+        drop(lock);
+        if locks
+            .get(id)
+            .is_some_and(|entry| Arc::strong_count(entry) == 1)
+        {
+            locks.remove(id);
+        }
     }
 }
 
@@ -64,7 +82,7 @@ impl ForgeCore {
                 "provider_account_invalid: name the provider account in 1 to 256 printable characters".into(),
             ));
         }
-        if secret.expose().is_empty() || secret.expose().len() > 16 * 1024 {
+        if secret.expose().is_empty() || secret.expose().len() > MAX_SECRET_BYTES {
             return Err(ForgeError::Validation(
                 "provider_secret_invalid: the credential must be 1 byte to 16 KiB".into(),
             ));
@@ -228,14 +246,49 @@ impl ForgeCore {
         exchange: impl FnOnce(&ProviderSecret) -> Result<ProviderSecret>,
     ) -> Result<ProviderConnection> {
         let vault = self.vault()?;
+        // Authorize before waiting: a stranger or a dead connection gets its
+        // own error (connection-v1 §4), not connection_busy, and never adds a
+        // lock entry.
+        {
+            let state = self.state.read();
+            let record = live_record(&state, owner_id, binding)?;
+            if record.connection.credential_kind == CredentialKind::ApiKey {
+                return Err(ForgeError::Validation(
+                    "credential_not_refreshable: an API key does not rotate; reconnect to replace it"
+                        .into(),
+                ));
+            }
+        }
         let lock = self.refresh_locks.for_connection(&binding.connection_id);
-        let Some(_guard) = lock.try_lock_for(timeout) else {
-            return Err(ForgeError::Conflict(
+        let result = match lock.try_lock_for(timeout) {
+            Some(guard) => {
+                let result = self.refresh_locked(vault, owner_id, binding, exchange);
+                drop(guard);
+                result
+            }
+            None => Err(ForgeError::Conflict(
                 "connection_busy: another refresh of this connection is running".into(),
-            ));
+            )),
         };
+        self.refresh_locks.release(&binding.connection_id, lock);
+        result
+    }
+
+    fn refresh_locked(
+        &self,
+        vault: &VaultKey,
+        owner_id: &str,
+        binding: &ConnectionBinding,
+        exchange: impl FnOnce(&ProviderSecret) -> Result<ProviderSecret>,
+    ) -> Result<ProviderConnection> {
         let current = self.unseal_provider_secret(owner_id, binding)?;
         let rotated = exchange(&current)?;
+        drop(current);
+        if rotated.expose().is_empty() || rotated.expose().len() > MAX_SECRET_BYTES {
+            return Err(ForgeError::Validation(
+                "provider_secret_invalid: the rotated credential must be 1 byte to 16 KiB".into(),
+            ));
+        }
         let mut state = self.state.write();
         let previous = state.clone();
         // Re-check under the write lock: a disconnect may have won meanwhile.
@@ -244,8 +297,13 @@ impl ForgeCore {
             .provider_connections
             .get_mut(&binding.connection_id)
             .ok_or_else(|| not_connected(binding.provider))?;
-        record.connection.secret_version += 1;
-        record.sealed = Some(vault.seal(&seal_binding(&record.connection), rotated.expose())?);
+        // Seal against the next version before touching the row, so a failed
+        // seal leaves the row exactly as it was.
+        let mut next = record.connection.clone();
+        next.secret_version += 1;
+        let sealed = vault.seal(&seal_binding(&next), rotated.expose())?;
+        record.connection.secret_version = next.secret_version;
+        record.sealed = Some(sealed);
         record.connection.refreshed_at = Some(Utc::now());
         record.connection.updated_at = Utc::now();
         let connection = record.connection.clone();
@@ -273,18 +331,34 @@ impl ForgeCore {
                 "connection_owner_invalid: owner must be user/<login> or service/<name>".into(),
             )
         };
+        if !valid_owner_id(owner_id) {
+            return Err(invalid());
+        }
         if let Some(login) = owner_id.strip_prefix("user/") {
             self.require_active_account(login).map_err(|_| invalid())?;
-            return Ok(());
         }
-        let name = owner_id.strip_prefix("service/").ok_or_else(invalid)?;
-        let valid = !name.is_empty()
-            && name.len() <= 120
-            && name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
-        valid.then_some(()).ok_or_else(invalid)
+        Ok(())
     }
+}
+
+/// connection-v1 identifiers: `user/` or `service/` then a name of
+/// `[A-Za-z0-9._:-]` that starts and ends alphanumeric; 6 to 128 bytes in
+/// all, with no `..` and no second `/`.
+fn valid_owner_id(owner_id: &str) -> bool {
+    let Some(name) = owner_id
+        .strip_prefix("user/")
+        .or_else(|| owner_id.strip_prefix("service/"))
+    else {
+        return false;
+    };
+    let bytes = name.as_bytes();
+    (6..=128).contains(&owner_id.len())
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(b))
+        && !name.contains("..")
 }
 
 fn owned_record<'a>(
@@ -295,7 +369,9 @@ fn owned_record<'a>(
     let record = state
         .provider_connections
         .get_mut(connection_id)
-        .ok_or_else(|| ForgeError::NotFound(format!("provider connection {connection_id}")))?;
+        .ok_or_else(|| {
+            ForgeError::NotFound("provider_not_connected: no such provider connection".into())
+        })?;
     if record.connection.owner_id != owner_id {
         return Err(owner_mismatch());
     }
@@ -316,7 +392,7 @@ fn live_record<'a>(
     if connection.owner_id != owner_id || connection.provider != binding.provider {
         return Err(owner_mismatch());
     }
-    if connection.state != ConnectionState::Connected {
+    if !owner_active(state, owner_id) || connection.state != ConnectionState::Connected {
         return Err(not_connected(binding.provider));
     }
     if connection.connection_generation != binding.connection_generation {
@@ -328,6 +404,17 @@ fn live_record<'a>(
     Ok(record)
 }
 
+/// A user-owned connection works only while that account may authenticate.
+fn owner_active(state: &State, owner_id: &str) -> bool {
+    match owner_id.strip_prefix("user/") {
+        Some(login) => state
+            .accounts
+            .get(login)
+            .is_some_and(|account| account.status.permits_authentication()),
+        None => true,
+    }
+}
+
 pub(super) fn seal_binding(connection: &ProviderConnection) -> SealBinding<'_> {
     SealBinding {
         connection_id: &connection.id,
@@ -335,6 +422,7 @@ pub(super) fn seal_binding(connection: &ProviderConnection) -> SealBinding<'_> {
         provider: connection.provider.as_str(),
         generation: connection.connection_generation,
         secret_version: connection.secret_version,
+        credential_kind: connection.credential_kind.as_str(),
     }
 }
 
