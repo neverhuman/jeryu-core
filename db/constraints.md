@@ -415,9 +415,10 @@ Constraint policy:
 - `status` is `listed`, `invited`, or `declined`. A public join creates `listed`
   and does not change an existing status.
 - `source` is `landing`.
-- `request_count` starts at 1. A second join for the same email keeps the
-  original name, note, status, and `created_at`, increments the count, and
-  moves `last_requested_at`. It does not create a user.
+- `request_count` starts at 1. A second join for the same email returns the
+  stored row and does not write, so name, note, status, `created_at`,
+  `last_requested_at`, and `request_count` stay as stored. It does not create
+  a user.
 - The table is threaded through `State`, `load_state`, `stage_state`, and
   `storage::snapshot::OWNED_TABLES`. An unrelated snapshot save keeps the rows.
   An older application that does not own the table leaves it untouched.
