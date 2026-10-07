@@ -204,12 +204,12 @@ Methods are GET and POST until an enrolled template names another method.
 The node compares metadata to the admitted signed lease. The caller cannot
 choose an account, a generation, or an upstream URL.
 
-The node then calls the gateway at
-`/internal/gateway/:session/:provider/*` over mTLS. The body starts with a
-capability. The request and response bodies stream, with a 1 MiB buffer per
-direction and a 60 second idle timeout. Bodies are not stored and not logged.
-Redirects are not followed. A redirect or any host outside the allowlist is
-`upstream_host_denied`.
+The node then calls the gateway with one mTLS
+`POST /internal/gateway/{session_id}/{provider}`, as `k3-relay-v1.md`
+specifies. The body starts with a capability. The request and response
+bodies stream, with a 1 MiB buffer per direction and a 60 second idle
+timeout. Bodies are not stored and not logged. Redirects are not followed.
+A redirect or any host outside the allowlist is `upstream_host_denied`.
 
 Capability payload:
 
@@ -223,8 +223,20 @@ Capability payload:
   rules as the lease, excluding `signature`
 
 Lifetime is at most 60 seconds and must not pass the session lease expiry.
-The gateway checks the signature, the audience, the owner, the mode rule in
-section 2, and the live vault generation on every request.
+That lifetime is the window in which `gateway-open` may be accepted. It is
+not a cap on an accepted response. A provider stream may continue past
+`expires_at` while frames keep arriving inside the idle timeout and the
+session lease is still live. The gateway does not accept a second capability
+on the same `request_id`. A later request needs its own capability. When the
+session lease expires, the node closes the relay with the session and the
+gateway aborts that call.
+
+On `gateway-open` the gateway checks the signature, the audience, the owner,
+the mode rule in section 2, the live vault generation, and `expires_at`. On
+every later line of that same request it checks the owner, the mode, and the
+live vault generation and state again. It does not fail those later lines
+solely because `expires_at` has passed. Disconnect and credential replacement
+still fence the in-flight response.
 
 In `qualified_ram_token` mode the gateway compares a guest Authorization
 value to the current access token with a constant-time compare, then

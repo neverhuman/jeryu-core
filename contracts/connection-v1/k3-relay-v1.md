@@ -80,8 +80,11 @@ plus the node-built relay metadata (`request_id`, method, path, headers,
 provider). Following lines are `request-body`, then `request-end`. The
 response is NDJSON: `head`, `response-body` lines, `response-end`, or one
 `error` line. Each line is at most 256 KiB. The URL contains no token.
-The gateway applies `connection-v1.md` on every line, not only on the first,
-and does not follow redirects.
+The gateway applies `connection-v1.md` section 6 on every line and does not
+follow redirects. `expires_at` is checked only on `gateway-open`. Later
+lines of that `request_id` stay valid after `expires_at` while the idle
+timeout and the session lease still hold. A new `gateway-open` for the same
+`request_id` is `relay_stream_invalid`. A new request uses a new capability.
 
 The node checks the admitted lease is still the one it booted before it
 forwards `open` and before it forwards each `request-body`. It does not
@@ -91,12 +94,16 @@ cache a gateway success past that check.
 
 - Helper mode: placeholder stripped, gateway sees the vault credential,
   guest frames have no authorization field.
-- Three `open`s on one connection succeed; the fourth in flight returns
+- Four `open`s on one VM succeed; the fifth in flight returns
   `connection_busy`.
 - A generation bump between `request-body` frames returns
   `connection_generation_stale` or `provider_not_connected` and no further
   response body.
 - A 32769-byte decoded chunk is `relay_stream_invalid`.
+- `gateway-open` after `expires_at` is `capability_expired` and opens nothing.
+  A `response-body` line after `expires_at`, on a request opened before
+  `expires_at`, is forwarded when the generation is unchanged.
+- A second `gateway-open` for the same `request_id` is `relay_stream_invalid`.
 - `outbound` from the fake guest to `api.anthropic.com`, `api.openai.com`,
   `api.x.ai`, or `us.api.x.ai` stays impossible.
 
