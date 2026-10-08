@@ -454,3 +454,29 @@ fn a_symlinked_vault_key_file_is_refused() {
     let raw = VaultKey::from_file(&real).expect("a raw 32-byte key loads");
     assert_eq!(raw.id(), key(5).id());
 }
+
+#[test]
+fn vault_errors_classify_into_typed_codes_with_repair_hints() {
+    let core = core_with_vault();
+    let error = core
+        .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
+        .unwrap_err();
+    let code = ConnectionErrorCode::from_error(&error).expect("vault code");
+    assert_eq!(code, ConnectionErrorCode::ProviderNotConnected);
+    assert_eq!(code.http_status(), 404);
+    let hint = code.repair_hint();
+    assert_eq!(hint.reason, "provider_not_connected");
+    assert!(hint.docs_url.starts_with("contracts/connection-v1/"));
+    for code in ConnectionErrorCode::ALL {
+        assert_eq!(
+            code.repair_hint().reason,
+            code.to_string(),
+            "reason names the code"
+        );
+        assert!(!code.repair_hint().common_fixes.is_empty());
+    }
+    assert_eq!(
+        ConnectionErrorCode::from_error(&ForgeError::Validation("something else".into())),
+        None
+    );
+}

@@ -127,3 +127,194 @@ impl std::fmt::Debug for ProviderSecret {
         f.write_str("ProviderSecret(<redacted>)")
     }
 }
+
+/// Every error code the vault returns, as a typed value with its repair
+/// guidance. Vault errors are `ForgeError`s whose text starts with one of
+/// these codes; `from_error` recovers the code so an edge can map it to a
+/// status and show the hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionErrorCode {
+    #[error("provider_unknown")]
+    ProviderUnknown,
+    #[error("connection_owner_invalid")]
+    ConnectionOwnerInvalid,
+    #[error("connection_owner_mismatch")]
+    ConnectionOwnerMismatch,
+    #[error("provider_not_connected")]
+    ProviderNotConnected,
+    #[error("connection_generation_stale")]
+    ConnectionGenerationStale,
+    #[error("provider_connection_ambiguous")]
+    ProviderConnectionAmbiguous,
+    #[error("provider_account_invalid")]
+    ProviderAccountInvalid,
+    #[error("provider_secret_invalid")]
+    ProviderSecretInvalid,
+    #[error("credential_not_refreshable")]
+    CredentialNotRefreshable,
+    #[error("connection_busy")]
+    ConnectionBusy,
+    #[error("refresh_persist_failed")]
+    RefreshPersistFailed,
+    #[error("vault_unavailable")]
+    VaultUnavailable,
+    #[error("vault_secret_unreadable")]
+    VaultSecretUnreadable,
+}
+
+const CONNECTION_DOCS: &str = "contracts/connection-v1/connection-v1.md";
+
+impl ConnectionErrorCode {
+    pub const ALL: [Self; 13] = [
+        Self::ProviderUnknown,
+        Self::ConnectionOwnerInvalid,
+        Self::ConnectionOwnerMismatch,
+        Self::ProviderNotConnected,
+        Self::ConnectionGenerationStale,
+        Self::ProviderConnectionAmbiguous,
+        Self::ProviderAccountInvalid,
+        Self::ProviderSecretInvalid,
+        Self::CredentialNotRefreshable,
+        Self::ConnectionBusy,
+        Self::RefreshPersistFailed,
+        Self::VaultUnavailable,
+        Self::VaultSecretUnreadable,
+    ];
+
+    /// The code a vault `ForgeError` carries, if it is a vault error.
+    #[must_use]
+    pub fn from_error(error: &crate::ForgeError) -> Option<Self> {
+        let text = error.to_string();
+        let code = text
+            .split_once(": ")
+            .map_or(text.as_str(), |(_, rest)| rest);
+        let code = code.split(':').next().unwrap_or_default();
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.to_string() == code)
+    }
+
+    /// HTTP status an API edge should answer with.
+    #[must_use]
+    pub fn http_status(self) -> u16 {
+        match self {
+            Self::ConnectionOwnerMismatch => 403,
+            Self::ProviderNotConnected => 404,
+            Self::ConnectionGenerationStale
+            | Self::ProviderConnectionAmbiguous
+            | Self::ConnectionBusy => 409,
+            Self::RefreshPersistFailed | Self::VaultUnavailable | Self::VaultSecretUnreadable => {
+                503
+            }
+            _ => 422,
+        }
+    }
+
+    /// Structured repair guidance for the person or agent that hit the error.
+    #[must_use]
+    pub fn repair_hint(self) -> crate::AgentRepairHint {
+        let (purpose, common_fixes, repair_hint): (
+            &'static str,
+            &'static [&'static str],
+            &'static str,
+        ) = match self {
+            Self::ProviderUnknown => (
+                "choose a managed agent provider",
+                &["use claude, codex, or grok"],
+                "retry with a supported provider name",
+            ),
+            Self::ConnectionOwnerInvalid => (
+                "name the owner of a provider connection",
+                &["use user/<login> for a person or service/<name> for automation"],
+                "fix the owner id, then reconnect",
+            ),
+            Self::ConnectionOwnerMismatch => (
+                "use a provider connection",
+                &[
+                    "use a connection that belongs to the session owner",
+                    "ask an admin to bind a service account connection",
+                ],
+                "resolve the binding again for the right owner",
+            ),
+            Self::ProviderNotConnected => (
+                "use a provider connection",
+                &[
+                    "connect the provider once in Settings, Agent providers",
+                    "reconnect if it was disconnected",
+                ],
+                "connect the provider, then start a new session",
+            ),
+            Self::ConnectionGenerationStale => (
+                "use a provider connection",
+                &["the credential was replaced or disconnected; start a new session"],
+                "sign a new lease at the current connection generation",
+            ),
+            Self::ProviderConnectionAmbiguous => (
+                "pick a provider connection",
+                &["pass the connection_id to use"],
+                "retry with an explicit connection_id",
+            ),
+            Self::ProviderAccountInvalid => (
+                "label a provider account",
+                &["use letters, digits, and ._:/-, starting and ending with a letter or digit"],
+                "fix the account label, then reconnect",
+            ),
+            Self::ProviderSecretInvalid => (
+                "store a provider credential",
+                &["send a credential between 1 byte and 16 KiB"],
+                "reconnect with the full credential",
+            ),
+            Self::CredentialNotRefreshable => (
+                "refresh a provider credential",
+                &["API keys do not rotate; reconnect to replace one"],
+                "reconnect with the new API key",
+            ),
+            Self::ConnectionBusy => (
+                "refresh a provider credential",
+                &["another refresh is running; wait and retry"],
+                "retry the refresh after a few seconds",
+            ),
+            Self::RefreshPersistFailed => (
+                "persist a rotated credential",
+                &["check forge storage health; the previous credential is still valid"],
+                "retry the refresh once storage is healthy",
+            ),
+            Self::VaultUnavailable => (
+                "open the credential vault",
+                &["configure the vault key file for this server"],
+                "restart with a private vault key file",
+            ),
+            Self::VaultSecretUnreadable => (
+                "open a stored credential",
+                &["the stored credential no longer matches its row or key; reconnect it"],
+                "disconnect and reconnect the provider",
+            ),
+        };
+        crate::AgentRepairHint {
+            purpose,
+            reason: self.reason(),
+            common_fixes,
+            docs_url: CONNECTION_DOCS,
+            repair_hint,
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::ProviderUnknown => "provider_unknown",
+            Self::ConnectionOwnerInvalid => "connection_owner_invalid",
+            Self::ConnectionOwnerMismatch => "connection_owner_mismatch",
+            Self::ProviderNotConnected => "provider_not_connected",
+            Self::ConnectionGenerationStale => "connection_generation_stale",
+            Self::ProviderConnectionAmbiguous => "provider_connection_ambiguous",
+            Self::ProviderAccountInvalid => "provider_account_invalid",
+            Self::ProviderSecretInvalid => "provider_secret_invalid",
+            Self::CredentialNotRefreshable => "credential_not_refreshable",
+            Self::ConnectionBusy => "connection_busy",
+            Self::RefreshPersistFailed => "refresh_persist_failed",
+            Self::VaultUnavailable => "vault_unavailable",
+            Self::VaultSecretUnreadable => "vault_secret_unreadable",
+        }
+    }
+}
