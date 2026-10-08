@@ -38,7 +38,7 @@ fn code(error: ForgeError) -> String {
 #[test]
 fn connect_once_binds_many_sessions_and_never_exposes_the_secret() {
     let core = core_with_vault();
-    let connection = connect(&core, "user/alice", "alice@example.com");
+    let connection = connect(&core, "user/alice", "alice.example.com");
     assert_eq!(connection.state, ConnectionState::Connected);
     assert_eq!(connection.connection_generation, 1);
     let listed = core.list_provider_connections("user/alice");
@@ -66,7 +66,7 @@ fn connect_once_binds_many_sessions_and_never_exposes_the_secret() {
 #[test]
 fn bindings_never_fall_back_to_another_owner_or_provider() {
     let core = core_with_vault();
-    let connection = connect(&core, "user/alice", "alice@example.com");
+    let connection = connect(&core, "user/alice", "alice.example.com");
     let not_connected = core
         .resolve_provider_binding("user/bob", AgentProvider::Claude, None)
         .unwrap_err();
@@ -92,7 +92,7 @@ fn bindings_never_fall_back_to_another_owner_or_provider() {
 #[test]
 fn disconnect_drops_the_secret_and_fences_the_generation() {
     let core = core_with_vault();
-    let connection = connect(&core, "user/alice", "alice@example.com");
+    let connection = connect(&core, "user/alice", "alice.example.com");
     let binding = core
         .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
         .expect("binding");
@@ -112,7 +112,7 @@ fn disconnect_drops_the_secret_and_fences_the_generation() {
 
     // Reconnecting the same account bumps the generation again; the binding
     // from before the disconnect stays fenced.
-    let reconnected = connect(&core, "user/alice", "alice@example.com");
+    let reconnected = connect(&core, "user/alice", "alice.example.com");
     assert_eq!(reconnected.id, connection.id);
     assert_eq!(reconnected.connection_generation, 3);
     let stale = core
@@ -124,7 +124,7 @@ fn disconnect_drops_the_secret_and_fences_the_generation() {
 #[test]
 fn refresh_rotates_within_a_generation_and_serializes() {
     let core = core_with_vault();
-    connect(&core, "user/alice", "alice@example.com");
+    connect(&core, "user/alice", "alice.example.com");
     let binding = core
         .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
         .expect("binding");
@@ -180,7 +180,7 @@ fn refresh_rotates_within_a_generation_and_serializes() {
 #[test]
 fn a_failed_exchange_keeps_the_previous_secret() {
     let core = core_with_vault();
-    connect(&core, "user/alice", "alice@example.com");
+    connect(&core, "user/alice", "alice.example.com");
     let binding = core
         .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
         .expect("binding");
@@ -235,8 +235,8 @@ fn owners_without_a_vault_or_with_bad_ids_are_refused() {
 #[test]
 fn sealed_secrets_are_bound_to_their_row_and_key() {
     let core = core_with_vault();
-    let alice = connect(&core, "user/alice", "alice@example.com");
-    let bob = connect(&core, "user/bob", "bob@example.com");
+    let alice = connect(&core, "user/alice", "alice.example.com");
+    let bob = connect(&core, "user/bob", "bob.example.com");
     {
         // Copy alice's sealed secret onto bob's row: it must not open.
         let mut state = core.state.write();
@@ -278,7 +278,7 @@ fn provider_connections_survive_sqlite_reopen_without_plaintext() {
             .with_vault_key(key(7));
         core.create_account("alice", "vault-test-password", UserRole::User)
             .expect("alice");
-        connect(&core, "user/alice", "alice@example.com").id
+        connect(&core, "user/alice", "alice.example.com").id
     };
     let bytes = std::fs::read(&path).expect("db bytes");
     assert!(
@@ -320,7 +320,7 @@ fn vault_key_files_must_be_private() {
 #[test]
 fn a_secret_sealed_before_a_rotation_does_not_open_after_it() {
     let core = core_with_vault();
-    connect(&core, "user/alice", "alice@example.com");
+    connect(&core, "user/alice", "alice.example.com");
     let binding = core
         .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
         .expect("binding");
@@ -407,7 +407,7 @@ fn owner_ids_follow_the_contract_identifier_rules() {
 #[test]
 fn a_stranger_refresh_is_refused_by_ownership_not_busyness() {
     let core = core_with_vault();
-    connect(&core, "user/alice", "alice@example.com");
+    connect(&core, "user/alice", "alice.example.com");
     let binding = core
         .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
         .expect("binding");
@@ -430,7 +430,7 @@ fn a_stranger_refresh_is_refused_by_ownership_not_busyness() {
 #[test]
 fn a_disabled_owner_loses_access_to_their_connections() {
     let core = core_with_vault();
-    connect(&core, "user/alice", "alice@example.com");
+    connect(&core, "user/alice", "alice.example.com");
     let binding = core
         .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
         .expect("binding");

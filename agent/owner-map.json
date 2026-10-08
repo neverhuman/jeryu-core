@@ -16,6 +16,7 @@
     "VERSION": "release",
     "agent/": "agent",
     "contracts/AGENTS.md": "jeryu-core",
+    "contracts/connection-v1/": "jeryu-core",
     "contracts/generated/": "jeryu-core",
     "crates/domain/": "jeryu-core",
     "crates/jeryu-bugtracker/": "jeryu-core",

@@ -7,3 +7,10 @@ manual_edits = false
 path = "contracts/generated/"
 generator = "cargo run -p jeryu-readmodel --bin export_contracts"
 manual_edits = false
+
+# Hand-authored normative contracts (lane A). Not generated: the drift test
+# below fails when the schemas and the vault's Rust types disagree.
+[[zones]]
+path = "contracts/connection-v1/"
+generator = "cargo test --locked -p jeryu-core --test connection_v1_contract"
+manual_edits = true

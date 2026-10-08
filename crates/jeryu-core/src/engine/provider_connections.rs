@@ -76,10 +76,12 @@ impl ForgeCore {
     ) -> Result<ProviderConnection> {
         let vault = self.vault()?;
         self.require_owner(owner_id)?;
+        // connection-v1 types provider_account as an `id` (1 to 128 bytes of
+        // [A-Za-z0-9._:/-], alphanumeric at both ends).
         let account = provider_account.trim();
-        if account.is_empty() || account.len() > 256 || account.chars().any(char::is_control) {
+        if !valid_contract_id(account) {
             return Err(ForgeError::Validation(
-                "provider_account_invalid: name the provider account in 1 to 256 printable characters".into(),
+                "provider_account_invalid: use 1 to 128 characters of letters, digits, and ._:/- starting and ending with a letter or digit".into(),
             ));
         }
         if secret.expose().is_empty() || secret.expose().len() > MAX_SECRET_BYTES {
@@ -359,6 +361,20 @@ fn valid_owner_id(owner_id: &str) -> bool {
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(b))
         && !name.contains("..")
+}
+
+/// The connection-v1 `id` rule.
+fn valid_contract_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(b))
+        && !value.contains("..")
+        && !value.contains("//")
 }
 
 fn owned_record<'a>(
