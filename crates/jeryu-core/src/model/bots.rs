@@ -105,6 +105,56 @@ impl std::fmt::Debug for BotEnrollment {
     }
 }
 
+/// A scoped agent token, returned once when it is issued. It is presented
+/// directly as `Authorization: Bearer` and carries its bot's grant: the
+/// owner's non-admin rights cut down by the bot's reach.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BotAccessTokenIssued {
+    pub bot: BotSummary,
+    pub token_id: String,
+    pub token: String,
+    pub label: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for BotAccessTokenIssued {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BotAccessTokenIssued")
+            .field("bot", &self.bot)
+            .field("token_id", &self.token_id)
+            .field("token", &"[REDACTED]")
+            .field("label", &self.label)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// What the owner sees about an agent token after it is issued: never the
+/// token itself.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotAccessTokenSummary {
+    pub token_id: String,
+    pub bot_id: Uuid,
+    pub label: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// A verified agent token: the bot it acts as, and the key id and credential
+/// generation its calls are authorized under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BotAccessTokenAuth {
+    pub bot: BotSummary,
+    pub token_id: String,
+    pub key_id: String,
+    pub generation: u64,
+    pub expires_at: DateTime<Utc>,
+}
+
 /// Access token material the edge turns into a short-lived JWT. The refresh
 /// token is returned once per exchange or rotation.
 #[derive(Clone, PartialEq, Eq)]

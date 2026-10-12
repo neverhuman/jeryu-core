@@ -166,7 +166,7 @@ impl BotFailure {
 }
 
 /// Attach this failure's repair to the error callers match and display.
-fn explain_bot(error: ForgeError) -> ForgeError {
+pub(super) fn explain_bot(error: ForgeError) -> ForgeError {
     if matches!(error, ForgeError::WaitlistFull) {
         return error;
     }
@@ -1016,7 +1016,7 @@ impl ForgeCore {
     }
 
     #[allow(clippy::too_many_arguments)] // One flat audit row per bot action.
-    fn record_bot_audit(
+    pub(super) fn record_bot_audit(
         &self,
         actor: &str,
         action: &str,
@@ -1054,7 +1054,7 @@ impl ForgeCore {
         Ok(())
     }
 
-    fn active_account(&self, actor: &str) -> Result<AccountSummary> {
+    pub(super) fn active_account(&self, actor: &str) -> Result<AccountSummary> {
         let account = self.get_account(actor)?;
         if !account.status.permits_authentication() {
             return Err(ForgeError::Validation("account is not active".to_string()));
@@ -1145,7 +1145,7 @@ pub(super) fn invalidate_account_bots(state: &mut super::State, login: &str, now
         .retain(|_, token| !ids.contains(&token.bot_id));
 }
 
-fn owned_bot(state: &super::State, actor: &str, bot_id: Uuid) -> Result<BotRecord> {
+pub(super) fn owned_bot(state: &super::State, actor: &str, bot_id: Uuid) -> Result<BotRecord> {
     match state.bots.get(&bot_id) {
         Some(bot) if bot.owner == actor => Ok(bot.clone()),
         _ => Err(ForgeError::NotFound(format!("bot {bot_id}"))),
@@ -1236,7 +1236,7 @@ fn owner_grant_allows(
     }
 }
 
-fn bot_account_matches(state: &super::State, bot: &BotRecord) -> bool {
+pub(super) fn bot_account_matches(state: &super::State, bot: &BotRecord) -> bool {
     if bot.status != BotStatus::Active {
         return false;
     }
@@ -1301,7 +1301,7 @@ fn observation_contains_secret(observation: &BotObservation) -> bool {
         .any(|field| field.contains("jbk_") || field.contains("jbr_"))
 }
 
-fn same_secret_hash(left: &str, right: &str) -> bool {
+pub(super) fn same_secret_hash(left: &str, right: &str) -> bool {
     let left = left.as_bytes();
     let right = right.as_bytes();
     if left.len() != right.len() {
@@ -1429,7 +1429,7 @@ fn revoke_refresh_family(state: &mut super::State, bot_id: Uuid, now: DateTime<U
     }
 }
 
-fn key_is_live(key: &BotKeyRecord, now: DateTime<Utc>) -> bool {
+pub(super) fn key_is_live(key: &BotKeyRecord, now: DateTime<Utc>) -> bool {
     key.revoked_at.is_none() && key.retired_at.is_none_or(|retired| retired > now)
 }
 
@@ -1452,7 +1452,7 @@ fn invalid() -> Result<BotSession> {
     Err(explain_bot(ForgeError::Validation(INVALID.to_string())))
 }
 
-fn new_key_id() -> Result<String> {
+pub(super) fn new_key_id() -> Result<String> {
     let mut id = String::with_capacity(12);
     while id.len() < 12 {
         let mut byte = [0u8; 1];
@@ -1464,7 +1464,7 @@ fn new_key_id() -> Result<String> {
     Ok(id)
 }
 
-fn new_secret() -> Result<String> {
+pub(super) fn new_secret() -> Result<String> {
     let mut bytes = [0u8; 32];
     OsRng
         .try_fill_bytes(&mut bytes)
@@ -1527,7 +1527,7 @@ fn dummy_secret_hash() -> &'static String {
     DUMMY.get_or_init(|| hash_secret("dummy-bot-secret").expect("dummy bot hash"))
 }
 
-fn token_hash(token: &str) -> String {
+pub(super) fn token_hash(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     hex::encode(hasher.finalize())

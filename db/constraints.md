@@ -450,3 +450,23 @@ Constraint policy:
 Rollback/backfill:
 - No backfill: the table starts empty.
 - Rollback retains the table (see `db/rollbacks/0019_provider_connections.sql`).
+
+## 0020 Bot Access Tokens
+
+Scoped agent tokens: a long-lived bearer that acts as one account bot.
+
+Constraint policy:
+- `token_hash` is the SHA-256 of the token and the primary key; the token
+  itself is never stored. `token_id` is the 12-character public id, unique.
+- A row belongs to one bot (`bot_id`, cascade on delete). It is valid while
+  `generation` equals the bot's `credential_generation`, it is not revoked and
+  it has not expired. Suspending or revoking the bot, or an owner account
+  event, bumps the generation and ends every token of that bot.
+- `key_id` records the bot key that was live at issue, for audit only.
+- `label` is optional and at most 80 characters.
+- `last_used_at` is advisory: it is kept in memory and written with the next
+  mutation.
+
+Rollback/backfill:
+- No backfill: the table starts empty.
+- Rollback retains the table (see `db/rollbacks/0020_bot_access_tokens.sql`).

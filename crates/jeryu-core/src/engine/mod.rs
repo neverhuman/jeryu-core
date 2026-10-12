@@ -23,6 +23,9 @@ use crate::webhooks::{should_deliver, sign_webhook_payload};
 mod accounts;
 mod audit;
 mod auth;
+mod bot_tokens;
+#[cfg(test)]
+mod bot_tokens_tests;
 mod bots;
 mod branch_protection;
 mod check_runs;
@@ -49,6 +52,7 @@ mod webhooks;
 mod tests;
 
 pub use audit::AuditEntry;
+pub use bot_tokens::AGENT_TOKEN_PREFIX;
 pub use provider_connections::REFRESH_LOCK_TIMEOUT;
 pub use pull_requests::MergeReadiness;
 pub use repositories::RepositoryDeletion;
@@ -69,6 +73,7 @@ struct State {
     bots: HashMap<Uuid, bots::BotRecord>,
     bot_keys: HashMap<String, bots::BotKeyRecord>,
     bot_refresh: HashMap<String, bots::BotRefreshRecord>,
+    bot_access_tokens: HashMap<String, bot_tokens::BotAccessTokenRecord>,
     bot_operations: HashMap<(Uuid, String, String), bots::BotOperationRecord>,
     bot_activity: Vec<BotActivityEvent>,
     provider_connections: HashMap<String, provider_connections::ConnectionRecord>,

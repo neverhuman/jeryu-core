@@ -68,6 +68,10 @@ const ROLLBACKS: &[(&str, &str)] = &[
         "0019_provider_connections.sql",
         include_str!("../../../../../db/rollbacks/0019_provider_connections.sql"),
     ),
+    (
+        "0020_bot_access_tokens.sql",
+        include_str!("../../../../../db/rollbacks/0020_bot_access_tokens.sql"),
+    ),
 ];
 
 fn db_dir(kind: &str) -> PathBuf {

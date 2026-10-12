@@ -1,6 +1,15 @@
 # Changelog
 
 ## Unreleased
+- Scoped agent tokens (migration 0020). An account issues a `jat_` token for
+  one of its bots (`issue_bot_access_token`, default 90 days, at most 365, at
+  most 10 live per bot) and presents it directly as a bearer.
+  `authenticate_bot_access_token` resolves it to that bot's grant: the owner's
+  non-admin rights cut down by the bot's reach, checked per request by
+  `authorize_bot`. Suspending or revoking the bot, or an owner account event,
+  ends its tokens; rotating the enrollment key does not. Only the token's
+  SHA-256 is stored. `list_bot_access_tokens` and `revoke_bot_access_token`
+  manage them.
 - A repository's default branch now also decides the bare repository's `HEAD`.
   `ForgeCore::set_repository_default_branch` points `HEAD` at
   `refs/heads/<branch>` through `RepoBranches`, and setting the branch the forge

@@ -8,6 +8,7 @@ use super::{Counters, State};
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
 
+mod bot_tokens;
 mod codec;
 mod deployments;
 mod migrations;
@@ -201,6 +202,7 @@ fn stage_state(conn: &Connection, state: &State) -> Result<()> {
     }
     stage_bots(conn, state)?;
     provider_connections::stage_provider_connections(conn, state)?;
+    bot_tokens::stage_bot_access_tokens(conn, state)?;
     for invitation in state.invitations.values() {
         conn.execute(
             r#"
@@ -706,6 +708,7 @@ fn load_state(conn: &Connection) -> Result<State> {
     load_bot_operations(conn, &mut state)?;
     load_bot_activity(conn, &mut state)?;
     provider_connections::load_provider_connections(conn, &mut state)?;
+    bot_tokens::load_bot_access_tokens(conn, &mut state)?;
     load_invitations(conn, &mut state)?;
     load_activation_challenges(conn, &mut state)?;
     load_bootstrap_state(conn, &mut state)?;

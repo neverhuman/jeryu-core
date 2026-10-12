@@ -1,0 +1,11 @@
+-- Retain bot_access_tokens. Dropping the table ends every agent token at once
+-- and forces each owner to issue new ones; revoking a bot already ends its
+-- tokens without a schema change.
+-- An older writer that snapshots State without this table deletes the rows on
+-- its next save: never run that writer against a migrated database. Restore a
+-- verified pre-0020 VACUUM INTO copy only when no token has been issued since;
+-- otherwise recover forward.
+-- timeout-guard:
+--   lock_timeout = '5s'
+--   statement_timeout = '60s'
+SELECT '0020 rollback retains agent tokens; restore the pre-migration snapshot or recover forward' AS rollback_notice;

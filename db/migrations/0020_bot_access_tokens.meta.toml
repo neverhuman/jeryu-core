@@ -1,0 +1,22 @@
+# jankurai:migration v1
+id = "0020_bot_access_tokens"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "old_app_new_db,new_app_old_db"
+requires = ["0019_provider_connections"]
+rollback = "db/rollbacks/0020_bot_access_tokens.sql"
+backfill = "none; the table starts empty and rows are inserted only by issue_bot_access_token"
+data_classification = "secret"
+tenant_impact = "stores the SHA-256 of each scoped agent token with its bot, key id, credential generation, label and times; the token itself is never stored"
+tests = [
+  "db-migration-analyze",
+  "agent_tokens_survive_sqlite_reopen_without_plaintext",
+  "agent_token_dies_with_its_bot_credential_generation",
+]

@@ -65,6 +65,11 @@ const OWNED_TABLES: &[OwnedTable] = &[
         primary_key: "id",
     },
     OwnedTable {
+        name: "bot_access_tokens",
+        columns: "token_hash,token_id,bot_id,key_id,generation,label,created_at,expires_at,last_used_at,revoked_at",
+        primary_key: "token_hash",
+    },
+    OwnedTable {
         name: "provider_connections",
         columns: "id,owner_id,provider,provider_account,credential_kind,state,connection_generation,secret_version,sealed_secret,created_at,updated_at,refreshed_at",
         primary_key: "id",
