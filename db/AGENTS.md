@@ -68,3 +68,13 @@ Migration 0018 waitlist notes:
 - Persist and reload rows through every snapshot save.
 - Exercise waitlist_join_normalizes_and_keeps_the_first_signup and
   waitlist_survives_sqlite_reopen_and_unrelated_write.
+
+Migration 0021 bot kind notes:
+- `bots` is rebuilt once to drop the 0017 kind `CHECK`. Never edit 0017 or
+  0020; 0017 still runs first on a fresh database and 0021 rebuilds it.
+- The rebuild runs with foreign keys off in one transaction (a `DROP TABLE` with
+  them on cascades into every bot child table) and checks the child tables'
+  `foreign_key_check` before commit.
+- Exercise migration_0021_rebuilds_bots_and_keeps_children,
+  migration_0021_is_idempotent_on_the_new_shape and
+  free_form_kind_survives_sqlite_reopen.

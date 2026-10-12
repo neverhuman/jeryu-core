@@ -1,0 +1,28 @@
+# jankurai:migration v1
+id = "0021_bot_kind_free_form"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 100
+deploy_phase = "expand"
+app_compatibility = "new_app_old_db"
+requires = ["0020_bot_access_tokens"]
+rollback = "db/rollbacks/0021_bot_kind_free_form.sql"
+backfill = "none; every row is copied unchanged into the rebuilt table"
+data_classification = "credentials"
+tenant_impact = "Relaxes bots.kind from grok|muse to ^[a-z][a-z0-9-]{0,31}$. The kind is a label and grants nothing; rows, keys, tokens and activity are kept."
+tests = [
+  "db-migration-analyze",
+  "migration_0021_rebuilds_bots_and_keeps_children",
+  "migration_0021_is_idempotent_on_the_new_shape",
+  "free_form_kind_survives_sqlite_reopen",
+]
+approval = "forge-api"
+backup = "VACUUM INTO copy of forge.sqlite before apply"
+restore = "restore that snapshot when no bot with a kind other than grok or muse was enrolled since; otherwise recover forward"
+irreversible = false
+verify = "sqlite_master bots sql no longer contains the 0017 kind CHECK; COUNT(*) of bots and of bot_keys, bot_refresh_tokens, bot_operations, bot_activity and bot_access_tokens unchanged; pragma_foreign_key_check of those tables adds no row"

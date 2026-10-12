@@ -53,8 +53,20 @@ const MIGRATION_0019: &str =
     include_str!("../../../../../db/migrations/0019_provider_connections.sql");
 const MIGRATION_0020: &str =
     include_str!("../../../../../db/migrations/0020_bot_access_tokens.sql");
+const MIGRATION_0021: &str =
+    include_str!("../../../../../db/migrations/0021_bot_kind_free_form.sql");
+/// The 0017 constraint 0021 removes. Its presence in `sqlite_master` is the
+/// guard: 0017 re-runs `CREATE TABLE IF NOT EXISTS bots` on every open, so a
+/// fresh database gets the old shape first and 0021 rebuilds it once.
+const MIGRATION_0017_KIND_CHECK: &str = "CHECK (kind IN ('grok', 'muse'))";
 
 pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
+    apply_migrations_through_0020(conn)?;
+    apply_migration_0021(conn)?;
+    Ok(())
+}
+
+fn apply_migrations_through_0020(conn: &Connection) -> Result<()> {
     apply_migrations_through_0010(conn)?;
     apply_migration_0011(conn)?;
     // 0012 is pure CREATE TABLE/INDEX IF NOT EXISTS: idempotent, no guard.
@@ -72,6 +84,79 @@ pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     // 0020 is pure CREATE TABLE/INDEX IF NOT EXISTS: idempotent, no guard.
     conn.execute_batch(MIGRATION_0020).map_err(storage_error)?;
     Ok(())
+}
+
+/// Rebuild `bots` without the 0017 kind CHECK, once.
+///
+/// `DROP TABLE bots` with foreign keys on would delete every child row
+/// through `ON DELETE CASCADE`, and `PRAGMA foreign_keys` cannot change inside
+/// a transaction. So: foreign keys off, one transaction for the rebuild, a
+/// `foreign_key_check` before commit, then the caller's setting back.
+fn apply_migration_0021(conn: &Connection) -> Result<()> {
+    let bots_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'bots'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if !bots_sql.is_some_and(|sql| sql.contains(MIGRATION_0017_KIND_CHECK)) {
+        return Ok(());
+    }
+    let foreign_keys: i64 = conn
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .map_err(storage_error)?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(storage_error)?;
+    let rebuilt = rebuild_bots_0021(conn);
+    let restored = conn
+        .execute_batch(if foreign_keys == 0 {
+            "PRAGMA foreign_keys = OFF;"
+        } else {
+            "PRAGMA foreign_keys = ON;"
+        })
+        .map_err(storage_error);
+    rebuilt.and(restored)
+}
+
+/// Child tables of `bots`. Their foreign keys are checked across the rebuild.
+const BOT_CHILD_TABLES: &[&str] = &[
+    "bot_keys",
+    "bot_refresh_tokens",
+    "bot_operations",
+    "bot_activity",
+    "bot_access_tokens",
+];
+
+fn rebuild_bots_0021(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction().map_err(storage_error)?;
+    // Compare against the state before: a pre-existing orphan is not this
+    // migration's to repair, but the rebuild must not add one.
+    let before = bot_child_fk_violations(&tx)?;
+    tx.execute_batch(MIGRATION_0021).map_err(storage_error)?;
+    let after = bot_child_fk_violations(&tx)?;
+    if after > before {
+        return Err(super::ForgeError::Storage(format!(
+            "0021 bots rebuild would leave {} child rows without their bot",
+            after - before
+        )));
+    }
+    tx.commit().map_err(storage_error)
+}
+
+fn bot_child_fk_violations(conn: &Connection) -> Result<i64> {
+    let mut total = 0;
+    for table in BOT_CHILD_TABLES {
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check(?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        total += count;
+    }
+    Ok(total)
 }
 
 fn apply_migrations_through_0010(conn: &Connection) -> Result<()> {

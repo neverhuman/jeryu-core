@@ -1,0 +1,11 @@
+-- Retain the rebuilt bots table. Restoring the 0017 CHECK would reject every
+-- bot whose kind is not 'grok' or 'muse', and a rebuild that drops those rows
+-- would cascade into their keys, tokens and activity.
+-- An older application cannot load a bot whose kind it does not know: never
+-- run it against a database that holds such a bot. Restore a verified
+-- pre-0021 VACUUM INTO copy only when no bot has been enrolled with another
+-- kind since; otherwise recover forward.
+-- timeout-guard:
+--   lock_timeout = '5s'
+--   statement_timeout = '60s'
+SELECT '0021 rollback retains the free-form bot kind; restore the pre-migration snapshot or recover forward' AS rollback_notice;

@@ -97,10 +97,14 @@ repair messages. Use `docs/codegraph-oracle.md` for the route contract and
 
 ## Bot enrollment
 
-Enrolling or rotating a Grokbot or Musebot rejected the slug, display name,
-reach, key environment, or account. Use a login-shaped slug, keep the display
-name within 80 characters, and choose general reach, at most 100 repositories,
-or one issue, pull, or branch.
+Enrolling or rotating a bot rejected the slug, display name, kind, reach, key
+environment, or account. Use a login-shaped slug, keep the display name within
+80 characters, and choose general reach, 1 to 20 distinct owners, at most 100
+repositories, or one issue, pull, or branch. A kind matches
+`^[a-z][a-z0-9-]{0,31}$`; an invalid one is `invalid_bot_kind`. An owners
+reach that is empty, names more than 20 distinct owners, or names an owner
+that is not an account or organization on this forge is
+`invalid_reach_owners`.
 
 ## Bot credential
 
@@ -121,7 +125,8 @@ idempotency key.
 
 The call sits outside the owner's non-admin grant. The repository is not
 granted, the task is not the granted one, or the effect exceeds the owner's
-rights. Narrow the call. Do not request forge admin, release, pin, or user
+rights. An owners reach covers only repositories of the listed owners on which
+the bot's owner holds an explicit grant; a public read is not enough. Narrow the call. Do not request forge admin, release, pin, or user
 administration.
 
 ## Bot missing

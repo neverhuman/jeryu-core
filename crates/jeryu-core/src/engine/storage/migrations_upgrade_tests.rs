@@ -72,6 +72,10 @@ const ROLLBACKS: &[(&str, &str)] = &[
         "0020_bot_access_tokens.sql",
         include_str!("../../../../../db/rollbacks/0020_bot_access_tokens.sql"),
     ),
+    (
+        "0021_bot_kind_free_form.sql",
+        include_str!("../../../../../db/rollbacks/0021_bot_kind_free_form.sql"),
+    ),
 ];
 
 fn db_dir(kind: &str) -> PathBuf {
@@ -402,4 +406,134 @@ fn upgrade_from_pre_0010_rejects_non_canonical_login() {
     let err = apply_migrations(&conn).expect_err("non-canonical login must block 0010");
     assert!(err.to_string().contains("not canonical"), "{err}");
     assert!(!column_exists(&conn, "user_accounts", "display_name").expect("inspect"));
+}
+
+fn bots_sql(conn: &Connection) -> String {
+    conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'bots'",
+        [],
+        |row| row.get(0),
+    )
+    .expect("bots table")
+}
+
+fn count(conn: &Connection, table: &str) -> i64 {
+    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+        row.get(0)
+    })
+    .expect("count rows")
+}
+
+/// A database at 0020 holding a Grokbot with a key, a refresh token, an
+/// operation, an activity row and an agent token.
+fn pre_0021_connection_with_a_bot() -> Connection {
+    let conn = Connection::open_in_memory().expect("open in-memory db");
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .expect("foreign keys on");
+    apply_migrations_through_0020(&conn).expect("migrate through 0020");
+    insert_account(&conn, "alice");
+    conn.execute_batch(
+        r#"
+        INSERT INTO bots (
+          id, owner, slug, display_name, kind, status, reach_json, auth_epoch,
+          credential_generation, created_at, updated_at
+        ) VALUES ('b1', 'alice', 'atlas', 'Atlas', 'grok', 'active',
+                  '{"mode":"general"}', 0, 1,
+                  '2026-06-01T00:00:00Z', '2026-06-01T00:00:00Z');
+        INSERT INTO bot_keys (key_id, bot_id, secret_hash, env, created_at)
+        VALUES ('k1', 'b1', '$argon2id$v=19$stub', 'live', '2026-06-01T00:00:00Z');
+        INSERT INTO bot_refresh_tokens (token_hash, bot_id, key_id, generation, expires_at)
+        VALUES (printf('%064d', 1), 'b1', 'k1', 1, '2026-06-02T00:00:00Z');
+        INSERT INTO bot_operations (bot_id, operation, request_key, body_digest, created_at)
+        VALUES ('b1', 'op', 'rk', printf('%064d', 2), '2026-06-01T00:00:00Z');
+        INSERT INTO bot_activity (id, bot_id, key_id, action, outcome, scope, created_at)
+        VALUES ('a1', 'b1', 'k1', 'GET /x', '200', 'http', '2026-06-01T00:00:00Z');
+        INSERT INTO bot_access_tokens (
+          token_hash, token_id, bot_id, key_id, generation, created_at, expires_at
+        ) VALUES (printf('%064d', 3), 'abcdefghjkmn', 'b1', 'k1', 1,
+                  '2026-06-01T00:00:00Z', '2026-09-01T00:00:00Z');
+        "#,
+    )
+    .expect("insert a bot and its children");
+    conn
+}
+
+/// 0021 drops the 0017 kind CHECK by rebuilding `bots`. Every bot row and
+/// every child row survives, the cascade still works afterwards, and the
+/// caller's foreign-key setting is restored.
+#[test]
+fn migration_0021_rebuilds_bots_and_keeps_children() {
+    let conn = pre_0021_connection_with_a_bot();
+    assert!(bots_sql(&conn).contains(MIGRATION_0017_KIND_CHECK));
+    let children = [
+        "bot_keys",
+        "bot_refresh_tokens",
+        "bot_operations",
+        "bot_activity",
+        "bot_access_tokens",
+    ];
+
+    apply_migrations(&conn).expect("upgrade");
+
+    assert!(!bots_sql(&conn).contains(MIGRATION_0017_KIND_CHECK));
+    let kind: String = conn
+        .query_row("SELECT kind FROM bots WHERE id = 'b1'", [], |row| {
+            row.get(0)
+        })
+        .expect("read kind");
+    assert_eq!(kind, "grok");
+    for table in children {
+        assert_eq!(count(&conn, table), 1, "{table} keeps its row");
+    }
+    let foreign_keys: i64 = conn
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .expect("pragma");
+    assert_eq!(foreign_keys, 1, "foreign keys are back on");
+    let index: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_bots_owner'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("index");
+    assert_eq!(index, 1);
+
+    let insert = |id: &str, slug: &str, kind: &str| {
+        conn.execute(
+            r#"
+            INSERT INTO bots (
+              id, owner, slug, display_name, kind, status, reach_json, auth_epoch,
+              credential_generation, created_at, updated_at
+            ) VALUES (?1, 'alice', ?2, 'Bot', ?3, 'active', '{"mode":"general"}', 0, 1,
+                      '2026-06-01T00:00:00Z', '2026-06-01T00:00:00Z')
+            "#,
+            [id, slug, kind],
+        )
+    };
+    insert("b2", "helper", "agent").expect("agent kind");
+    insert("b3", "coder", "claude-code-2").expect("hyphen and digit kind");
+    for bad in ["", "Agent", "9lives", "-x", "has space", &"a".repeat(33)] {
+        assert!(
+            insert("bx", "bad", bad).is_err(),
+            "kind {bad:?} is rejected"
+        );
+    }
+    insert("b4", "longest", &"a".repeat(32)).expect("32 characters");
+
+    conn.execute("DELETE FROM bots WHERE id = 'b1'", [])
+        .expect("delete bot");
+    for table in children {
+        assert_eq!(count(&conn, table), 0, "{table} cascades with its bot");
+    }
+}
+
+/// On the new shape 0021 is a no-op, so reopening changes nothing.
+#[test]
+fn migration_0021_is_idempotent_on_the_new_shape() {
+    let conn = pre_0021_connection_with_a_bot();
+    apply_migrations(&conn).expect("upgrade");
+    let before = schema_snapshot(&conn);
+    apply_migrations(&conn).expect("reapply");
+    assert_eq!(schema_snapshot(&conn), before);
+    assert_eq!(count(&conn, "bot_keys"), 1);
 }

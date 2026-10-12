@@ -38,8 +38,8 @@ const INVALID: &str = "invalid bot credential";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BotFailure {
     /// purpose: enroll or rotate a Grokbot or Musebot credential.
-    /// reason: the slug, display name, reach, or key environment is rejected, or the account cannot authenticate.
-    /// common fixes: use a login-shaped slug; keep the display name within 80 characters; choose general reach, at most 100 repositories, or one issue, pull, or branch.
+    /// reason: the slug, display name, kind, reach, or key environment is rejected, or the account cannot authenticate.
+    /// common fixes: use a login-shaped slug; keep the display name within 80 characters; choose general reach, 1 to 20 owners, at most 100 repositories, or one issue, pull, or branch; a kind matches ^[a-z][a-z0-9-]{0,31}$.
     /// docs_url: docs/errors.md#bot-enrollment
     /// repair_hint: rerun cargo test -p jeryu-core --lib core::bots::tests
     InvalidEnrollment,
@@ -114,8 +114,8 @@ impl BotFailure {
         match self {
             Self::InvalidEnrollment => BotFailureRepair {
                 purpose: "enroll or rotate a Grokbot or Musebot credential",
-                reason: "the slug, display name, reach, or key environment is rejected, or the account cannot authenticate",
-                common_fixes: "use a login-shaped slug; keep the display name within 80 characters; choose general reach, at most 100 repositories, or one issue, pull, or branch",
+                reason: "the slug, display name, kind, reach, or key environment is rejected, or the account cannot authenticate",
+                common_fixes: "use a login-shaped slug; keep the display name within 80 characters; choose general reach, 1 to 20 owners, at most 100 repositories, or one issue, pull, or branch; a kind matches ^[a-z][a-z0-9-]{0,31}$",
                 docs_url: "docs/errors.md#bot-enrollment",
                 repair_hint: "rerun cargo test -p jeryu-core --lib core::bots::tests",
             },
@@ -247,7 +247,7 @@ impl From<&BotRecord> for BotSummary {
             owner: bot.owner.clone(),
             slug: bot.slug.clone(),
             display_name: bot.display_name.clone(),
-            kind: bot.kind,
+            kind: bot.kind.clone(),
             status: bot.status,
             reach: bot.reach.clone(),
             credential_generation: bot.credential_generation,
@@ -734,7 +734,7 @@ impl ForgeCore {
             })
         } else if call.effect == BotEffect::Read && !can_read {
             Some("repo_not_granted")
-        } else if !reach_allows(&bot.reach, call) {
+        } else if !reach_allows(&state, bot, call) {
             Some(reach_denial_code(&bot.reach, call))
         } else {
             None
@@ -1071,6 +1071,7 @@ impl ForgeCore {
     fn normalize_reach(&self, actor: &str, reach: BotReach) -> Result<BotReach> {
         match reach {
             BotReach::General => Ok(BotReach::General),
+            BotReach::Owners { owners } => self.normalize_owners(owners),
             BotReach::Repositories { repos } => {
                 if repos.is_empty() || repos.len() > MAX_REPOS {
                     return Err(ForgeError::Validation(
@@ -1100,6 +1101,46 @@ impl ForgeCore {
                 })
             }
         }
+    }
+
+    /// 1..=20 distinct owners, trimmed, lowercased and deduplicated in
+    /// first-seen order. Each must be a known account, user, or organization,
+    /// or own at least one repository. The bot's owner needs no grant at
+    /// enrollment: reach is checked per request, so a later grant widens it.
+    fn normalize_owners(&self, owners: Vec<String>) -> Result<BotReach> {
+        let code = BotReach::INVALID_OWNERS_CODE;
+        let limit = BotReach::MAX_OWNERS;
+        let count_error = || {
+            ForgeError::Validation(format!(
+                "{code}: owners reach needs between 1 and {limit} distinct owners"
+            ))
+        };
+        if owners.is_empty() {
+            return Err(count_error());
+        }
+        let state = self.state.read();
+        let mut seen: Vec<String> = Vec::new();
+        for owner in owners {
+            let owner = owner.trim().to_ascii_lowercase();
+            if owner.is_empty() || owner.contains('/') {
+                return Err(ForgeError::Validation(format!(
+                    "{code}: each owner must be a non-empty account or organization name"
+                )));
+            }
+            if seen.contains(&owner) {
+                continue;
+            }
+            if seen.len() == limit {
+                return Err(count_error());
+            }
+            if !owner_is_known(&state, &owner) {
+                return Err(ForgeError::Validation(format!(
+                    "{code}: owner {owner} is not an account or organization on this forge"
+                )));
+            }
+            seen.push(owner);
+        }
+        Ok(BotReach::Owners { owners: seen })
     }
 
     fn require_readable_repo(&self, actor: &str, owner: &str, repo: &str) -> Result<BotRepoRef> {
@@ -1158,6 +1199,10 @@ fn reach_lists_repo(state: &super::State, bot: &BotRecord, owner: &str, repo: &s
         // would list every general bot on the forge. Only an explicit grant
         // puts a general bot on this roster.
         BotReach::General => owner_has_grant(state, &bot.owner, owner, repo),
+        BotReach::Owners { owners } => {
+            owners.iter().any(|item| item == owner)
+                && owner_has_grant(state, &bot.owner, owner, repo)
+        }
         BotReach::Repositories { repos } => repos
             .iter()
             .any(|item| item.owner == owner && item.name == repo),
@@ -1166,8 +1211,17 @@ fn reach_lists_repo(state: &super::State, bot: &BotRecord, owner: &str, repo: &s
 }
 
 /// Roster viewers learn only this repository. General reach names no other repo.
+/// An owners reach is shown as this one repository: the other owners it
+/// names, and which of their repositories the bot's owner can reach, are not
+/// the viewer's to learn.
 fn clip_reach(reach: &BotReach, owner: &str, repo: &str) -> BotReach {
     match reach {
+        BotReach::Owners { .. } => BotReach::Repositories {
+            repos: vec![BotRepoRef {
+                owner: owner.to_string(),
+                name: repo.to_string(),
+            }],
+        },
         BotReach::Repositories { repos } => BotReach::Repositories {
             repos: repos
                 .iter()
@@ -1189,6 +1243,18 @@ fn clip_activity(summary: &mut BotSummary, owner: &str, repo: &str) {
         summary.last_outcome = None;
         summary.last_mutation = None;
     }
+}
+
+/// An owner name a reach may list: an account, a user profile, an
+/// organization, or the owner of at least one repository.
+fn owner_is_known(state: &super::State, owner: &str) -> bool {
+    state.accounts.contains_key(owner)
+        || state.users.contains_key(owner)
+        || state.organizations.contains_key(owner)
+        || state
+            .repos
+            .keys()
+            .any(|(repo_owner, _)| repo_owner == owner)
 }
 
 fn owner_has_grant(state: &super::State, login: &str, owner: &str, repo: &str) -> bool {
@@ -1314,9 +1380,15 @@ pub(super) fn same_secret_hash(left: &str, right: &str) -> bool {
     diff == 0
 }
 
-fn reach_allows(reach: &BotReach, call: &BotCall) -> bool {
-    match reach {
+fn reach_allows(state: &super::State, bot: &BotRecord, call: &BotCall) -> bool {
+    match &bot.reach {
         BotReach::General => true,
+        // Explicit grant only, as for a general bot's roster: a public read
+        // does not put another owner's repository inside a family reach.
+        BotReach::Owners { owners } => {
+            owners.iter().any(|owner| owner == &call.owner)
+                && owner_has_grant(state, &bot.owner, &call.owner, &call.repo)
+        }
         BotReach::Repositories { repos } => repos
             .iter()
             .any(|repo| repo.owner == call.owner && repo.name == call.repo),
@@ -1824,7 +1896,7 @@ mod tests {
     }
 
     fn enroll(core: &ForgeCore, slug: &str, reach: BotReach) -> BotEnrollment {
-        core.enroll_bot("alice", slug, slug, BotKind::Grok, reach)
+        core.enroll_bot("alice", slug, slug, BotKind::GROK, reach)
             .unwrap()
     }
 
@@ -1837,7 +1909,7 @@ mod tests {
                 "alice",
                 "reviewer",
                 "Reviewer",
-                BotKind::Muse,
+                BotKind::MUSE,
                 BotReach::General,
             )
             .unwrap();
@@ -1848,7 +1920,7 @@ mod tests {
         let listed = core.list_account_bots("alice").unwrap();
         assert_eq!(listed.len(), 2);
         assert!(
-            core.enroll_bot("alice", "atlas", "Atlas", BotKind::Grok, BotReach::General)
+            core.enroll_bot("alice", "atlas", "Atlas", BotKind::GROK, BotReach::General)
                 .is_err()
         );
         let debug = format!("{:?}", grok);
@@ -1890,7 +1962,7 @@ mod tests {
             "alice",
             "sneak",
             "Sneak",
-            BotKind::Muse,
+            BotKind::MUSE,
             BotReach::Repositories {
                 repos: vec![BotRepoRef {
                     owner: "alice".to_string(),
@@ -2009,7 +2081,7 @@ mod tests {
             .list_repository_bots("alice", "alice", "widgets")
             .unwrap();
         assert_eq!(roster.len(), 3);
-        assert!(roster.iter().any(|bot| bot.kind == BotKind::Grok));
+        assert!(roster.iter().any(|bot| bot.kind == BotKind::GROK));
     }
 
     #[test]
@@ -2167,7 +2239,7 @@ mod tests {
         };
         let core = ForgeCore::open_sqlite(&path).unwrap();
         let session = core.exchange_bot_enrollment_key(&key).unwrap();
-        assert_eq!(session.bot.kind, BotKind::Grok);
+        assert_eq!(session.bot.kind, BotKind::GROK);
         assert_eq!(session.bot.slug, "atlas");
         let bots = core.list_account_bots("alice").unwrap();
         assert_eq!(bots.len(), 1);
@@ -2205,7 +2277,7 @@ mod tests {
         )
         .unwrap();
         let enrolled = core
-            .enroll_bot("root", "atlas", "Atlas", BotKind::Grok, BotReach::General)
+            .enroll_bot("root", "atlas", "Atlas", BotKind::GROK, BotReach::General)
             .unwrap();
         let session = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
@@ -2624,7 +2696,7 @@ mod tests {
                 "alice",
                 "lab",
                 "Lab",
-                BotKind::Muse,
+                BotKind::MUSE,
                 BotReach::Repositories {
                     repos: vec![
                         BotRepoRef {
@@ -2650,7 +2722,7 @@ mod tests {
                 "alice",
                 "long-name",
                 &"n".repeat(81),
-                BotKind::Grok,
+                BotKind::GROK,
                 BotReach::General,
                 "live",
             )
@@ -2661,7 +2733,7 @@ mod tests {
                 "alice",
                 "bad-env",
                 "Bad",
-                BotKind::Grok,
+                BotKind::GROK,
                 BotReach::General,
                 "dev",
             )
@@ -2672,7 +2744,7 @@ mod tests {
                 "alice",
                 "empty-reach",
                 "Empty",
-                BotKind::Grok,
+                BotKind::GROK,
                 BotReach::Repositories { repos: Vec::new() },
             )
             .is_err()
@@ -2740,7 +2812,7 @@ mod tests {
                     "alice",
                     slug,
                     slug,
-                    BotKind::Grok,
+                    BotKind::GROK,
                     BotReach::Task {
                         repo: BotRepoRef {
                             owner: "alice".to_string(),
@@ -2842,7 +2914,7 @@ mod tests {
         core.grant_repo_access("alice", "bob", "alice", "widgets", RepoAccessLevel::Read)
             .unwrap();
         let bob_bot = core
-            .enroll_bot("bob", "helper", "Helper", BotKind::Grok, BotReach::General)
+            .enroll_bot("bob", "helper", "Helper", BotKind::GROK, BotReach::General)
             .unwrap();
         core.lock_account("bob").unwrap();
         assert!(
@@ -2854,7 +2926,7 @@ mod tests {
                 "bob",
                 "after-lock",
                 "After",
-                BotKind::Muse,
+                BotKind::MUSE,
                 BotReach::General
             )
             .is_err()
@@ -2933,7 +3005,7 @@ mod tests {
                     "alice",
                     "paused",
                     "Paused",
-                    BotKind::Muse,
+                    BotKind::MUSE,
                     BotReach::General,
                     "test",
                 )
@@ -2954,7 +3026,7 @@ mod tests {
         assert_eq!(events[0].action, "edit");
         let bots = core.list_account_bots("alice").unwrap();
         assert_eq!(bots.len(), 2);
-        assert!(bots.iter().any(|bot| bot.kind == BotKind::Muse));
+        assert!(bots.iter().any(|bot| bot.kind == BotKind::MUSE));
         assert!(
             bots.iter()
                 .any(|bot| bot.status == BotStatus::Suspended && bot.last_heartbeat.is_none())

@@ -470,3 +470,39 @@ Constraint policy:
 Rollback/backfill:
 - No backfill: the table starts empty.
 - Rollback retains the table (see `db/rollbacks/0020_bot_access_tokens.sql`).
+
+## 0021 Bot kind free form
+
+Rebuilds `bots` without the 0017 `CHECK (kind IN ('grok', 'muse'))`. The kind
+is a label and grants nothing; reach and the owner's grants decide access.
+
+Constraint policy:
+- `kind` now matches `^[a-z][a-z0-9-]{0,31}$`, enforced in Core
+  (`BotKind::parse`) and by a `CHECK` using `length`, `GLOB '[a-z]*'` and
+  `NOT GLOB '*[^a-z0-9-]*'`. `grok` and `muse` stay valid; `agent` is the
+  default an enrollment gets when it names no kind.
+- Every other column, the `(owner, slug)` uniqueness, the `owner` foreign key
+  and `idx_bots_owner` are unchanged.
+- `reach_json` may now also hold `{"mode":"owners","owners":[...]}`: 1 to 20
+  distinct owner names. It is JSON, so no schema change is needed for it.
+
+Rebuild and foreign keys:
+- `bot_keys`, `bot_refresh_tokens`, `bot_operations`, `bot_activity` and
+  `bot_access_tokens` reference `bots(id) ON DELETE CASCADE`. With foreign
+  keys on, `DROP TABLE bots` would delete their rows. `apply_migration_0021`
+  turns foreign keys off (it cannot change inside a transaction), runs the
+  rebuild in one transaction, refuses to commit if the bot child tables gained
+  a `foreign_key_check` violation, and restores the caller's setting.
+- The guard is the 0017 `CHECK` text in `sqlite_master`: 0017 re-runs
+  `CREATE TABLE IF NOT EXISTS bots` on every open, so a fresh database gets the
+  old shape and 0021 rebuilds it once; afterwards both are no-ops.
+
+Rollback/backfill:
+- No backfill: rows are copied unchanged.
+- Take a `VACUUM INTO` copy before applying to a populated store.
+- `db/rollbacks/0021_bot_kind_free_form.sql` keeps the new table. Restoring
+  the 0017 `CHECK` would reject any bot with another kind, and a rebuild that
+  drops such bots would cascade into their keys and tokens. Restore the
+  snapshot only when no bot with another kind was enrolled since; otherwise
+  recover forward. An older application cannot load a bot with a kind it does
+  not know, so do not run one against such a database.

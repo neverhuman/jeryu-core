@@ -1,24 +1,97 @@
-//! Account-owned Grok and Muse bots. Secrets never appear on these types.
+//! Account-owned bots (agents). Secrets never appear on these types.
+
+use std::borrow::Cow;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Vendor kind shown in the product. The client does not get to rename it.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum BotKind {
-    Grok,
-    Muse,
-}
+/// Free-form label naming what drives a bot, such as `grok`, `muse`, or
+/// `agent`. It grants nothing: reach and the owner's grants decide access.
+///
+/// A kind matches `^[a-z][a-z0-9-]{0,31}$`. Deserializing an invalid kind
+/// fails, so a stored or posted kind is always valid.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(try_from = "String", into = "String")]
+pub struct BotKind(Cow<'static, str>);
 
 impl BotKind {
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Grok => "Grokbot",
-            Self::Muse => "Musebot",
+    /// Kind used when an enrollment names none.
+    pub const AGENT: Self = Self(Cow::Borrowed("agent"));
+    pub const GROK: Self = Self(Cow::Borrowed("grok"));
+    pub const MUSE: Self = Self(Cow::Borrowed("muse"));
+    pub const MAX_LEN: usize = 32;
+    /// Machine code of the validation error an invalid kind returns.
+    pub const INVALID_CODE: &'static str = "invalid_bot_kind";
+
+    /// Validate a kind: a lowercase ASCII letter, then up to 31 lowercase
+    /// letters, digits, or hyphens. Surrounding whitespace is not trimmed.
+    pub fn parse(value: &str) -> Result<Self, crate::errors::ForgeError> {
+        if Self::is_valid(value) {
+            Ok(Self(Cow::Owned(value.to_string())))
+        } else {
+            Err(crate::errors::ForgeError::Validation(format!(
+                "{}: bot kind must match ^[a-z][a-z0-9-]{{0,31}}$",
+                Self::INVALID_CODE
+            )))
         }
+    }
+
+    #[must_use]
+    pub fn is_valid(value: &str) -> bool {
+        let mut bytes = value.bytes();
+        bytes.next().is_some_and(|first| first.is_ascii_lowercase())
+            && value.len() <= Self::MAX_LEN
+            && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Display name: `Grokbot` and `Musebot` for the two vendor kinds, and
+    /// the kind as given for any other.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        match self.as_str() {
+            "grok" => "Grokbot",
+            "muse" => "Musebot",
+            other => other,
+        }
+    }
+}
+
+impl Default for BotKind {
+    fn default() -> Self {
+        Self::AGENT
+    }
+}
+
+impl std::fmt::Display for BotKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<String> for BotKind {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if Self::is_valid(&value) {
+            Ok(Self(Cow::Owned(value)))
+        } else {
+            Err(format!(
+                "{}: bot kind must match ^[a-z][a-z0-9-]{{0,31}}$",
+                Self::INVALID_CODE
+            ))
+        }
+    }
+}
+
+impl From<BotKind> for String {
+    fn from(kind: BotKind) -> Self {
+        kind.0.into_owned()
     }
 }
 
@@ -56,6 +129,13 @@ pub struct BotRepoRef {
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum BotReach {
     General,
+    /// Every repository under one of these owners (accounts or
+    /// organizations) on which the bot's owner holds an explicit grant,
+    /// including repositories created after enrollment. A public read without
+    /// a grant is not enough. Wire shape: `{"mode":"owners","owners":["acme"]}`.
+    Owners {
+        owners: Vec<String>,
+    },
     Repositories {
         repos: Vec<BotRepoRef>,
     },
@@ -64,6 +144,13 @@ pub enum BotReach {
         task_kind: BotTaskKind,
         task_id: String,
     },
+}
+
+impl BotReach {
+    /// Most owners one `owners` reach may name.
+    pub const MAX_OWNERS: usize = 20;
+    /// Machine code of the validation error a rejected `owners` reach returns.
+    pub const INVALID_OWNERS_CODE: &'static str = "invalid_reach_owners";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

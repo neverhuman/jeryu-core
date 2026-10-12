@@ -1,6 +1,23 @@
 # Changelog
 
 ## Unreleased
+- Owners reach for bots: `BotReach::Owners { owners }`, wire shape
+  `{"mode":"owners","owners":["acme"]}`. It covers every repository whose
+  owner is listed and on which the bot's owner holds an explicit grant,
+  including repositories created after enrollment; a public read without a
+  grant is not enough. Enrollment trims, lowercases and deduplicates the
+  names, needs 1 to 20 distinct owners, and rejects an owner that is not an
+  account, user, organization or repository owner on the forge
+  (`invalid_reach_owners: ...`). A repository roster shows an owners bot as
+  reaching that one repository, never the other owners it lists.
+- Bot kind is a free-form label (migration 0021). `BotKind` is a validated
+  string, `^[a-z][a-z0-9-]{0,31}$` (`invalid_bot_kind: ...`), with
+  `BotKind::AGENT` (the default), `GROK` and `MUSE`. `label()` stays `Grokbot`
+  and `Musebot` for those two and is the kind itself otherwise. Migration 0021
+  rebuilds `bots` to drop the 0017 `grok`/`muse` CHECK and keeps every row and
+  every key, refresh token, operation, activity row and agent token. Breaking
+  for Rust callers: `BotKind::Grok`/`Muse` are now `BotKind::GROK`/`MUSE`, and
+  `BotKind` is `Clone`, not `Copy`.
 - Scoped agent tokens (migration 0020). An account issues a `jat_` token for
   one of its bots (`issue_bot_access_token`, default 90 days, at most 365, at
   most 10 live per bot) and presents it directly as a bearer.
