@@ -55,7 +55,7 @@ mod tests;
 
 pub use audit::AuditEntry;
 pub use bot_tokens::AGENT_TOKEN_PREFIX;
-pub use provider_connections::REFRESH_LOCK_TIMEOUT;
+pub use provider_connections::{ProviderBroker, REFRESH_LOCK_TIMEOUT};
 pub use pull_requests::MergeReadiness;
 pub use repositories::RepositoryDeletion;
 pub use vault::VaultKey;
@@ -306,6 +306,11 @@ pub struct ForgeCore {
     repo_relocator: Option<Arc<dyn RepoRelocator>>,
     /// Seals and opens provider secrets; absent means connections are refused.
     vault: Option<Arc<VaultKey>>,
+    /// Set once this vault's [`ProviderBroker`] is issued; shared by clones.
+    broker_issued: Arc<std::sync::atomic::AtomicBool>,
+    /// The `service/<name>` owners that may hold provider connections; shared
+    /// by clones, so a revocation reaches every handle at once.
+    service_namespaces: Arc<RwLock<std::collections::BTreeSet<String>>>,
     /// One refresh at a time per connection (connection-v1 §3).
     refresh_locks: provider_connections::RefreshLocks,
 }
@@ -339,6 +344,8 @@ impl ForgeCore {
             repo_materializer: None,
             repo_relocator: None,
             vault: None,
+            broker_issued: Default::default(),
+            service_namespaces: Default::default(),
             refresh_locks: Default::default(),
         })
     }

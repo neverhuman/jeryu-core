@@ -81,7 +81,7 @@
       "purpose": "verify jeryu-core owned source remains build-addressable"
     },
     "contracts/connection-v1/": {
-      "command": "cargo test --locked -p jeryu-core --test connection_v1_contract && bash ops/ci/launch-inventory.sh --self-test && bash ops/ci/leak-oracle.sh --self-test",
+      "command": "cargo test --locked -p jeryu-core --test connection_v1_contract && bash ops/ci/launch-inventory.sh --self-test && bash ops/ci/leak-oracle.sh --self-test && bash ops/ci/leak-oracle-selftest-regression.sh",
       "lane": "check",
       "purpose": "verify the hand-authored connection-v1 schemas still match the vault's types, codes, and identifier rules"
     },

@@ -71,7 +71,7 @@ const OWNED_TABLES: &[OwnedTable] = &[
     },
     OwnedTable {
         name: "provider_connections",
-        columns: "id,owner_id,provider,provider_account,credential_kind,state,connection_generation,secret_version,sealed_secret,created_at,updated_at,refreshed_at",
+        columns: "id,owner_id,provider,provider_account,credential_kind,state,connection_generation,secret_version,sealed_secret,created_at,updated_at,refreshed_at,rotation_secret_version,rotation_started_at",
         primary_key: "id",
     },
     OwnedTable {

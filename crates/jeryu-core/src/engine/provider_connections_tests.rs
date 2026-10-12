@@ -35,6 +35,14 @@ fn code(error: ForgeError) -> String {
     error.to_string()
 }
 
+/// The provider rotated the secret to `secret` and minted `access`.
+fn rotated_to<A>(secret: &[u8], access: A) -> TokenExchange<A> {
+    TokenExchange::Rotated {
+        secret: ProviderSecret::new(secret.to_vec()),
+        access,
+    }
+}
+
 #[test]
 fn connect_once_binds_many_sessions_and_never_exposes_the_secret() {
     let core = core_with_vault();
@@ -61,6 +69,49 @@ fn connect_once_binds_many_sessions_and_never_exposes_the_secret() {
         assert_eq!(secret.expose(), CANARY);
         assert_eq!(format!("{secret:?}"), "ProviderSecret(<redacted>)");
     }
+}
+
+#[test]
+fn a_connect_whose_authority_ran_out_under_the_lock_changes_nothing() {
+    let core = core_with_vault();
+    let first = connect(&core, "user/alice", "alice.example.com");
+    let replacement = ProviderSecret::new(b"a-later-refresh-token".to_vec());
+    let connect_admitted = |admit: bool| {
+        core.connect_provider_admitted(
+            "user/alice",
+            AgentProvider::Claude,
+            "alice.example.com",
+            CredentialKind::OauthRefresh,
+            &replacement,
+            || admit,
+        )
+    };
+    // Refused: the same account keeps its generation, and no account is added.
+    let refused = connect_admitted(false).expect_err("refused");
+    assert!(matches!(refused, ForgeError::Conflict(_)), "{refused}");
+    assert!(code(refused).contains("provider_connect_refused"));
+    assert_eq!(
+        core.list_provider_connections("user/alice"),
+        vec![first.clone()]
+    );
+    let refused = core
+        .connect_provider_admitted(
+            "user/alice",
+            AgentProvider::Claude,
+            "another.example.com",
+            CredentialKind::OauthRefresh,
+            &replacement,
+            || false,
+        )
+        .expect_err("refused");
+    assert!(matches!(refused, ForgeError::Conflict(_)), "{refused}");
+    assert_eq!(
+        core.list_provider_connections("user/alice"),
+        vec![first.clone()]
+    );
+    // Admitted: the next generation, as connect_provider gives.
+    let second = connect_admitted(true).expect("admitted");
+    assert_eq!((second.id, second.connection_generation), (first.id, 2));
 }
 
 #[test]
@@ -128,12 +179,13 @@ fn refresh_rotates_within_a_generation_and_serializes() {
     let binding = core
         .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
         .expect("binding");
-    let refreshed = core
+    let (refreshed, access) = core
         .refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |current| {
             assert_eq!(current.expose(), CANARY);
-            Ok(ProviderSecret::new(b"rotated-refresh-token".to_vec()))
+            rotated_to(b"rotated-refresh-token", "access-1")
         })
         .expect("refresh");
+    assert_eq!(access, "access-1", "access is handed over after the commit");
     assert_eq!(refreshed.secret_version, 1);
     assert_eq!(
         refreshed.connection_generation, binding.connection_generation,
@@ -155,15 +207,18 @@ fn refresh_rotates_within_a_generation_and_serializes() {
             core.refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
                 entered.wait();
                 release.wait();
-                Ok(ProviderSecret::new(b"third".to_vec()))
+                rotated_to(b"third", "access-2")
             })
         })
     };
     entered.wait();
     let busy = core
-        .refresh_provider_secret("user/alice", &binding, Duration::from_millis(50), |_| {
-            panic!("a busy refresh must not call the provider")
-        })
+        .refresh_provider_secret(
+            "user/alice",
+            &binding,
+            Duration::from_millis(50),
+            |_| -> TokenExchange<()> { panic!("a busy refresh must not call the provider") },
+        )
         .unwrap_err();
     assert!(code(busy).contains("connection_busy"));
     release.wait();
@@ -172,26 +227,39 @@ fn refresh_rotates_within_a_generation_and_serializes() {
             .join()
             .expect("join")
             .expect("refresh")
+            .0
             .secret_version,
         2
     );
 }
 
 #[test]
-fn a_failed_exchange_keeps_the_previous_secret() {
+fn an_answer_that_rotated_nothing_keeps_the_stored_secret_current() {
     let core = core_with_vault();
     connect(&core, "user/alice", "alice.example.com");
     let binding = core
         .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
         .expect("binding");
-    let failed = core.refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
-        Err(ForgeError::Validation("upstream refused".into()))
-    });
-    assert!(failed.is_err());
+    let failed = core
+        .refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
+            TokenExchange::<()>::Unchanged("429 rate limited".into())
+        })
+        .unwrap_err();
+    assert!(code(failed).contains("provider_refresh_failed"));
     let secret = core
         .unseal_provider_secret("user/alice", &binding)
         .expect("unseal");
     assert_eq!(secret.expose(), CANARY);
+    let row = &core.list_provider_connections("user/alice")[0];
+    assert_eq!(row.state, ConnectionState::Connected);
+    assert_eq!(row.secret_version, 0);
+    // The marker is gone, so the next refresh runs instead of fencing.
+    let (next, ()) = core
+        .refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
+            rotated_to(b"rotated", ())
+        })
+        .expect("a later refresh");
+    assert_eq!(next.secret_version, 1);
 }
 
 #[test]
@@ -220,6 +288,8 @@ fn owners_without_a_vault_or_with_bad_ids_are_refused() {
             .unwrap_err();
         assert!(code(error).contains("connection_owner_invalid"), "{owner}");
     }
+    core.register_service_namespace("redteam")
+        .expect("register");
     let service = core
         .connect_provider(
             "service/redteam",
@@ -328,7 +398,7 @@ fn a_secret_sealed_before_a_rotation_does_not_open_after_it() {
         .sealed
         .clone();
     core.refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
-        Ok(ProviderSecret::new(b"rotated".to_vec()))
+        rotated_to(b"rotated", ())
     })
     .expect("refresh");
     core.state
@@ -360,9 +430,12 @@ fn api_keys_do_not_rotate_on_refresh() {
         .resolve_provider_binding("user/alice", AgentProvider::Grok, None)
         .expect("binding");
     let refused = core
-        .refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
-            panic!("an API key is never sent to a token endpoint")
-        })
+        .refresh_provider_secret(
+            "user/alice",
+            &binding,
+            REFRESH_LOCK_TIMEOUT,
+            |_| -> TokenExchange<()> { panic!("an API key is never sent to a token endpoint") },
+        )
         .unwrap_err();
     assert!(code(refused).contains("credential_not_refreshable"));
     assert_eq!(
@@ -392,7 +465,15 @@ fn owner_ids_follow_the_contract_identifier_rules() {
             .unwrap_err();
         assert!(code(error).contains("connection_owner_invalid"), "{owner}");
     }
+    for name in ["..", "-x", "a..b", "x-", "a/b"] {
+        assert!(
+            core.register_service_namespace(name).is_err(),
+            "{name} is no service account name"
+        );
+    }
     for owner in ["service/pr-redteam", "service/ci.repair:1"] {
+        core.register_service_namespace(owner.trim_start_matches("service/"))
+            .expect("register");
         core.connect_provider(
             owner,
             AgentProvider::Codex,
@@ -412,13 +493,16 @@ fn a_stranger_refresh_is_refused_by_ownership_not_busyness() {
         .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
         .expect("binding");
     let stranger = core
-        .refresh_provider_secret("user/bob", &binding, REFRESH_LOCK_TIMEOUT, |_| {
-            panic!("a stranger must not reach the provider")
-        })
+        .refresh_provider_secret(
+            "user/bob",
+            &binding,
+            REFRESH_LOCK_TIMEOUT,
+            |_| -> TokenExchange<()> { panic!("a stranger must not reach the provider") },
+        )
         .unwrap_err();
     assert!(code(stranger).contains("connection_owner_mismatch"));
     core.refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
-        Ok(ProviderSecret::new(b"rotated".to_vec()))
+        rotated_to(b"rotated", ())
     })
     .expect("refresh");
     assert!(
@@ -434,9 +518,21 @@ fn a_disabled_owner_loses_access_to_their_connections() {
     let binding = core
         .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
         .expect("binding");
+    assert_eq!(
+        core.check_provider_binding("user/alice", &binding)
+            .expect("live")
+            .id,
+        binding.connection_id
+    );
     core.disable_account("alice").expect("disable");
     let refused = core
         .unseal_provider_secret("user/alice", &binding)
+        .unwrap_err();
+    assert!(code(refused).contains("provider_not_connected"));
+    // The metadata check a gateway makes before using access it keeps says
+    // the same, without opening anything.
+    let refused = core
+        .check_provider_binding("user/alice", &binding)
         .unwrap_err();
     assert!(code(refused).contains("provider_not_connected"));
 }
@@ -479,4 +575,244 @@ fn vault_errors_classify_into_typed_codes_with_repair_hints() {
         ConnectionErrorCode::from_error(&ForgeError::Validation("something else".into())),
         None
     );
+}
+
+// connection-v1 §3: a rotation whose outcome is in doubt fences the
+// connection as auth_required, and access is only ever handed over after the
+// rotated secret is durable.
+
+fn binding_of(core: &ForgeCore) -> ConnectionBinding {
+    core.resolve_provider_binding("user/alice", AgentProvider::Claude, None)
+        .expect("binding")
+}
+
+fn state_of(core: &ForgeCore) -> ConnectionState {
+    core.list_provider_connections("user/alice")[0].state
+}
+
+#[test]
+fn a_revoked_or_unknown_answer_fences_the_connection_until_it_is_connected_again() {
+    for outcome in ["revoked", "unknown"] {
+        let core = core_with_vault();
+        connect(&core, "user/alice", "alice.example.com");
+        let binding = binding_of(&core);
+        let fenced = core
+            .refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
+                if outcome == "revoked" {
+                    TokenExchange::<()>::Revoked("invalid_grant".into())
+                } else {
+                    TokenExchange::<()>::Unknown("timed out after the request was sent".into())
+                }
+            })
+            .unwrap_err();
+        assert!(code(fenced).contains("provider_auth_required"), "{outcome}");
+        assert_eq!(state_of(&core), ConnectionState::AuthRequired, "{outcome}");
+        let unseal = core
+            .unseal_provider_secret("user/alice", &binding)
+            .unwrap_err();
+        assert!(code(unseal).contains("provider_auth_required"), "{outcome}");
+        let lease = core
+            .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
+            .unwrap_err();
+        assert_eq!(
+            ConnectionErrorCode::from_error(&lease),
+            Some(ConnectionErrorCode::ProviderAuthRequired)
+        );
+        assert!(code(lease).contains("provider_auth_required"), "{outcome}");
+        // Connecting again is the way back: a new generation, a fresh secret.
+        let again = connect(&core, "user/alice", "alice.example.com");
+        assert_eq!(again.state, ConnectionState::Connected);
+        assert_eq!(
+            again.connection_generation,
+            binding.connection_generation + 1
+        );
+        assert_eq!(again.secret_version, 0);
+    }
+}
+
+#[test]
+fn a_rotation_left_in_flight_is_auth_required_after_a_restart() {
+    let root = tempfile::tempdir().expect("root");
+    let path = root.path().join("forge.sqlite");
+    let core = ForgeCore::open_sqlite(&path)
+        .expect("open")
+        .with_vault_key(key(7));
+    core.create_account("alice", "vault-test-password", UserRole::User)
+        .expect("alice");
+    connect(&core, "user/alice", "alice.example.com");
+    let binding = binding_of(&core);
+    let mut after_restart = None;
+    core.refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
+        // The process dies here, after the provider was called: what the store
+        // holds now is what a restarted server finds.
+        let restarted = ForgeCore::open_sqlite(&path)
+            .expect("reopen")
+            .with_vault_key(key(7));
+        after_restart = Some((
+            restarted.list_provider_connections("user/alice")[0].state,
+            restarted
+                .resolve_provider_binding("user/alice", AgentProvider::Claude, None)
+                .map(|_| ())
+                .map_err(code),
+        ));
+        rotated_to(b"rotated", ())
+    })
+    .expect("this process still commits");
+    let (state, lease) = after_restart.expect("the provider was called");
+    assert_eq!(state, ConnectionState::AuthRequired);
+    assert!(lease.unwrap_err().contains("provider_auth_required"));
+}
+
+#[test]
+fn a_rotated_secret_that_cannot_be_saved_fences_the_connection_and_mints_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().expect("root");
+    let path = root.path().join("forge.sqlite");
+    let core = ForgeCore::open_sqlite(&path)
+        .expect("open")
+        .with_vault_key(key(7));
+    core.create_account("alice", "vault-test-password", UserRole::User)
+        .expect("alice");
+    connect(&core, "user/alice", "alice.example.com");
+    let binding = binding_of(&core);
+    let failed = core
+        .refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
+            // Storage stops taking writes after the rotation was recorded.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
+                .expect("read-only");
+            rotated_to(b"rotated", "access-never-handed-over")
+        })
+        .unwrap_err();
+    assert!(code(failed).contains("refresh_persist_failed"));
+    assert_eq!(
+        state_of(&core),
+        ConnectionState::AuthRequired,
+        "fenced in memory"
+    );
+    assert!(
+        core.unseal_provider_secret("user/alice", &binding).is_err(),
+        "neither the old secret nor the rotated one is used"
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("writable");
+    let restarted = ForgeCore::open_sqlite(&path)
+        .expect("reopen")
+        .with_vault_key(key(7));
+    assert_eq!(
+        restarted.list_provider_connections("user/alice")[0].state,
+        ConnectionState::AuthRequired,
+        "the rotation marker fences it after a restart"
+    );
+}
+
+#[test]
+fn a_rotation_that_cannot_be_recorded_never_reaches_the_provider() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().expect("root");
+    let path = root.path().join("forge.sqlite");
+    let core = ForgeCore::open_sqlite(&path)
+        .expect("open")
+        .with_vault_key(key(7));
+    core.create_account("alice", "vault-test-password", UserRole::User)
+        .expect("alice");
+    connect(&core, "user/alice", "alice.example.com");
+    let binding = binding_of(&core);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("read-only");
+    let failed = core
+        .refresh_provider_secret(
+            "user/alice",
+            &binding,
+            REFRESH_LOCK_TIMEOUT,
+            |_| -> TokenExchange<()> {
+                panic!("an unrecorded rotation must not call the provider")
+            },
+        )
+        .unwrap_err();
+    assert!(code(failed).contains("refresh_persist_failed"));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("writable");
+    assert_eq!(state_of(&core), ConnectionState::Connected);
+    let secret = core
+        .unseal_provider_secret("user/alice", &binding)
+        .expect("the stored secret stays current");
+    assert_eq!(secret.expose(), CANARY);
+}
+
+#[test]
+fn a_disconnect_during_the_exchange_discards_the_rotated_secret() {
+    let core = Arc::new(core_with_vault());
+    let id = connect(&core, "user/alice", "alice.example.com").id;
+    let binding = binding_of(&core);
+    let racer = core.clone();
+    let refused = core
+        .refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
+            racer
+                .disconnect_provider("user/alice", &id)
+                .expect("disconnect wins the race");
+            rotated_to(b"rotated", "access")
+        })
+        .unwrap_err();
+    assert!(code(refused).contains("provider_not_connected"));
+    let row = &core.list_provider_connections("user/alice")[0];
+    assert_eq!(row.state, ConnectionState::Disconnected);
+    assert_eq!(row.secret_version, 0, "the rotated secret was not stored");
+    assert!(core.state.read().provider_connections[&id].sealed.is_none());
+}
+
+#[test]
+fn a_service_owner_needs_a_registered_namespace_and_loses_its_connections_on_revocation() {
+    let core = core_with_vault();
+    let connect = || {
+        core.connect_provider(
+            "service/agent",
+            AgentProvider::Codex,
+            "ci-account",
+            CredentialKind::OauthRefresh,
+            &ProviderSecret::new(CANARY.to_vec()),
+        )
+    };
+    let refused = connect().unwrap_err();
+    assert!(code(refused).contains("not a registered service namespace"));
+    core.register_service_namespace("agent").expect("register");
+    assert_eq!(core.service_namespaces(), ["agent"]);
+    connect().expect("a registered service account connects");
+    let binding = core
+        .resolve_provider_binding("service/agent", AgentProvider::Codex, None)
+        .expect("binding");
+    assert_eq!(
+        core.unseal_provider_secret("service/agent", &binding)
+            .expect("unseal")
+            .expose(),
+        CANARY
+    );
+
+    // A revocation reaches every handle on the same forge at once.
+    assert!(core.clone().revoke_service_namespace("agent"));
+    for refused in [
+        core.resolve_provider_binding("service/agent", AgentProvider::Codex, None)
+            .map(|_| ()),
+        core.unseal_provider_secret("service/agent", &binding)
+            .map(|_| ()),
+        core.check_provider_binding("service/agent", &binding)
+            .map(|_| ()),
+        core.refresh_provider_secret(
+            "service/agent",
+            &binding,
+            REFRESH_LOCK_TIMEOUT,
+            |_| -> TokenExchange<()> { panic!("a revoked service account is never refreshed") },
+        )
+        .map(|_| ()),
+    ] {
+        assert!(
+            code(refused.unwrap_err()).contains("connection_owner_invalid"),
+            "revoked"
+        );
+    }
+    assert_eq!(
+        core.list_provider_connections("service/agent").len(),
+        1,
+        "its connections stay stored"
+    );
+    core.register_service_namespace("agent")
+        .expect("register again");
+    core.unseal_provider_secret("service/agent", &binding)
+        .expect("usable again");
 }

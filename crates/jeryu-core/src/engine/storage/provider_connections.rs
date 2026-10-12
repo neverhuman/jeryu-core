@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 
 use super::codec::{optional_time, parse_optional_time, parse_time, time};
 use super::{State, storage_error};
-use crate::core::provider_connections::ConnectionRecord;
+use crate::core::provider_connections::{ConnectionRecord, Rotation};
 use crate::errors::{ForgeError, Result};
 use crate::model::{AgentProvider, ConnectionState, CredentialKind, ProviderConnection};
 
@@ -23,8 +23,8 @@ pub(super) fn stage_provider_connections(conn: &Connection, state: &State) -> Re
             INSERT INTO temp.provider_connections (
               id, owner_id, provider, provider_account, credential_kind, state,
               connection_generation, secret_version, sealed_secret, created_at,
-              updated_at, refreshed_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+              updated_at, refreshed_at, rotation_secret_version, rotation_started_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             "#,
             params![
                 c.id,
@@ -39,6 +39,13 @@ pub(super) fn stage_provider_connections(conn: &Connection, state: &State) -> Re
                 time(c.created_at),
                 time(c.updated_at),
                 optional_time(c.refreshed_at),
+                record
+                    .rotation
+                    .as_ref()
+                    .map(|rotation| i64::try_from(rotation.secret_version))
+                    .transpose()
+                    .map_err(storage_error)?,
+                optional_time(record.rotation.as_ref().map(|rotation| rotation.started_at)),
             ],
         )
         .map_err(storage_error)?;
@@ -51,7 +58,8 @@ pub(super) fn load_provider_connections(conn: &Connection, state: &mut State) ->
         .prepare(
             "SELECT id, owner_id, provider, provider_account, credential_kind, state, \
              connection_generation, secret_version, sealed_secret, created_at, updated_at, \
-             refreshed_at FROM provider_connections",
+             refreshed_at, rotation_secret_version, rotation_started_at \
+             FROM provider_connections",
         )
         .map_err(storage_error)?;
     let mut rows = stmt.query([]).map_err(storage_error)?;
@@ -76,9 +84,22 @@ pub(super) fn load_provider_connections(conn: &Connection, state: &mut State) ->
             .map(|value| serde_json::from_str(&value))
             .transpose()
             .map_err(storage_error)?;
+        let rotation_version: Option<i64> = row.get(12).map_err(storage_error)?;
+        let rotation_started: Option<String> = row.get(13).map_err(storage_error)?;
+        let rotation = match (rotation_version, parse_optional_time(rotation_started)?) {
+            (Some(version), Some(started_at)) => Some(Rotation {
+                secret_version: u64::try_from(version).map_err(storage_error)?,
+                started_at,
+            }),
+            _ => None,
+        };
         state.provider_connections.insert(
             connection.id.clone(),
-            ConnectionRecord { connection, sealed },
+            ConnectionRecord {
+                connection,
+                sealed,
+                rotation,
+            },
         );
     }
     Ok(())
@@ -98,6 +119,7 @@ fn connection_state(value: &str) -> Result<ConnectionState> {
     match value {
         "pending" => Ok(ConnectionState::Pending),
         "connected" => Ok(ConnectionState::Connected),
+        "auth_required" => Ok(ConnectionState::AuthRequired),
         "disconnected" => Ok(ConnectionState::Disconnected),
         _ => Err(ForgeError::Storage(format!(
             "unknown connection state {value}"

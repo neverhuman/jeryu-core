@@ -147,6 +147,7 @@
             "provider_mode_unqualified",
             "helper_required",
             "ram_token_not_permitted",
+            "capability_unverified",
             "capability_expired",
             "capability_audience_mismatch",
             "upstream_host_denied",

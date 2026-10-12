@@ -59,10 +59,14 @@ impl CredentialKind {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ConnectionState {
     Pending,
     Connected,
+    /// A refresh's outcome is unknown, or the provider revoked the stored
+    /// secret (connection-v1 §3): the owner must connect the provider again.
+    /// Nothing is minted and no lease binds it.
+    AuthRequired,
     Disconnected,
 }
 
@@ -72,9 +76,28 @@ impl ConnectionState {
         match self {
             Self::Pending => "pending",
             Self::Connected => "connected",
+            Self::AuthRequired => "auth_required",
             Self::Disconnected => "disconnected",
         }
     }
+}
+
+/// How a provider token exchange ended (connection-v1 §3 step 6). The
+/// gateway classifies the provider's answer; the vault acts on it.
+#[derive(Debug)]
+pub enum TokenExchange<A> {
+    /// The provider rotated the stored secret. `access` is what it minted
+    /// with it, handed back only once the rotated secret is durable.
+    Rotated { secret: ProviderSecret, access: A },
+    /// The provider answered without consuming the stored secret (rate
+    /// limited, briefly unavailable): it stays current.
+    Unchanged(String),
+    /// The provider answered that the stored secret is no longer valid
+    /// (an OAuth `invalid_grant`, for example).
+    Revoked(String),
+    /// No definite answer, such as a timeout or a connection dropped after
+    /// the request was sent: the provider may have rotated the secret.
+    Unknown(String),
 }
 
 /// A connection as every caller sees it: no secret, no sealed bytes.
@@ -84,7 +107,7 @@ pub struct ProviderConnection {
     /// `user/<login>` or `service/<name>`; the prefix is the owner kind.
     pub owner_id: String,
     pub provider: AgentProvider,
-    /// Public account label such as an email or organization name.
+    /// Public account identifier following connection-v1; email addresses are not identifiers.
     pub provider_account: String,
     pub credential_kind: CredentialKind,
     pub state: ConnectionState,
@@ -157,6 +180,10 @@ pub enum ConnectionErrorCode {
     ConnectionBusy,
     #[error("refresh_persist_failed")]
     RefreshPersistFailed,
+    #[error("provider_auth_required")]
+    ProviderAuthRequired,
+    #[error("provider_refresh_failed")]
+    ProviderRefreshFailed,
     #[error("vault_unavailable")]
     VaultUnavailable,
     #[error("vault_secret_unreadable")]
@@ -166,7 +193,7 @@ pub enum ConnectionErrorCode {
 const CONNECTION_DOCS: &str = "contracts/connection-v1/connection-v1.md";
 
 impl ConnectionErrorCode {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::ProviderUnknown,
         Self::ConnectionOwnerInvalid,
         Self::ConnectionOwnerMismatch,
@@ -178,6 +205,8 @@ impl ConnectionErrorCode {
         Self::CredentialNotRefreshable,
         Self::ConnectionBusy,
         Self::RefreshPersistFailed,
+        Self::ProviderAuthRequired,
+        Self::ProviderRefreshFailed,
         Self::VaultUnavailable,
         Self::VaultSecretUnreadable,
     ];
@@ -203,10 +232,12 @@ impl ConnectionErrorCode {
             Self::ProviderNotConnected => 404,
             Self::ConnectionGenerationStale
             | Self::ProviderConnectionAmbiguous
-            | Self::ConnectionBusy => 409,
-            Self::RefreshPersistFailed | Self::VaultUnavailable | Self::VaultSecretUnreadable => {
-                503
-            }
+            | Self::ConnectionBusy
+            | Self::ProviderAuthRequired => 409,
+            Self::RefreshPersistFailed
+            | Self::ProviderRefreshFailed
+            | Self::VaultUnavailable
+            | Self::VaultSecretUnreadable => 503,
             _ => 422,
         }
     }
@@ -277,8 +308,26 @@ impl ConnectionErrorCode {
             ),
             Self::RefreshPersistFailed => (
                 "persist a rotated credential",
-                &["check forge storage health; the previous credential is still valid"],
-                "retry the refresh once storage is healthy",
+                &[
+                    "check forge storage health",
+                    "if the provider had already rotated the credential, the connection is auth_required: connect the provider again",
+                ],
+                "retry once storage is healthy, or reconnect if the connection is auth_required",
+            ),
+            Self::ProviderAuthRequired => (
+                "use a provider connection",
+                &[
+                    "sign in to the provider again in Settings, Agent providers",
+                    "a refresh's outcome was unknown or the provider revoked the credential",
+                ],
+                "connect the provider again, then start a new session",
+            ),
+            Self::ProviderRefreshFailed => (
+                "refresh a provider credential",
+                &[
+                    "the provider did not rotate the credential this time; the stored one stays current",
+                ],
+                "retry the refresh later",
             ),
             Self::VaultUnavailable => (
                 "open the credential vault",
@@ -313,6 +362,8 @@ impl ConnectionErrorCode {
             Self::CredentialNotRefreshable => "credential_not_refreshable",
             Self::ConnectionBusy => "connection_busy",
             Self::RefreshPersistFailed => "refresh_persist_failed",
+            Self::ProviderAuthRequired => "provider_auth_required",
+            Self::ProviderRefreshFailed => "provider_refresh_failed",
             Self::VaultUnavailable => "vault_unavailable",
             Self::VaultSecretUnreadable => "vault_secret_unreadable",
         }

@@ -55,6 +55,8 @@ const MIGRATION_0020: &str =
     include_str!("../../../../../db/migrations/0020_bot_access_tokens.sql");
 const MIGRATION_0021: &str =
     include_str!("../../../../../db/migrations/0021_bot_kind_free_form.sql");
+const MIGRATION_0022: &str =
+    include_str!("../../../../../db/migrations/0022_provider_connection_rotation.sql");
 /// The 0017 constraint 0021 removes. Its presence in `sqlite_master` is the
 /// guard: 0017 re-runs `CREATE TABLE IF NOT EXISTS bots` on every open, so a
 /// fresh database gets the old shape first and 0021 rebuilds it once.
@@ -63,7 +65,19 @@ const MIGRATION_0017_KIND_CHECK: &str = "CHECK (kind IN ('grok', 'muse'))";
 pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     apply_migrations_through_0020(conn)?;
     apply_migration_0021(conn)?;
+    apply_migration_0022(conn)?;
     Ok(())
+}
+
+/// 0022 rebuilds `provider_connections` once, in one transaction: guarded by
+/// the rotation column it adds.
+fn apply_migration_0022(conn: &Connection) -> Result<()> {
+    if column_exists(conn, "provider_connections", "rotation_secret_version")? {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction().map_err(storage_error)?;
+    tx.execute_batch(MIGRATION_0022).map_err(storage_error)?;
+    tx.commit().map_err(storage_error)
 }
 
 fn apply_migrations_through_0020(conn: &Connection) -> Result<()> {

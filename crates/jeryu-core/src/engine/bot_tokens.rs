@@ -165,7 +165,7 @@ impl ForgeCore {
             .filter(|record| record.bot_id == bot_id)
             .map(BotAccessTokenSummary::from)
             .collect();
-        tokens.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        tokens.sort_by_key(|token| std::cmp::Reverse(token.created_at));
         Ok(tokens)
     }
 

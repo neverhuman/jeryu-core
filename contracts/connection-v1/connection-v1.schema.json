@@ -74,10 +74,13 @@
         "provider_mode_unqualified",
         "helper_required",
         "ram_token_not_permitted",
+        "capability_unverified",
         "capability_expired",
         "capability_audience_mismatch",
         "upstream_host_denied",
         "refresh_persist_failed",
+        "provider_auth_required",
+        "provider_refresh_failed",
         "provider_unknown",
         "lease_binding_mismatch",
         "connection_busy",
@@ -109,7 +112,7 @@
         "owner_kind": {"$ref": "#/$defs/ownerKind"},
         "owner_id": {"$ref": "#/$defs/ownerId"},
         "provider_account": {"$ref": "#/$defs/id"},
-        "state": {"enum": ["pending", "connected", "disconnected"]}
+        "state": {"enum": ["pending", "connected", "auth_required", "disconnected"]}
       }
     },
     "modeQualification": {

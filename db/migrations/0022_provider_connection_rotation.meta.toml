@@ -1,0 +1,23 @@
+# jankurai:migration v1
+id = "0022_provider_connection_rotation"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "new_app_old_db"
+requires = ["0019_provider_connections"]
+rollback = "db/rollbacks/0022_provider_connection_rotation.sql"
+backfill = "none; every existing row keeps its values and has no rotation in flight"
+data_classification = "secret"
+tenant_impact = "rebuilds provider_connections with the same rows (sealed envelopes copied byte for byte) to allow the auth_required state and the rotation marker; an older binary cannot read an auth_required row"
+tests = [
+  "db-migration-analyze",
+  "provider_connections_survive_sqlite_reopen_without_plaintext",
+  "a_rotation_left_in_flight_is_auth_required_after_a_restart",
+  "migration_0022_keeps_every_connection_row",
+]

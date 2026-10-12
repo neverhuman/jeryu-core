@@ -18,15 +18,24 @@ values, token responses, or canary bytes.
 ## 1. Vault record
 
 A connection is owned by one `(owner_kind, owner_id, provider, provider_account)`.
-`provider_account` is a public label, not a secret. States are `pending`,
-`connected`, and `disconnected`.
+`provider_account` is a public label, not a secret, and it is an
+identifier. It uses the `id` rule and does not contain `@`. An email
+address is not this field. Lane P can name a separate label if a qualified
+provider needs one. Do not add `@` to the shared identifier alphabet.
+States are `pending`, `connected`, `auth_required`, and `disconnected`.
+`auth_required` holds no secret: a refresh's outcome was unknown, or the
+provider revoked the stored secret (§3). The owner connects the provider
+again, which bumps `connection_generation` like any replacement.
 
 `credential_kind` is `oauth_refresh` or `api_key` and stays in the vault.
 It is not a lease field. Both kinds use the gateway. An API key is not a
 reason to put that key in the guest.
 
-Scheduled, repair, and redteam work name a `connection_id` chosen for that
-service account. They do not reuse the interactive user's last login.
+A `service/<name>` owner exists only while the deployment registers
+`<name>`. An unregistered or revoked name cannot connect, bind a lease,
+unseal, or refresh (`connection_owner_invalid`); its connections stay stored
+until the name is registered again. Scheduled, repair, and redteam work name
+a `connection_id` chosen for that service account. They do not reuse the interactive user's last login.
 A mismatch of owner id, owner prefix, or connection id is
 `connection_owner_mismatch`. There is no operator-account fallback and no
 fallback to another provider or another credential kind.
@@ -93,67 +102,129 @@ starts at 0. It is vault-internal: not a lease field, not a capability
 field, and not sent to the guest. The seal associated data includes it. A
 blob sealed at `secret_version` N must not open when the row says N+1.
 
-Refresh serializes on `connection_id`.
+Refresh serializes on `connection_id`: a lock in the one process that writes
+the vault store, and a durable rotation marker for what that lock cannot
+see, a process that died between asking the provider and storing its
+answer. Once a rotating provider has answered, the stored secret may already
+be consumed, so no failure after that point may leave it marked current.
 
 1. Take the lock. A waiter that cannot enter within 5 seconds gets
    `connection_busy` and no token.
-2. Re-read state, `connection_generation`, `secret_version`, and the stored
-   secret.
-3. If state is `disconnected`, return `provider_not_connected` and stop.
-4. Call the provider token endpoint from the vault, never from the guest.
+2. Re-read state, `connection_generation`, `secret_version`, the stored
+   secret, and the rotation marker.
+3. If state is `disconnected`, return `provider_not_connected`; if it is
+   `auth_required`, return `provider_auth_required`. Stop.
+4. If a rotation marker is present, an earlier refresh never finished and
+   the provider may have consumed the stored secret. Set `auth_required`,
+   drop the stored secret, return `provider_auth_required`, and stop.
+5. Record the rotation marker (the `secret_version` being rotated) in one
+   durable commit. If that commit fails, return `refresh_persist_failed`:
+   nothing reached the provider and the stored secret stays current.
+6. Call the provider token endpoint from the vault, never from the guest.
    The vault sends the stored secret. It does not take a caller-supplied
-   refresh token on this path.
-5. Persist the rotated refresh token and `secret_version + 1` in one durable
-   commit. `connection_generation` stays the same. An API key does not
-   rotate and does not bump `secret_version`.
-6. Only after that commit is durable, mint access material and capabilities
-   at the same `connection_generation`. The gateway uses the current secret
-   at that generation. It does not keep a secret cached when the capability
-   was minted.
-7. Release the lock.
+   refresh token on this path. The gateway classifies the answer:
+   - `rotated`: the provider returned a new refresh token, and access
+     material minted with it;
+   - `unchanged`: the provider answered without consuming the stored secret
+     (rate limited, briefly unavailable);
+   - `revoked`: the provider answered that the stored secret is no longer
+     valid (an OAuth `invalid_grant`, for example);
+   - `unknown`: anything without a definite answer, such as a timeout or a
+     connection dropped after the request was sent.
+7. `unchanged`: clear the marker; the generation, `secret_version`, and
+   stored secret stay as they were; mint nothing; return
+   `provider_refresh_failed`. `revoked` or `unknown`: set `auth_required`,
+   drop the stored secret, mint nothing, and return
+   `provider_auth_required`. None of these is `connection_generation_stale`,
+   and none bumps the generation.
+8. `rotated`: in one durable commit, check that the row is still
+   `connected` with the generation, `secret_version`, and marker of step 2,
+   then store the rotated refresh token at `secret_version + 1` and clear
+   the marker. `connection_generation` stays the same. If a disconnect or a
+   replacement changed the row meanwhile, discard what the provider
+   returned and answer from the row. If the rotated secret cannot be stored
+   or the commit fails, the stored secret is spent: set `auth_required` and
+   return `refresh_persist_failed`. The marker already on disk makes that
+   hold after a restart as well.
+9. Only after that commit is durable, release the access material and mint
+   capabilities at the same `connection_generation`. The gateway uses the
+   current secret at that generation. It does not keep a secret cached when
+   the capability was minted.
+10. Release the lock.
 
-If step 5 fails, mint nothing and leave the previous secret and
-`secret_version` valid (`refresh_persist_failed`). If the provider rejects
-the stored secret, leave the generation and `secret_version` unchanged and
-do not mint. That rejection is not `connection_generation_stale`. A
-presented refresh token that is not the stored one does not bump the
-generation. Two refreshes cannot interleave a lease between the old secret
-and the new commit.
+A process that opens the vault store and finds a rotation marker sets
+`auth_required` for that connection: none of its own refreshes can be in
+flight yet. An API key does not rotate, does not bump `secret_version`, and
+does not take this path (`credential_not_refreshable`). A presented refresh
+token that is not the stored one does not bump the generation. Two
+refreshes cannot interleave a lease between the old secret and the new
+commit.
 
 In `qualified_ram_token` mode the node replaces the tmpfs access token
-after step 6. The lease binding does not change. An old access token fails
+after step 9. The lease binding does not change. An old access token fails
 the gateway compare (`ram_token_not_permitted`) and does not end the
 session.
 
 ## 4. Disconnect and fencing
 
 Disconnect sets `disconnected`, bumps `connection_generation`, and drops the
-stored secret in the same commit. Replacing the credential does the same
+stored secret and any rotation marker in the same commit, from `connected`
+or `auth_required` alike. Replacing the credential does the same
 bump and resets `secret_version` to 0. A running session bound to the old
 generation needs a new signed lease. A refresh does not. In-flight gateway
 calls re-read state and generation on every relay line. They do not trust a
 capability for the rest of its TTL after a disconnect or a replacement.
 
-Error precedence:
+Phase 0 comes before the precedence list. The gateway applies the list only
+after every phase-0 check has succeeded. Any phase-0 failure is
+`capability_unverified`. That failure does not read the vault, does not
+unseal a secret, and does not return a code from the list. The route
+provider may still be `provider_unknown` when it is not `claude`, `codex`,
+or `grok`, because that check names no connection.
+
+Phase 0:
+
+- The signature verifies under the capability key enrolled for the mTLS
+  peer that presented the call. That key belongs to the node. It is not the
+  control-plane lease key. A signature that verifies under some other
+  enrolled key fails this check.
+- The control-plane store says that same peer is the runner assigned to
+  this session now. The signed `session_id`, `provider`, `lease_id`,
+  `lease_epoch`, and `session_generation` match that assignment, and the
+  route's `session_id` and `provider` match the signed fields. No field
+  inside the capability identifies the caller.
+- The signed `connection_id`, `connection_generation`, `provider`, and
+  `mode` match the lease the control plane stored for that assignment.
+  The capability `owner_id` must equal the stored lease owner. The stored
+  signed lease must still be current and valid at acceptance. An owner-kind
+  prefix that does not match `owner_id` fails here too.
+
+`connection_owner_mismatch` is only a vault result after phase 0. It is
+not the result of a bad signature or of a node that is not assigned.
+
+Error precedence, after phase 0:
 
 1. `provider_unknown`
 2. `connection_owner_mismatch`
 3. `provider_not_connected` when state is disconnected, even if the
    generation is also old
-4. `connection_generation_stale` when state is connected and the generation
+4. `provider_auth_required` when state is `auth_required`, even if the
+   generation is also old
+5. `connection_generation_stale` when state is connected and the generation
    differs
-5. `provider_mode_disabled` or `provider_mode_unqualified`
-6. `helper_required` when the helper can serve the profile
-7. `ram_token_not_permitted`
-8. `guest_authorization_rejected`
-9. `capability_expired`
-10. `capability_audience_mismatch`
-11. `upstream_host_denied`
-12. `connection_busy`
-13. `refresh_persist_failed`
-14. `lease_binding_mismatch`
-15. `relay_idle_timeout`
-16. `relay_stream_invalid`
+6. `provider_mode_disabled` or `provider_mode_unqualified`
+7. `helper_required` when the helper can serve the profile
+8. `ram_token_not_permitted`
+9. `guest_authorization_rejected`
+10. `capability_expired`
+11. `capability_audience_mismatch`
+12. `upstream_host_denied`
+13. `connection_busy`
+14. `provider_refresh_failed`
+15. `refresh_persist_failed`
+16. `lease_binding_mismatch`
+17. `relay_idle_timeout`
+18. `relay_stream_invalid`
 
 ## 5. K1 lease binding
 
@@ -220,7 +291,8 @@ Capability payload:
 - `issued_at_unix_millis`, `expires_at_unix_millis`
 - `signature`, 128 lowercase hex, domain prefix
   `jeryu.gateway.capability.v1` and one NUL, then the same canonical JSON
-  rules as the lease, excluding `signature`
+  rules as the lease, excluding `signature`. The node signs this with its
+  capability key. The control plane's lease key must not verify it.
 
 Lifetime is at most 60 seconds and must not pass the session lease expiry.
 That lifetime is the window in which `gateway-open` may be accepted. It is
@@ -231,12 +303,29 @@ on the same `request_id`. A later request needs its own capability. When the
 session lease expires, the node closes the relay with the session and the
 gateway aborts that call.
 
-On `gateway-open` the gateway checks the signature, the audience, the owner,
-the mode rule in section 2, the live vault generation, and `expires_at`. On
-every later line of that same request it checks the owner, the mode, and the
-live vault generation and state again. It does not fail those later lines
-solely because `expires_at` has passed. Disconnect and credential replacement
-still fence the in-flight response.
+On `gateway-open` the gateway finishes phase 0 before it reads vault
+metadata. It then applies section 4 in the published order, using metadata
+checks for the connection owner, state, generation, and mode. Credential
+retrieval, unsealing, refresh, and copying material into an upstream request
+occur only after every open precondition succeeds, including guest
+Authorization rejection, capability expiry and audience, upstream policy,
+and in-flight admission. An authentic matching expired capability remains
+`capability_expired`; it causes no credential retrieval or upstream call.
+While `qualified_ram_token` is unqualified, it is refused without unsealing.
+
+On every later line of that same request the gateway checks the current
+assignment, lease validity, owner, mode, and live connection generation and
+state again, without retrieving credentials again. It does not fail those
+later lines solely because `expires_at` has passed. Disconnect and
+credential replacement still fence the in-flight response.
+
+Those metadata checks are the vault's own (`check_provider_binding`): the
+owner, the provider, a user owner that may still authenticate, a service
+owner whose namespace is still registered, and the state and generation.
+They open nothing. A gateway that keeps access minted from a refresh secret
+between requests makes the same check before every use of it, because that
+access does not pass through the vault again. A disabled account, a revoked
+namespace, a disconnect or a fence stops it at once.
 
 In `qualified_ram_token` mode the gateway compares a guest Authorization
 value to the current access token with a constant-time compare, then
@@ -246,9 +335,11 @@ not logged.
 ### Upstream hosts
 
 The gateway, not the guest, dials these hosts on TCP 443 only. No wildcards.
-This list is not a qualification. Lane P must enroll path templates before
-any real profile is enabled. Until then the enrolled path set is empty and
-real provider profiles stay off.
+This list is not a qualification. An enrollment is one provider, one host
+from that provider's row, and one path prefix. The gateway does not pick a
+host because it is the only compiled default. Both Grok hosts stay
+allowlisted and neither is dialed until a template names that host. Until
+lane P enrolls a template the path set is empty and real profiles stay off.
 
 | Provider | Hosts |
 | --- | --- |
@@ -262,9 +353,12 @@ not on this list.
 
 ## 7. What this does not prove
 
+The schemas in this directory are hand-written. They are not generated from
+the vault, and they must not be marked generated to satisfy a score. A drift
+test is the proof that the vault's Rust types match them. The vault does
+not become the authority by regenerating these files.
+
 It does not prove a vault, a gateway, a vsock relay, a node signature check,
 or a real login. It does not prove three concurrent VMs share one human
-login. Lane R's K2 subscribe schema and K4 bundle schema were read with K1.
-K2's stream shape is consistent with §21.3 and is not wired into runnerd in
-the tree that was read. K4 is not a connection contract. Neither schema is
-accepted as a running service.
+login. K2 and K4 are not this contract. A runner implementation of either
+is not accepted by this file.

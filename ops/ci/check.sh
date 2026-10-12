@@ -43,4 +43,5 @@ bash ops/ci/coverage_selftest.sh
 bash ops/ci/launch-inventory.sh --self-test
 bash ops/ci/launch-inventory.sh
 bash ops/ci/leak-oracle.sh --self-test
+bash ops/ci/leak-oracle-selftest-regression.sh
 printf 'check ok: %s\n' "$(pwd)"

@@ -21,14 +21,17 @@ Modes that print a banner print one first line,
 | `flood` | Write 2 MiB of ASCII `x` to stdout. | 0 |
 | `hang` | Sleep up to one hour. No SIGINT handler, so SIGINT kills it. SIGTERM ends it. | 0 on SIGTERM |
 | `ignore-sigint` | Ignore SIGINT. On each SIGINT write one line `SIGINT_IGNORED`. Exit on SIGTERM. | 0 |
-| `background-child` | Fork. The child calls `setsid`, keeps the PTY open, and sleeps. The parent exits at once. | parent 0 |
+| `background-child` | Fork. The child calls `setsid`, keeps the PTY open, and sleeps. The parent exits at once. After the banner the parent may print one line `BACKGROUND_CHILD_PID=<pid>` so the test can reap that child. | parent 0 |
 | `edit-build-commit` | In a git checkout, write `mock-agent.txt`, `git add` it, and commit with author `mock-agent <mock@jeryu.invalid>` and message `mock-agent edit`. If `cc` is on `PATH`, also compile `int main(void){return 0;}` from `mock-agent.c` to `mock-agent.bin`. If `cc` is absent, skip the compile. | 0, or 4 if git or an attempted compile fails |
 | `secret-probe` | Search process environment, argv, and files under `.`, `$HOME`, `/workspace`, `/tmp`, `/run`, and `/etc` when those directories exist. Do not search `/proc`. Do not follow symlinks. Skip files larger than 1 MiB. Look for the byte prefix `jeryu-canary-`. Do not print a match and do not copy it. Print one line only. | 0, or 5 if the search cannot run |
 
 `secret-probe` output is exactly `LEAK_ORACLE_PROBE=absent` or
 `LEAK_ORACLE_PROBE=present`. CI treats a missing line as a failure. A
 `present` line fails the oracle even when the canary itself was not copied
-into the terminal.
+into the terminal. `absent` is legal only after every existing root was
+walked to completion. A walk that stops early, including a probe entry
+budget, has not searched. Exit 5 and do not print `absent`. An unread
+optional root that does not exist is not an early stop.
 
 CI-A runs these modes on a PTY in the fake guest. The `cpr` mode is how
 that lane checks the headless VT: the VT must answer, or the mode exits 3.

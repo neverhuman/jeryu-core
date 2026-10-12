@@ -80,9 +80,12 @@ plus the node-built relay metadata (`request_id`, method, path, headers,
 provider). Following lines are `request-body`, then `request-end`. The
 response is NDJSON: `head`, `response-body` lines, `response-end`, or one
 `error` line. Each line is at most 256 KiB. The URL contains no token.
-The gateway applies `connection-v1.md` section 6 on every line and does not
-follow redirects. `expires_at` is checked only on `gateway-open`. Later
-lines of that `request_id` stay valid after `expires_at` while the idle
+The gateway applies `connection-v1.md` section 4 phase 0 and section 6 on
+every open, and does not follow redirects. A capability that fails phase 0
+is `capability_unverified` and opens nothing. Metadata checks never retrieve
+credentials; retrieval waits for every open precondition. `expires_at` is checked only
+on `gateway-open`, and only after phase 0. Later lines of that
+`request_id` stay valid after `expires_at` while the idle
 timeout and the session lease still hold. A new `gateway-open` for the same
 `request_id` is `relay_stream_invalid`. A new request uses a new capability.
 

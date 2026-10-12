@@ -8,7 +8,9 @@ is absent. It proves this canary did not show up in the places below.
 The helper is `ops/ci/leak-oracle.sh`. It reads the canary from a mode-0600
 file and searches with `grep -f`. It must not receive the canary as an
 argument, print it, or write it into the report. Exit 0 is absent. Exit 1
-is a hit or a bad probe. Exit 2 is a usage error.
+is a hit or a bad probe. Exit 2 is a usage error. Exit 5 means a scan could
+not complete, including an enumeration, metadata, or file-read failure. An
+incomplete scan prints no `absent` verdict and fails the lane.
 
 Scanned surfaces, every run:
 

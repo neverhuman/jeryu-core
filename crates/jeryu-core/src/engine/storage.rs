@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Weak};
 
 use rusqlite::{Connection, params};
 
@@ -23,6 +24,73 @@ use self::migrations::apply_migrations;
 #[derive(Debug, Clone)]
 pub(super) struct SqliteStore {
     path: PathBuf,
+    _lock: Arc<StoreLock>,
+}
+
+/// One process writes a store. Its in-memory state is the truth and every
+/// write replaces the snapshot, so a second process on the same file would
+/// undo the first one's writes, and could refresh a provider connection the
+/// first is refreshing (connection-v1 §3). The first open in a process takes
+/// an exclusive lock on `<store>.lock` for as long as any handle to the store
+/// lives; an open from another process is refused with `store_locked`. Opens
+/// within one process share the lock.
+#[derive(Debug)]
+struct StoreLock {
+    /// The OS releases the lock when this file is closed.
+    _file: std::fs::File,
+}
+
+/// The locks this process holds, by canonical lock-file path.
+static OPEN_STORES: std::sync::LazyLock<parking_lot::Mutex<HashMap<PathBuf, Weak<StoreLock>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// How long an open waits for the store's lock before calling it held. A
+/// holder that is about to let go is common inside one process: the last
+/// handle closing on another thread, or a child another thread is forking,
+/// which holds a copy of the lock's descriptor until it executes. Another
+/// process that has the store open holds the lock for its whole life, so it
+/// is still refused, after this wait.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn lock_store(path: &Path) -> Result<Arc<StoreLock>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(&lock_path)
+        .map_err(storage_error)?;
+    let key = std::fs::canonicalize(&lock_path).map_err(storage_error)?;
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
+    loop {
+        // The registry is held only for one look, never while waiting, so
+        // another open of the same store in this process shares the lock as
+        // soon as one of them has it.
+        {
+            let mut stores = OPEN_STORES.lock();
+            if let Some(lock) = stores.get(&key).and_then(Weak::upgrade) {
+                return Ok(lock);
+            }
+            match file.try_lock() {
+                Ok(()) => {
+                    let lock = Arc::new(StoreLock { _file: file });
+                    stores.insert(key, Arc::downgrade(&lock));
+                    return Ok(lock);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {}
+                Err(std::fs::TryLockError::Error(error)) => return Err(storage_error(error)),
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(ForgeError::Storage(format!(
+                "store_locked: another process has {} open; one process writes a store",
+                path.display()
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 impl SqliteStore {
@@ -33,7 +101,8 @@ impl SqliteStore {
         {
             std::fs::create_dir_all(parent).map_err(storage_error)?;
         }
-        let store = Self { path };
+        let lock = lock_store(&path)?;
+        let store = Self { path, _lock: lock };
         let conn = store.connect()?;
         apply_migrations(&conn)?;
         let mut state = load_state(&conn)?;
@@ -45,6 +114,9 @@ impl SqliteStore {
         super::refresh_deployment_slugs(&mut state);
         let mut backfilled = backfill_missing_counters(&mut state);
         backfilled += super::backfill_default_branch_protections(&mut state);
+        // A rotation recorded and never committed belongs to a process that is
+        // gone; the provider may have consumed the secret (connection-v1 §3).
+        backfilled += super::provider_connections::fence_unfinished_rotations(&mut state);
         drop(conn);
         if backfilled > 0 {
             store.persist(&state)?;

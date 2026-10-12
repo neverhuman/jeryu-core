@@ -40,6 +40,46 @@
   default branch. A repository whose `HEAD` named a branch that was never
   pushed advertised no `HEAD` at all, so `git clone` called it empty — the same
   answer as a missing read grant.
+- `ForgeCore::check_provider_binding` answers whether a binding may be used
+  now from metadata alone: owner and provider, a user owner that may still
+  authenticate, a registered service namespace, connected, at this
+  generation. These are the checks every unseal and refresh make, and it
+  opens nothing. A gateway that keeps access minted from a refresh secret
+  calls it before each use, so a disabled account or a revoked namespace
+  stops that access at once.
+- One process writes a SQLite store. `ForgeCore::open_sqlite` takes an
+  exclusive lock on `<store>.lock` for as long as any handle to the store
+  lives; a second process is refused with `store_locked` (after waiting up to
+  two seconds for a holder that is letting go) instead of undoing
+  the first one's writes (each write replaces the snapshot) or refreshing a
+  provider connection the first is refreshing. Opens within one process share
+  the lock. Run a blue/green pair on separate data directories, or stop one
+  before starting the other.
+- A `service/<name>` owner of provider connections must be registered
+  (`ForgeCore::register_service_namespace`); none is by default. An
+  unregistered or revoked name (`revoke_service_namespace`) cannot connect,
+  bind, unseal or refresh, and its connections stay stored until it is
+  registered again. The set is shared by every handle on the forge, so a
+  revocation takes effect at once.
+- Only a `ProviderBroker` opens or rotates a stored provider secret. A vault
+  issues it once (`ForgeCore::issue_provider_broker`), and the code that
+  builds the gateway takes it at startup. `ForgeCore` keeps connect, list,
+  bind and disconnect; `unseal_provider_secret` and `refresh_provider_secret`
+  are now only reachable through the broker (connection-v1 §1: only the
+  gateway unseals).
+- A provider refresh can no longer leave a spent secret marked current
+  (connection-v1 §3, migration 0022). The rotation is recorded durably before
+  the provider is called. `refresh_provider_secret` takes a `TokenExchange`
+  outcome from the caller: `Rotated { secret, access }`, `Unchanged`,
+  `Revoked` or `Unknown`. It returns the access material only after the
+  rotated secret is durable, comparing generation, `secret_version` and the
+  marker in the same commit. A revoked or unknown answer, a rotated secret
+  that cannot be stored, a commit that fails after the provider answered, and
+  a rotation found unfinished when the store is opened all set the new
+  `auth_required` state. That state drops the secret and refuses bindings and
+  unseal with `provider_auth_required` until the owner connects again. An
+  `Unchanged` answer keeps the stored secret current and returns
+  `provider_refresh_failed`.
 - A repository's bot roster lists a general-reach Grokbot or Musebot only when
   its owner has an explicit grant on that repository; a public read no longer
   puts every general bot on every public roster. Roster rows drop the last

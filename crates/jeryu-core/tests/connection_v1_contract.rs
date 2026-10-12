@@ -51,11 +51,21 @@ fn vault_enums_match_the_connection_v1_schema() {
         strings(&defs["credentialKind"]["enum"]),
         kinds.map(wire).to_vec()
     );
+    // Exhaustive on purpose: a new state does not compile here until it is
+    // listed, and then the schema has to name it too.
+    let every_state = |state: ConnectionState| match state {
+        ConnectionState::Pending
+        | ConnectionState::Connected
+        | ConnectionState::AuthRequired
+        | ConnectionState::Disconnected => state,
+    };
     let states = [
         ConnectionState::Pending,
         ConnectionState::Connected,
+        ConnectionState::AuthRequired,
         ConnectionState::Disconnected,
-    ];
+    ]
+    .map(every_state);
     assert_eq!(
         strings(&defs["providerConnection"]["properties"]["state"]["enum"]),
         states.map(wire).to_vec()
@@ -67,11 +77,14 @@ fn every_vault_error_code_is_a_contract_code_and_relay_codes_agree() {
     let codes = strings(&schema("connection-v1.schema.json")["$defs"]["errorCode"]["enum"]);
     for code in [
         "provider_unknown",
+        "capability_unverified",
         "connection_owner_mismatch",
         "provider_not_connected",
         "connection_generation_stale",
         "connection_busy",
         "refresh_persist_failed",
+        "provider_auth_required",
+        "provider_refresh_failed",
     ] {
         assert!(
             codes.contains(&code.to_string()),
@@ -80,6 +93,10 @@ fn every_vault_error_code_is_a_contract_code_and_relay_codes_agree() {
     }
     let relay = schema("k3-relay-v1.schema.json");
     let frame = strings(&relay["$defs"]["errorFrame"]["properties"]["error"]["enum"]);
+    assert!(
+        frame.contains(&"capability_unverified".to_string()),
+        "phase-zero rejection must be representable on the K3 relay"
+    );
     for code in &frame {
         assert!(
             codes.contains(code),
@@ -110,6 +127,9 @@ fn vault_identifier_rules_follow_the_schema_samples() {
             &ProviderSecret::new(b"k".to_vec()),
         )
     };
+    for name in ["pr-redteam", "a.b:c-d"] {
+        core.register_service_namespace(name).expect("register");
+    }
     for owner in ["user/alice", "service/pr-redteam", "service/a.b:c-d"] {
         assert!(
             connect(owner, "acct-1").is_ok(),

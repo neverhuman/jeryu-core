@@ -76,6 +76,10 @@ const ROLLBACKS: &[(&str, &str)] = &[
         "0021_bot_kind_free_form.sql",
         include_str!("../../../../../db/rollbacks/0021_bot_kind_free_form.sql"),
     ),
+    (
+        "0022_provider_connection_rotation.sql",
+        include_str!("../../../../../db/rollbacks/0022_provider_connection_rotation.sql"),
+    ),
 ];
 
 fn db_dir(kind: &str) -> PathBuf {
@@ -536,4 +540,71 @@ fn migration_0021_is_idempotent_on_the_new_shape() {
     apply_migrations(&conn).expect("reapply");
     assert_eq!(schema_snapshot(&conn), before);
     assert_eq!(count(&conn, "bot_keys"), 1);
+}
+
+/// 0022 rebuilds `provider_connections` around the rows a 0019 database
+/// holds: every column keeps its value, no rotation is in flight, and the
+/// new `auth_required` state is accepted. It runs once.
+#[test]
+fn migration_0022_keeps_every_connection_row() {
+    let conn = migrated();
+    conn.execute_batch("DROP TABLE provider_connections;")
+        .expect("drop");
+    conn.execute_batch(MIGRATION_0019).expect("0019 shape");
+    assert!(
+        !column_exists(&conn, "provider_connections", "rotation_secret_version").expect("inspect")
+    );
+    conn.execute(
+        "INSERT INTO provider_connections (id, owner_id, provider, provider_account, \
+         credential_kind, state, connection_generation, secret_version, sealed_secret, \
+         created_at, updated_at, refreshed_at) VALUES ('pc_1', 'user/alice', 'claude', \
+         'alice.example.com', 'oauth_refresh', 'connected', 3, 7, '{\"v\":1}', \
+         '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z', '2026-10-03T00:00:00Z')",
+        [],
+    )
+    .expect("a 0019 row");
+    let row = |conn: &Connection| -> Vec<Option<String>> {
+        conn.query_row(
+            "SELECT id, owner_id, provider, provider_account, credential_kind, state, \
+             CAST(connection_generation AS TEXT), CAST(secret_version AS TEXT), \
+             sealed_secret, created_at, updated_at, refreshed_at FROM provider_connections",
+            [],
+            |row| (0..12).map(|i| row.get(i)).collect(),
+        )
+        .expect("row")
+    };
+    let before = row(&conn);
+    apply_migrations(&conn).expect("0022");
+    assert!(
+        column_exists(&conn, "provider_connections", "rotation_secret_version").expect("inspect")
+    );
+    assert_eq!(row(&conn), before, "every value survives the rebuild");
+    let marker: (Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT rotation_secret_version, rotation_started_at FROM provider_connections",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("marker");
+    assert_eq!(
+        marker,
+        (None, None),
+        "no rotation is in flight after the upgrade"
+    );
+    apply_migrations(&conn).expect("0022 runs once");
+    assert_eq!(row(&conn), before);
+    conn.execute(
+        "UPDATE provider_connections SET state = 'auth_required', sealed_secret = NULL",
+        [],
+    )
+    .expect("auth_required holds no secret");
+    assert!(
+        conn.execute(
+            "UPDATE provider_connections SET rotation_secret_version = 7, \
+             rotation_started_at = '2026-10-04T00:00:00Z'",
+            [],
+        )
+        .is_err(),
+        "only a connected row can have a rotation in flight"
+    );
 }

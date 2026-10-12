@@ -23,8 +23,8 @@ pub use crate::branch_protection::{
 };
 pub use crate::core::{
     AGENT_TOKEN_PREFIX, AuditEntry, ForgeCore, HeadReconcileReport, HeadReconciled, MergeReadiness,
-    REFRESH_LOCK_TIMEOUT, RepoBranches, RepoMaterializer, RepoPushHistory, RepoRelocator,
-    RepositoryDeletion, VaultKey,
+    ProviderBroker, REFRESH_LOCK_TIMEOUT, RepoBranches, RepoMaterializer, RepoPushHistory,
+    RepoRelocator, RepositoryDeletion, VaultKey,
 };
 pub use crate::error::{AgentRepairHint, JeryuError, JeryuResult};
 pub use crate::errors::{ForgeError, Result};

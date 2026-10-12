@@ -314,3 +314,65 @@ fn changed_existing_row_preserves_future_not_null_column_without_default() {
         .unwrap();
     assert_eq!(retained, (original_rowid, vec![0_u8, 17, 128, 255]));
 }
+
+/// One process writes a store. A lock taken through another open file
+/// description conflicts exactly as another process's would (`flock` locks
+/// belong to the open file description), so it stands in for one here.
+#[test]
+fn a_store_this_process_has_open_refuses_another_process() {
+    let root = private_directory();
+    let path = root.path().join("forge.sqlite");
+    let lock_path = root.path().join("forge.sqlite.lock");
+    let core = ForgeCore::open_sqlite(&path).expect("open");
+    let again = ForgeCore::open_sqlite(&path).expect("a second handle in this process");
+    let other = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&lock_path)
+        .expect("lock file");
+    assert!(
+        matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        "another process cannot take the store"
+    );
+    drop(core);
+    assert!(
+        matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+        "the lock lasts while any handle lives"
+    );
+    drop(again);
+    other
+        .try_lock()
+        .expect("the lock goes with the last handle");
+    let refused = ForgeCore::open_sqlite(&path).unwrap_err();
+    assert!(refused.to_string().contains("store_locked"), "{refused}");
+    drop(other);
+    ForgeCore::open_sqlite(&path).expect("free again");
+}
+
+/// A holder that is letting go is waited for, not reported as another
+/// process: the last handle closing on another thread, or a child that
+/// another thread is forking, which keeps a copy of the lock's descriptor
+/// until it executes. Seen as `store_locked` on a reopen right after the
+/// last writer dropped, under a fully parallel test run.
+#[test]
+fn an_open_waits_for_a_holder_that_is_letting_go() {
+    let root = private_directory();
+    let path = root.path().join("forge.sqlite");
+    let lock_path = root.path().join("forge.sqlite.lock");
+    drop(ForgeCore::open_sqlite(&path).expect("create"));
+    let holder = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&lock_path)
+        .expect("lock file");
+    holder.try_lock().expect("held");
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(holder);
+    });
+    let started = std::time::Instant::now();
+    ForgeCore::open_sqlite(&path).expect("opened once the holder let go");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(250),
+        "the open waited for the holder"
+    );
+    release.join().expect("release");
+}

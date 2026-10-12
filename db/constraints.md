@@ -506,3 +506,22 @@ Rollback/backfill:
   snapshot only when no bot with another kind was enrolled since; otherwise
   recover forward. An older application cannot load a bot with a kind it does
   not know, so do not run one against such a database.
+
+## 0022 Provider Connection Rotation
+
+A refresh's rotation marker and the `auth_required` state (contracts
+connection-v1 §3). SQLite cannot change a CHECK in place, so 0022 rebuilds
+`provider_connections` in one transaction with the same rows.
+
+Constraint policy:
+- `state` adds `auth_required`, which holds no secret: the sealed secret is
+  still present exactly when the row is `connected`.
+- `rotation_secret_version` and `rotation_started_at` are set together or
+  not at all, and only on a `connected` row: the marker a refresh records
+  before calling the provider and clears in the commit that ends it.
+
+Rollback/backfill:
+- No backfill: every row keeps its values with no rotation in flight.
+- Rollback retains the rebuilt table (see
+  `db/rollbacks/0022_provider_connection_rotation.sql`); a binary from before
+  0022 cannot load an `auth_required` row, so recover forward.
