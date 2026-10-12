@@ -14,3 +14,13 @@ manual_edits = false
 path = "contracts/connection-v1/"
 generator = "cargo test --locked -p jeryu-core --test connection_v1_contract"
 manual_edits = true
+
+# Jankurai's contract-source rule reads `[[zone]]` (the family `[[zones]]`
+# table above stays for jeryu-mapcheck). Hand-authored: the schemas are their
+# own source, and the drift test fails when they and the vault's Rust types
+# disagree.
+[[zone]]
+path = "contracts/connection-v1/"
+source = "contracts/connection-v1/"
+command = "cargo test --locked -p jeryu-core --test connection_v1_contract"
+write_policy = "hand_authored"
