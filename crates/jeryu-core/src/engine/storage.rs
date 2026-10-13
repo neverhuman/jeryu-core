@@ -33,8 +33,11 @@ pub(super) struct SqliteStore {
     conn: Arc<parking_lot::Mutex<Connection>>,
     _lock: Arc<StoreLock>,
     /// Our own descriptor on the database file, holding an exclusive lock on
-    /// the file itself for as long as the store lives (see `lock_database`).
-    _held: Arc<std::fs::File>,
+    /// the file itself for as long as the store lives (see `lock_database`),
+    /// and any other descriptor this process opened on it since: none is
+    /// closed before the connection (see `HeldDatabase`). Declared after
+    /// `conn`, so it is dropped after it.
+    _held: Arc<HeldDatabase>,
 }
 
 /// A file's device and inode.
@@ -84,7 +87,7 @@ pub(super) static OPEN_HOOK: parking_lot::Mutex<Option<OpenHook>> = parking_lot:
 /// Our own descriptor on the database file, opened without following a link
 /// and checked to be the one file `expected` pinned (if given): a regular file
 /// with one link.
-fn open_pinned(path: &Path, expected: Option<FileIdentity>) -> Result<std::fs::File> {
+fn open_pinned(path: &Path, expected: Option<FileIdentity>) -> Result<Pinned> {
     use rustix::fs::{Mode, OFlags};
     use std::os::unix::fs::MetadataExt;
     let fd = rustix::fs::open(
@@ -96,6 +99,15 @@ fn open_pinned(path: &Path, expected: Option<FileIdentity>) -> Result<std::fs::F
     let file = std::fs::File::from(fd);
     let meta = file.metadata().map_err(storage_error)?;
     let identity = (meta.dev(), meta.ino());
+    // From here the descriptor is a `Pinned`: if it reached a file a store in
+    // this process has open, dropping it parks it with that store.
+    let file = Pinned {
+        file: Some(file),
+        identity,
+    };
+    if live_store(identity).is_some() {
+        return Err(already_open_here(path));
+    }
     if !meta.is_file() || expected.is_some_and(|expected| expected != identity) {
         return Err(ForgeError::StoreCustody(format!(
             "store_replaced: {} named another file while it was being opened",
@@ -112,13 +124,94 @@ fn open_pinned(path: &Path, expected: Option<FileIdentity>) -> Result<std::fs::F
     Ok(file)
 }
 
+/// The files the stores in this process have open, by device and inode, with
+/// their held descriptors.
+static LIVE_DATABASES: std::sync::LazyLock<
+    parking_lot::Mutex<HashMap<FileIdentity, Weak<HeldDatabase>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// A store's own descriptors on its database file. SQLite's locks are `fcntl`
+/// locks, which belong to the process, and the kernel drops all of them when
+/// the process closes any descriptor on the file, SQLite's own or not. So no
+/// descriptor this code opens on a file a store has open is closed while that
+/// store lives: the store's own is held here, and any other that reaches the
+/// file (a refused open by another name) is parked here, all closed only
+/// after the store's connection is.
+#[derive(Debug)]
+struct HeldDatabase {
+    files: parking_lot::Mutex<Vec<std::fs::File>>,
+}
+
+/// The live store's held descriptors on `identity`, if a store in this
+/// process has that file open.
+fn live_store(identity: FileIdentity) -> Option<Arc<HeldDatabase>> {
+    LIVE_DATABASES.lock().get(&identity).and_then(Weak::upgrade)
+}
+
+fn already_open_here(path: &Path) -> ForgeError {
+    ForgeError::StoreCustody(format!(
+        "store_locked: this process already has the database {} names open, under another \
+         name; one store writes a database, so share it by cloning its ForgeCore",
+        path.display()
+    ))
+}
+
+/// A descriptor this code opened on a database file. Dropped while a store
+/// in this process has that file open, it is parked with that store instead
+/// of closed (see `HeldDatabase`).
+#[derive(Debug)]
+struct Pinned {
+    file: Option<std::fs::File>,
+    identity: FileIdentity,
+}
+
+impl std::ops::Deref for Pinned {
+    type Target = std::fs::File;
+    fn deref(&self) -> &std::fs::File {
+        self.file
+            .as_ref()
+            .expect("a pinned descriptor is held until it is dropped")
+    }
+}
+
+impl Drop for Pinned {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take()
+            && let Some(held) = live_store(self.identity)
+        {
+            held.files.lock().push(file);
+        }
+    }
+}
+
+impl Pinned {
+    /// Become the store's own held descriptor on its file, registered so that
+    /// no other descriptor on that file in this process is closed while the
+    /// store lives.
+    fn hold(mut self) -> Arc<HeldDatabase> {
+        let file = self
+            .file
+            .take()
+            .expect("a pinned descriptor is held until it is dropped");
+        let held = Arc::new(HeldDatabase {
+            files: parking_lot::Mutex::new(vec![file]),
+        });
+        let mut live = LIVE_DATABASES.lock();
+        live.retain(|_, store| store.strong_count() > 0);
+        live.insert(self.identity, Arc::downgrade(&held));
+        held
+    }
+}
+
 /// The lock on `<store>.lock` follows the name the database had when a store
 /// opened it. Renamed while that store lives, the database would be reached
 /// by a new name with a lock of its own, so the store also locks the
 /// database file through its own descriptor: an exclusive `flock`, held as
 /// long as the store, which another descriptor on the same file cannot take,
-/// from this process or another, whatever name it came through. SQLite locks
-/// with `fcntl`, which this does not touch. A holder that is letting go is
+/// from this process or another, whatever name it came through. It is a
+/// `flock`, separate from SQLite's `fcntl` locks; but opening and closing a
+/// descriptor on the file is not, which is why a refused open in this process
+/// never closes one (see `HeldDatabase`). A holder that is letting go is
 /// waited for as in `lock_store`.
 fn lock_database(file: &std::fs::File, path: &Path) -> Result<()> {
     let deadline = std::time::Instant::now() + LOCK_WAIT;
@@ -174,8 +267,13 @@ fn refuse_wal(file: &std::fs::File, path: &Path) -> Result<()> {
 fn open_bound(
     path: &Path,
     expected: Option<FileIdentity>,
-) -> Result<(Connection, FileIdentity, std::fs::File)> {
+) -> Result<(Connection, FileIdentity, Arc<HeldDatabase>)> {
     use std::os::unix::fs::{FileExt, MetadataExt};
+    // A file a store in this process has open is refused before any
+    // descriptor is opened on it, by its identity as the name showed it.
+    if expected.is_some_and(|identity| live_store(identity).is_some()) {
+        return Err(already_open_here(path));
+    }
     // An existing store is pinned before the open; a new one only once SQLite
     // has created its file.
     let pinned_before = match expected {
@@ -212,7 +310,8 @@ fn open_bound(
     // Before anything writes: the database file itself, whatever name it is
     // reached by now.
     lock_database(&pinned, path)?;
-    let meta = pinned.metadata().map_err(storage_error)?;
+    let held = pinned.hold();
+    let meta = held.files.lock()[0].metadata().map_err(storage_error)?;
     let identity = (meta.dev(), meta.ino());
     let replaced = || {
         ForgeError::StoreCustody(format!(
@@ -254,7 +353,7 @@ fn open_bound(
         .map_err(moved)?;
     // The header's user_version: four big-endian bytes at offset 60.
     let mut field = [0_u8; 4];
-    let written = pinned.read_exact_at(&mut field, 60).is_ok()
+    let written = held.files.lock()[0].read_exact_at(&mut field, 60).is_ok()
         && i64::from(i32::from_be_bytes(field)) == nonce;
     conn.execute_batch(&format!("PRAGMA user_version = {original};"))
         .map_err(storage_error)?;
@@ -265,7 +364,7 @@ fn open_bound(
     file_identity(path, Some(identity))?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(storage_error)?;
-    Ok((conn, identity, pinned))
+    Ok((conn, identity, held))
 }
 
 /// One process writes a store. Its in-memory state is the truth and every
@@ -405,7 +504,7 @@ impl SqliteStore {
             identity,
             conn: Arc::new(parking_lot::Mutex::new(conn)),
             _lock: lock,
-            _held: Arc::new(held),
+            _held: held,
         };
         let conn = store.connect()?;
         apply_migrations(&conn)?;

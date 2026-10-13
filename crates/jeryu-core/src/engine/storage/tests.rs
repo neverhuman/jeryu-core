@@ -365,6 +365,55 @@ fn probe_in_another_process(path: &std::path::Path, expected: &str) {
     );
 }
 
+/// The separate process the rename case starts to test SQLite's own write
+/// lock from outside: with `JERYU_SQLITE_WRITE_PROBE` naming a database, a
+/// plain connection must be refused `BEGIN IMMEDIATE` at once (another
+/// process holds the write lock). Without it, it checks its premise: a
+/// database nobody holds takes one.
+#[test]
+fn sqlite_write_probe_in_a_separate_process() {
+    let target = std::env::var_os("JERYU_SQLITE_WRITE_PROBE").map(PathBuf::from);
+    let root = private_directory();
+    let path = target
+        .clone()
+        .unwrap_or_else(|| root.path().join("probe.sqlite"));
+    let conn = Connection::open(&path).expect("raw");
+    conn.busy_timeout(std::time::Duration::ZERO)
+        .expect("no wait");
+    let begun = conn.execute_batch("BEGIN IMMEDIATE");
+    match target {
+        Some(_) => assert!(
+            begun.as_ref().is_err_and(|error| error
+                .sqlite_error_code()
+                .is_some_and(|code| code == rusqlite::ErrorCode::DatabaseBusy)),
+            "another process took the write lock the store's transaction holds: {begun:?}"
+        ),
+        None => begun.expect("a database nobody holds takes the write lock"),
+    }
+}
+
+/// Run `sqlite_write_probe_in_a_separate_process` against `path` in a new
+/// process of this test binary, and require that it ran that one test and
+/// passed.
+fn write_probe_in_another_process(path: &std::path::Path) {
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "core::storage::tests::sqlite_write_probe_in_a_separate_process",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("JERYU_SQLITE_WRITE_PROBE", path)
+        .output()
+        .expect("probe process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "the store's write lock did not hold against another process: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// One process writes a store, and one store in it: each open has its own
 /// in-memory state and refresh locks, so a second open while the first lives
 /// is refused like another process (share a store by cloning its ForgeCore).
@@ -563,6 +612,26 @@ fn a_store_this_process_has_open_refuses_another_process() {
         .expect("gina");
     std::fs::rename(&original, &renamed).expect("rename");
     std::os::unix::fs::symlink(&renamed, &original).expect("a link at the old name");
+    // With a write transaction open on the live store's connection, the
+    // refused opens by either name close no descriptor on its file, so
+    // SQLite's process-owned write lock still holds against another process
+    // (Codex TEST's SQL-LOCK-FD-CLOSE on 21f252d).
+    {
+        let store = live.storage.as_ref().expect("a sqlite store");
+        let conn = store.conn.lock();
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .expect("a write transaction");
+        for name in [&renamed, &original] {
+            let refused = ForgeCore::open_sqlite(name).unwrap_err();
+            assert!(
+                refused.to_string().starts_with("store_locked:"),
+                "{}: {refused}",
+                name.display()
+            );
+        }
+        write_probe_in_another_process(&renamed);
+        conn.execute_batch("ROLLBACK").expect("rollback");
+    }
     let relinked = live
         .create_account("hank", "hank-password-123", UserRole::User)
         .unwrap_err();
