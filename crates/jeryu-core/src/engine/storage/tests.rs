@@ -476,6 +476,16 @@ fn a_store_this_process_has_open_refuses_another_process() {
         .create_account("carol", "carol-password-1", UserRole::User)
         .unwrap_err();
     assert!(swapped.to_string().contains("store_replaced"), "{swapped}");
+    // So does a directory in its place: replaced, not misread as hard links.
+    std::fs::remove_file(&path).expect("remove");
+    std::fs::create_dir(&path).expect("directory");
+    let directory = reopened
+        .create_account("dave", "dave-password-12", UserRole::User)
+        .unwrap_err();
+    assert!(
+        directory.to_string().starts_with("store_replaced:"),
+        "{directory}"
+    );
 }
 
 /// A holder that is letting go is waited for, not reported as another

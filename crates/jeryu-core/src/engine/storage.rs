@@ -33,11 +33,26 @@ pub(super) struct SqliteStore {
 /// A file's device and inode.
 type FileIdentity = (u64, u64);
 
-/// The identity of the one file `path` names now. A file with a second hard
-/// link is refused, because another name for it would take another lock.
-fn file_identity(path: &Path) -> Result<FileIdentity> {
+/// The identity of the one file `path` names now. When the store already
+/// pinned its file (`expected`), anything else at the path is `store_replaced`;
+/// so is something that is not a regular file. Only then is a second hard link
+/// `store_aliased`, because another name for the file would take another lock.
+fn file_identity(path: &Path, expected: Option<FileIdentity>) -> Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(path).map_err(storage_error)?;
+    let identity = (meta.dev(), meta.ino());
+    if expected.is_some_and(|expected| expected != identity) {
+        return Err(ForgeError::StoreCustody(format!(
+            "store_replaced: {} no longer names the database this store opened",
+            path.display()
+        )));
+    }
+    if !meta.is_file() {
+        return Err(ForgeError::StoreCustody(format!(
+            "store_replaced: {} is not a regular file",
+            path.display()
+        )));
+    }
     if meta.nlink() > 1 {
         return Err(ForgeError::StoreCustody(format!(
             "store_aliased: {} has {} hard links; open a store by its one name",
@@ -45,7 +60,7 @@ fn file_identity(path: &Path) -> Result<FileIdentity> {
             meta.nlink()
         )));
     }
-    Ok((meta.dev(), meta.ino()))
+    Ok(identity)
 }
 
 /// One process writes a store. Its in-memory state is the truth and every
@@ -87,7 +102,7 @@ const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 fn store_identity(path: &Path) -> Result<(PathBuf, Option<FileIdentity>)> {
     match std::fs::canonicalize(path) {
         Ok(canonical) => {
-            let identity = file_identity(&canonical)?;
+            let identity = file_identity(&canonical, None)?;
             Ok((canonical, Some(identity)))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -180,13 +195,7 @@ impl SqliteStore {
         // one file this store writes. A file swapped in since the identity was
         // decided is refused, not adopted.
         drop(Connection::open(&path).map_err(storage_error)?);
-        let identity = file_identity(&path)?;
-        if seen.is_some_and(|seen| seen != identity) {
-            return Err(ForgeError::StoreCustody(format!(
-                "store_replaced: {} changed while it was being opened",
-                path.display()
-            )));
-        }
+        let identity = file_identity(&path, seen)?;
         let store = Self {
             path,
             identity,
@@ -284,19 +293,9 @@ impl SqliteStore {
     fn connect(&self) -> Result<Connection> {
         // The path must name the store's own file on both sides of the open,
         // with no second link, so a moved or swapped file cannot take writes.
-        let replaced = || {
-            ForgeError::StoreCustody(format!(
-                "store_replaced: {} no longer names the database this store opened",
-                self.path.display()
-            ))
-        };
-        if file_identity(&self.path)? != self.identity {
-            return Err(replaced());
-        }
+        file_identity(&self.path, Some(self.identity))?;
         let conn = Connection::open(&self.path).map_err(storage_error)?;
-        if file_identity(&self.path)? != self.identity {
-            return Err(replaced());
-        }
+        file_identity(&self.path, Some(self.identity))?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(storage_error)?;
         Ok(conn)
