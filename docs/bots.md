@@ -29,8 +29,11 @@ operation name. On open, Core drops any `bot.token.refresh` row whose
 seal existed.
 
 The grace path is only for replaying that completed operation. Reusing a spent
-refresh token without the matching idempotency key, with a different request
-body, or after the grace window still revokes the family and bumps the bot's
-credential generation. The shipped bot proxy does not send an idempotency key,
+refresh token without the matching idempotency key, or after the grace window,
+still revokes the family and bumps the bot's credential generation. A retry
+that presents the matching key with a different request body returns
+`idempotency_conflict` and does not revoke, so the client can send the original
+body. If the successor itself was already used, the replay is refused and the
+family is not revoked again. The shipped bot proxy does not send an idempotency key,
 so it stays on the ordinary single-use refresh path. A server with no vault
 key refuses the idempotent path rather than storing the token.

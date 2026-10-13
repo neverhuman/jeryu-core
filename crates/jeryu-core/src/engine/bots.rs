@@ -2692,7 +2692,7 @@ mod tests {
     fn idempotent_refresh_drops_an_unsealed_row_on_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("forge.sqlite");
-        let (presented, successor) = {
+        let (presented, successor, bot_id) = {
             let core = ForgeCore::open_sqlite(&path)
                 .unwrap()
                 .with_vault_key(crate::VaultKey::from_bytes(&[11; 32]).expect("vault key"));
@@ -2706,8 +2706,13 @@ mod tests {
             let successor = core
                 .rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &digest)
                 .unwrap();
-            (first.refresh_token, successor.refresh_token)
+            (
+                first.refresh_token,
+                successor.refresh_token,
+                enrolled.bot.id,
+            )
         };
+        let kept_digest = "77".repeat(32);
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
             let changed = conn
@@ -2717,6 +2722,27 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(changed, 1);
+            conn.execute(
+                "INSERT INTO bot_operations (bot_id, operation, request_key, body_digest, result_json, created_at)
+                 SELECT bot_id, ?1, ?2, ?3, ?4, created_at FROM bot_operations LIMIT 1",
+                rusqlite::params![
+                    "bot.note",
+                    "kept-key",
+                    kept_digest,
+                    "{\"ok\":true}",
+                ],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO bot_operations (bot_id, operation, request_key, body_digest, result_json, created_at)
+                 SELECT bot_id, operation, ?1, body_digest, ?2, created_at FROM bot_operations WHERE operation = ?3 LIMIT 1",
+                rusqlite::params![
+                    "other-unsealed-key",
+                    "{\"refresh_token\":\"jbr_other\"}",
+                    REFRESH_OPERATION,
+                ],
+            )
+            .unwrap();
         }
         let core = ForgeCore::open_sqlite(&path)
             .unwrap()
@@ -2742,6 +2768,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(planted, 0, "unsealed refresh row was not dropped");
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM bot_operations WHERE operation = 'bot.note'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1);
+        match core.reserve_bot_operation(bot_id, "bot.note", "kept-key", &kept_digest) {
+            Ok(BotOperationGate::Replay { result_json }) => {
+                assert_eq!(result_json, "{\"ok\":true}");
+            }
+            other => panic!("kept operation was not loaded: {other:?}"),
+        }
     }
 
     #[test]

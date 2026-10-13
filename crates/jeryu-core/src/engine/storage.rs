@@ -1489,49 +1489,58 @@ fn load_bot_refresh(conn: &Connection, state: &mut State) -> Result<()> {
 }
 
 fn load_bot_operations(conn: &Connection, state: &mut State) -> Result<()> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT bot_id, operation, request_key, body_digest, result_json, created_at FROM bot_operations",
-        )
-        .map_err(storage_error)?;
-    let mut rows = stmt.query([]).map_err(storage_error)?;
-    while let Some(row) = rows.next().map_err(storage_error)? {
-        let operation = super::bots::BotOperationRecord {
-            bot_id: parse_uuid(row.get(0).map_err(storage_error)?)?,
-            operation: row.get(1).map_err(storage_error)?,
-            request_key: row.get(2).map_err(storage_error)?,
-            body_digest: row.get(3).map_err(storage_error)?,
-            result_json: row.get(4).map_err(storage_error)?,
-            created_at: parse_time(row.get(5).map_err(storage_error)?)?,
-        };
-        // A `bot.token.refresh` row from before sealing, or one planted through
-        // the old free-form idempotency API, is not a vault envelope. Drop it
-        // rather than replaying an attacker-authored session.
-        if operation.operation == super::bots::REFRESH_OPERATION {
-            let sealed = operation.result_json.as_deref().is_some_and(|json| {
-                serde_json::from_str::<super::vault::SealedSecret>(json).is_ok()
-            });
-            if !sealed {
-                conn.execute(
-                    "DELETE FROM bot_operations WHERE bot_id = ?1 AND operation = ?2 AND request_key = ?3",
-                    params![
+    // Keys of unsealed refresh rows. Deleted after the SELECT cursor is
+    // finished: SQLite does not define modifying a table while a query on it
+    // is still stepping, and this connection is the store's only one.
+    let mut unsealed = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT bot_id, operation, request_key, body_digest, result_json, created_at FROM bot_operations",
+            )
+            .map_err(storage_error)?;
+        let mut rows = stmt.query([]).map_err(storage_error)?;
+        while let Some(row) = rows.next().map_err(storage_error)? {
+            let operation = super::bots::BotOperationRecord {
+                bot_id: parse_uuid(row.get(0).map_err(storage_error)?)?,
+                operation: row.get(1).map_err(storage_error)?,
+                request_key: row.get(2).map_err(storage_error)?,
+                body_digest: row.get(3).map_err(storage_error)?,
+                result_json: row.get(4).map_err(storage_error)?,
+                created_at: parse_time(row.get(5).map_err(storage_error)?)?,
+            };
+            // A `bot.token.refresh` row from before sealing, or one planted through
+            // the old free-form idempotency API, is not a vault envelope. Drop it
+            // rather than replaying an attacker-authored session.
+            if operation.operation == super::bots::REFRESH_OPERATION {
+                let sealed = operation.result_json.as_deref().is_some_and(|json| {
+                    serde_json::from_str::<super::vault::SealedSecret>(json).is_ok()
+                });
+                if !sealed {
+                    unsealed.push((
                         operation.bot_id.to_string(),
                         operation.operation,
                         operation.request_key,
-                    ],
-                )
-                .map_err(storage_error)?;
-                continue;
+                    ));
+                    continue;
+                }
             }
+            state.bot_operations.insert(
+                (
+                    operation.bot_id,
+                    operation.operation.clone(),
+                    operation.request_key.clone(),
+                ),
+                operation,
+            );
         }
-        state.bot_operations.insert(
-            (
-                operation.bot_id,
-                operation.operation.clone(),
-                operation.request_key.clone(),
-            ),
-            operation,
-        );
+    }
+    for (bot_id, operation, request_key) in unsealed {
+        conn.execute(
+            "DELETE FROM bot_operations WHERE bot_id = ?1 AND operation = ?2 AND request_key = ?3",
+            params![bot_id, operation, request_key],
+        )
+        .map_err(storage_error)?;
     }
     Ok(())
 }
