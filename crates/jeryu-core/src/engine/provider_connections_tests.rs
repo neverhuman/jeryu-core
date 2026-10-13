@@ -644,11 +644,12 @@ fn a_rotation_left_in_flight_is_auth_required_after_a_restart() {
     let binding = binding_of(&core);
     let mut after_restart = None;
     core.refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
-        // The process dies here, after the provider was called: what the store
-        // holds now is what a restarted server finds. That is read from a copy
-        // of the file, because this process still has the store open, and one
-        // store writes a database.
-        let on_disk = root.path().join("after-death.sqlite");
+        // A simulated restart, not a real crash: after the provider was called,
+        // a copy of the store as it is on disk stands for what a restarted
+        // server would find. (This process still has the store open, and one
+        // store writes a database.) Real crash and restart acceptance is not
+        // claimed here.
+        let on_disk = root.path().join("simulated-restart.sqlite");
         std::fs::copy(&path, &on_disk).expect("copy the store as it is on disk");
         let restarted = ForgeCore::open_sqlite(&on_disk)
             .expect("reopen")
@@ -683,7 +684,9 @@ fn a_rotated_secret_that_cannot_be_saved_fences_the_connection_and_mints_nothing
     let failed = core
         .refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
             // Storage stops taking writes after the rotation was recorded.
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444))
+            // The store keeps its connection open: a directory it cannot
+            // create its rollback journal in stops its writes.
+            std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500))
                 .expect("read-only");
             rotated_to(b"rotated", "access-never-handed-over")
         })
@@ -698,7 +701,8 @@ fn a_rotated_secret_that_cannot_be_saved_fences_the_connection_and_mints_nothing
         core.unseal_provider_secret("user/alice", &binding).is_err(),
         "neither the old secret nor the rotated one is used"
     );
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("writable");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("writable");
     drop(core);
     let restarted = ForgeCore::open_sqlite(&path)
         .expect("reopen")
@@ -722,7 +726,8 @@ fn a_rotation_that_cannot_be_recorded_never_reaches_the_provider() {
         .expect("alice");
     connect(&core, "user/alice", "alice.example.com");
     let binding = binding_of(&core);
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("read-only");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500))
+        .expect("read-only");
     let failed = core
         .refresh_provider_secret(
             "user/alice",
@@ -734,7 +739,8 @@ fn a_rotation_that_cannot_be_recorded_never_reaches_the_provider() {
         )
         .unwrap_err();
     assert!(code(failed).contains("refresh_persist_failed"));
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("writable");
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("writable");
     assert_eq!(state_of(&core), ConnectionState::Connected);
     let secret = core
         .unseal_provider_secret("user/alice", &binding)

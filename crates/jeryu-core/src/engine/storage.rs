@@ -24,9 +24,13 @@ use self::migrations::apply_migrations;
 #[derive(Debug, Clone)]
 pub(super) struct SqliteStore {
     path: PathBuf,
-    /// The database file's device and inode when the store opened. Every
-    /// connection checks the path still names that one file.
+    /// The database file's device and inode when the store opened: the file
+    /// SQLite's one connection was bound to.
     identity: FileIdentity,
+    /// The store's one connection, opened once and bound to `identity` by the
+    /// descriptor SQLite opened. Nothing reopens the database by its path, so
+    /// a name swapped later cannot redirect a write.
+    conn: Arc<parking_lot::Mutex<Connection>>,
     _lock: Arc<StoreLock>,
 }
 
@@ -61,6 +65,74 @@ fn file_identity(path: &Path, expected: Option<FileIdentity>) -> Result<FileIden
         )));
     }
     Ok(identity)
+}
+
+/// The regular files this process has open, by descriptor, read from
+/// `/proc/self/fd` (each entry is followed to the file it names).
+#[cfg(target_os = "linux")]
+fn open_files() -> Result<std::collections::BTreeMap<String, FileIdentity>> {
+    use std::os::unix::fs::MetadataExt;
+    let mut files = std::collections::BTreeMap::new();
+    for entry in std::fs::read_dir("/proc/self/fd").map_err(storage_error)? {
+        let entry = entry.map_err(storage_error)?;
+        // A descriptor closed since the listing has no metadata: skip it.
+        if let Ok(meta) = std::fs::metadata(entry.path())
+            && meta.is_file()
+        {
+            files.insert(
+                entry.file_name().to_string_lossy().into_owned(),
+                (meta.dev(), meta.ino()),
+            );
+        }
+    }
+    Ok(files)
+}
+
+/// A test-only hook around the store's one `Connection::open`, called with
+/// the path and `true` just before it and `false` just after, so a case can
+/// move files across that interval deterministically.
+#[cfg(test)]
+pub(super) type OpenHook = Box<dyn Fn(&Path, bool) + Send>;
+#[cfg(test)]
+pub(super) static OPEN_HOOK: parking_lot::Mutex<Option<OpenHook>> = parking_lot::Mutex::new(None);
+
+/// Open the store's one SQLite connection and bind it to the database file:
+/// the descriptor SQLite opened must be the file `expected` pinned (or, for a
+/// store created now, the one file the path names, with one link). Checking
+/// the path before and after the open is not enough, because both checks
+/// read the current name, not the file SQLite opened.
+fn open_bound(path: &Path, expected: Option<FileIdentity>) -> Result<(Connection, FileIdentity)> {
+    #[cfg(target_os = "linux")]
+    let before = open_files()?;
+    #[cfg(test)]
+    if let Some(hook) = OPEN_HOOK.lock().as_ref() {
+        hook(path, true);
+    }
+    let conn = Connection::open(path).map_err(storage_error)?;
+    // Make SQLite read the file now, so its descriptor is open.
+    conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
+        .map_err(storage_error)?;
+    #[cfg(test)]
+    if let Some(hook) = OPEN_HOOK.lock().as_ref() {
+        hook(path, false);
+    }
+    let identity = file_identity(path, expected)?;
+    #[cfg(target_os = "linux")]
+    {
+        let opened = open_files()?
+            .into_iter()
+            .filter(|(fd, file)| before.get(fd) != Some(file))
+            .any(|(_, file)| file == identity);
+        if !opened {
+            return Err(ForgeError::StoreCustody(format!(
+                "store_replaced: {} named another file while it was being opened",
+                path.display()
+            )));
+        }
+    }
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(storage_error)?;
+    Ok((conn, identity))
 }
 
 /// One process writes a store. Its in-memory state is the truth and every
@@ -191,14 +263,14 @@ impl SqliteStore {
             std::fs::create_dir_all(parent).map_err(storage_error)?;
         }
         let (lock, path, seen) = lock_store(&path)?;
-        // Under the lock: create the file if this is a new store, then pin the
-        // one file this store writes. A file swapped in since the identity was
-        // decided is refused, not adopted.
-        drop(Connection::open(&path).map_err(storage_error)?);
-        let identity = file_identity(&path, seen)?;
+        // Under the lock: open the store's one connection, creating the file
+        // for a new store, and pin the file it is bound to. A file swapped in
+        // since the identity was decided, or around the open, is refused.
+        let (conn, identity) = open_bound(&path, seen)?;
         let store = Self {
             path,
             identity,
+            conn: Arc::new(parking_lot::Mutex::new(conn)),
             _lock: lock,
         };
         let conn = store.connect()?;
@@ -232,10 +304,11 @@ impl SqliteStore {
         stage_state(&tx, state)?;
         snapshot::apply(&tx)?;
         tx.commit().map_err(storage_error)?;
+        snapshot::drop_tables(&conn)?;
         Ok(())
     }
 
-    /// Append one audit receipt through a fresh connection.
+    /// Append one audit receipt through the store's connection.
     ///
     /// `forge_audit_log` is outside the explicitly State-owned table set. Its
     /// rows use this dedicated path and survive ordinary snapshot persistence.
@@ -290,14 +363,12 @@ impl SqliteStore {
         Ok(entries)
     }
 
-    fn connect(&self) -> Result<Connection> {
-        // The path must name the store's own file on both sides of the open,
-        // with no second link, so a moved or swapped file cannot take writes.
+    /// The store's one connection. Its path must still name the file the
+    /// connection is bound to, with one link: writing on to a file no longer
+    /// at its name would be lost at the next open.
+    fn connect(&self) -> Result<parking_lot::MutexGuard<'_, Connection>> {
+        let conn = self.conn.lock();
         file_identity(&self.path, Some(self.identity))?;
-        let conn = Connection::open(&self.path).map_err(storage_error)?;
-        file_identity(&self.path, Some(self.identity))?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;")
-            .map_err(storage_error)?;
         Ok(conn)
     }
 }

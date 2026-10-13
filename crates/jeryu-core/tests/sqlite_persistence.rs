@@ -681,7 +681,9 @@ fn failed_sqlite_write_rolls_back_memory_state() {
     )
     .unwrap();
 
-    fs::set_permissions(&db, fs::Permissions::from_mode(0o400)).unwrap();
+    // The store keeps its connection open, so a read-only file would not stop
+    // it; a directory it cannot create its rollback journal in does.
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o500)).unwrap();
     let err = core
         .create_repository(
             "alice",
@@ -698,7 +700,7 @@ fn failed_sqlite_write_rolls_back_memory_state() {
         core.get_repository("alice", "rolled-back").unwrap_err(),
         ForgeError::NotFound(_)
     ));
-    fs::set_permissions(&db, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 #[test]

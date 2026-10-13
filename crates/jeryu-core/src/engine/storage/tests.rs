@@ -486,6 +486,59 @@ fn a_store_this_process_has_open_refuses_another_process() {
         directory.to_string().starts_with("store_replaced:"),
         "{directory}"
     );
+
+    // A file swapped in just before the one open and swapped back just after
+    // it (CONNECTION-IDENTITY-ABA): the name reads right on both sides, but
+    // the descriptor SQLite opened is the impostor's, so the open is refused
+    // and nothing of the impostor is loaded.
+    let race = private_directory();
+    let real = race.path().join("forge.sqlite");
+    let impostor = race.path().join("impostor.sqlite");
+    let held = race.path().join("held.sqlite");
+    {
+        let real_core = ForgeCore::open_sqlite(&real).expect("real");
+        real_core
+            .create_account("erin", "erin-password-123", UserRole::User)
+            .expect("erin");
+    }
+    {
+        let other = ForgeCore::open_sqlite(&impostor).expect("impostor");
+        other
+            .create_account("mallory", "mallory-password", UserRole::User)
+            .expect("mallory");
+    }
+    let real_bytes = std::fs::read(&real).expect("real bytes");
+    let (hook_real, hook_impostor, hook_held) = (real.clone(), impostor.clone(), held.clone());
+    *super::OPEN_HOOK.lock() = Some(Box::new(move |opening, before| {
+        if opening != hook_real.as_path() {
+            return;
+        }
+        if before {
+            std::fs::rename(&hook_real, &hook_held).expect("hold the real file");
+            std::fs::rename(&hook_impostor, &hook_real).expect("swap the impostor in");
+        } else {
+            std::fs::rename(&hook_real, &hook_impostor).expect("swap the impostor out");
+            std::fs::rename(&hook_held, &hook_real).expect("put the real file back");
+        }
+    }));
+    let raced = ForgeCore::open_sqlite(&real).unwrap_err();
+    *super::OPEN_HOOK.lock() = None;
+    assert!(raced.to_string().starts_with("store_replaced:"), "{raced}");
+    assert_eq!(
+        std::fs::read(&real).expect("real bytes"),
+        real_bytes,
+        "the real database is untouched"
+    );
+    let logins: Vec<String> = ForgeCore::open_sqlite(&real)
+        .expect("the real store opens once the race is gone")
+        .list_accounts()
+        .into_iter()
+        .map(|account| account.login)
+        .collect();
+    assert!(
+        logins.contains(&"erin".to_string()) && !logins.contains(&"mallory".to_string()),
+        "only the real store's rows: {logins:?}"
+    );
 }
 
 /// A holder that is letting go is waited for, not reported as another
