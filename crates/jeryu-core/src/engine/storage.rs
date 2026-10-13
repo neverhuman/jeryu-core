@@ -39,7 +39,7 @@ fn file_identity(path: &Path) -> Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(path).map_err(storage_error)?;
     if meta.nlink() > 1 {
-        return Err(ForgeError::Storage(format!(
+        return Err(ForgeError::StoreCustody(format!(
             "store_aliased: {} has {} hard links; open a store by its one name",
             path.display(),
             meta.nlink()
@@ -93,7 +93,7 @@ fn store_identity(path: &Path) -> Result<(PathBuf, Option<FileIdentity>)> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // A dangling symlink would let SQLite create its target elsewhere.
             if std::fs::symlink_metadata(path).is_ok() {
-                return Err(ForgeError::Storage(format!(
+                return Err(ForgeError::StoreCustody(format!(
                     "store_aliased: {} is a link to a database that does not exist",
                     path.display()
                 )));
@@ -157,7 +157,7 @@ fn lock_store(path: &Path) -> Result<(Arc<StoreLock>, PathBuf, Option<FileIdenti
             } else {
                 "another process has"
             };
-            return Err(ForgeError::Storage(format!(
+            return Err(ForgeError::StoreCustody(format!(
                 "store_locked: {holder} {} open; one store writes a database, so share it by \
                  cloning its ForgeCore",
                 path.display()
@@ -182,7 +182,7 @@ impl SqliteStore {
         drop(Connection::open(&path).map_err(storage_error)?);
         let identity = file_identity(&path)?;
         if seen.is_some_and(|seen| seen != identity) {
-            return Err(ForgeError::Storage(format!(
+            return Err(ForgeError::StoreCustody(format!(
                 "store_replaced: {} changed while it was being opened",
                 path.display()
             )));
@@ -285,7 +285,7 @@ impl SqliteStore {
         // The path must name the store's own file on both sides of the open,
         // with no second link, so a moved or swapped file cannot take writes.
         let replaced = || {
-            ForgeError::Storage(format!(
+            ForgeError::StoreCustody(format!(
                 "store_replaced: {} no longer names the database this store opened",
                 self.path.display()
             ))

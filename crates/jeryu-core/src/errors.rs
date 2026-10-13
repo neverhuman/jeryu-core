@@ -33,4 +33,19 @@ pub enum ForgeError {
     /// repair_hint: rerun cargo test -p jeryu-core waitlist
     #[error("waitlist_full: the waitlist is not accepting new addresses")]
     WaitlistFull,
+    /// The store's one-writer custody refused an open or a write.
+    ///
+    /// The display text starts with a stable code: `store_locked` (another
+    /// process, or another open in this process, has the database),
+    /// `store_aliased` (the database file has a second hard link, or the path
+    /// is a link to nothing), or `store_replaced` (the path no longer names
+    /// the file this store opened).
+    ///
+    /// purpose: keep one writer per forge database, so its in-memory state is the truth.
+    /// reason: a second writer, or another name or file for the database, would let two states overwrite each other.
+    /// common fixes: run one forge per data directory; share a store by cloning its ForgeCore; open the database by its one path and remove extra hard links; do not move or replace forge.sqlite while the forge runs.
+    /// docs_url: docs/errors.md#store-custody
+    /// repair_hint: rerun cargo test -p jeryu-core storage::tests
+    #[error("{0}")]
+    StoreCustody(String),
 }

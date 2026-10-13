@@ -315,32 +315,38 @@ fn changed_existing_row_preserves_future_not_null_column_without_default() {
     assert_eq!(retained, (original_rowid, vec![0_u8, 17, 128, 255]));
 }
 
-/// The entry point of the separate process `a_store_this_process_has_open_refuses_another_process`
-/// starts: when `JERYU_STORE_LOCK_PROBE` names a store path, it opens it through
-/// the production constructor and exits 0 when refused with the expected code
-/// (`JERYU_STORE_LOCK_PROBE_CODE`), 3 when the open succeeds, 4 on any other
-/// error. Without the variable it does nothing, so a plain run passes it.
+/// The separate process `a_store_this_process_has_open_refuses_another_process`
+/// starts. With `JERYU_STORE_LOCK_PROBE` naming a store, it opens that store
+/// through the production constructor and asserts the open is refused with
+/// `JERYU_STORE_LOCK_PROBE_CODE`; any other outcome fails this test, and so the
+/// child process. Without the variable it checks the probe's own premise: a
+/// store nobody holds opens.
 #[test]
 fn store_lock_probe_in_a_separate_process() {
     let Some(path) = std::env::var_os("JERYU_STORE_LOCK_PROBE") else {
+        let root = private_directory();
+        ForgeCore::open_sqlite(root.path().join("forge.sqlite"))
+            .expect("a store nobody holds opens");
         return;
     };
     let expected = std::env::var("JERYU_STORE_LOCK_PROBE_CODE").expect("expected code");
-    let code = match ForgeCore::open_sqlite(PathBuf::from(path)) {
-        Ok(_) => 3,
-        Err(error) if error.to_string().contains(&expected) => 0,
-        Err(error) => {
-            eprintln!("probe: {error}");
-            4
-        }
-    };
-    std::process::exit(code);
+    let refused = ForgeCore::open_sqlite(PathBuf::from(path))
+        .err()
+        .map(|error| error.to_string());
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|message| message.contains(&expected)),
+        "the separate process was not refused with {expected}: {refused:?}"
+    );
 }
 
 /// Run `store_lock_probe_in_a_separate_process` in a new process of this test
-/// binary against `path`, and return its exit code.
-fn probe_in_another_process(path: &std::path::Path, expected: &str) -> Option<i32> {
-    std::process::Command::new(std::env::current_exe().expect("test binary"))
+/// binary against `path`, and require that it ran that one test and passed. A
+/// child that ran no test (a filter that matched nothing) is a failure, not a
+/// pass.
+fn probe_in_another_process(path: &std::path::Path, expected: &str) {
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
         .args([
             "--exact",
             "core::storage::tests::store_lock_probe_in_a_separate_process",
@@ -349,9 +355,14 @@ fn probe_in_another_process(path: &std::path::Path, expected: &str) -> Option<i3
         ])
         .env("JERYU_STORE_LOCK_PROBE", path)
         .env("JERYU_STORE_LOCK_PROBE_CODE", expected)
-        .status()
-        .expect("probe process")
-        .code()
+        .output()
+        .expect("probe process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "the separate process was not refused with {expected}: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// One process writes a store, and one store in it: each open has its own
@@ -388,11 +399,8 @@ fn a_store_this_process_has_open_refuses_another_process() {
     std::os::unix::fs::symlink(&path, &symlink).expect("symlink");
     let refused = ForgeCore::open_sqlite(&symlink).unwrap_err();
     assert!(refused.to_string().contains("store_locked"), "{refused}");
-    assert_eq!(
-        probe_in_another_process(&symlink, "store_locked: another process has"),
-        Some(0),
-        "a separate process opening the symlink is refused"
-    );
+    // A separate process opening the symlink is refused.
+    probe_in_another_process(&symlink, "store_locked: another process has");
     assert!(
         !elsewhere.path().join("alias.sqlite.lock").exists(),
         "an alias never takes a lock of its own"
@@ -411,11 +419,8 @@ fn a_store_this_process_has_open_refuses_another_process() {
 
     let hard_link = elsewhere.path().join("hard.sqlite");
     std::fs::hard_link(&path, &hard_link).expect("hard link");
-    assert_eq!(
-        probe_in_another_process(&hard_link, "store_aliased"),
-        Some(0),
-        "a separate process opening a hard link is refused"
-    );
+    // A separate process opening a hard link is refused.
+    probe_in_another_process(&hard_link, "store_aliased");
     let refused = ForgeCore::open_sqlite(&path).unwrap_err();
     assert!(refused.to_string().contains("store_aliased"), "{refused}");
     assert!(

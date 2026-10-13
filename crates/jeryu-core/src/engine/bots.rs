@@ -105,7 +105,7 @@ impl BotFailure {
             | ForgeError::BranchProtection(_)
             | ForgeError::RepositoryArchived(_) => Self::NotGranted,
             ForgeError::NotFound(_) => Self::Missing,
-            ForgeError::Storage(_) => Self::Storage,
+            ForgeError::Storage(_) | ForgeError::StoreCustody(_) => Self::Storage,
             ForgeError::WaitlistFull => Self::Benign,
         }
     }
@@ -187,7 +187,8 @@ fn message_of(error: &ForgeError) -> &str {
         | ForgeError::Forbidden(message)
         | ForgeError::BranchProtection(message)
         | ForgeError::RepositoryArchived(message)
-        | ForgeError::Storage(message) => message,
+        | ForgeError::Storage(message)
+        | ForgeError::StoreCustody(message) => message,
         ForgeError::WaitlistFull => "waitlist_full: the waitlist is not accepting new addresses",
     }
 }
@@ -201,6 +202,7 @@ fn rewrite(error: ForgeError, message: String) -> ForgeError {
         ForgeError::BranchProtection(_) => ForgeError::BranchProtection(message),
         ForgeError::RepositoryArchived(_) => ForgeError::RepositoryArchived(message),
         ForgeError::Storage(_) => ForgeError::Storage(message),
+        ForgeError::StoreCustody(_) => ForgeError::StoreCustody(message),
         ForgeError::WaitlistFull => ForgeError::WaitlistFull,
     }
 }
