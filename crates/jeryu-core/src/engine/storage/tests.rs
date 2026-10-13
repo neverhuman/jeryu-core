@@ -317,14 +317,54 @@ fn changed_existing_row_preserves_future_not_null_column_without_default() {
 
 /// One process writes a store. A lock taken through another open file
 /// description conflicts exactly as another process's would (`flock` locks
-/// belong to the open file description), so it stands in for one here.
+/// belong to the open file description), so it stands in for one here; a
+/// real child process (`flock -n`) checks the same lock.
+///
+/// The lock names the database, not the path an open was given: an open
+/// through a symlink shares the canonical lock and never makes its own, and a
+/// database with a second hard link is refused (STORE-LOCK-ALIAS). The holder
+/// keeps the lock and its state through all of it.
 #[test]
 fn a_store_this_process_has_open_refuses_another_process() {
     let root = private_directory();
     let path = root.path().join("forge.sqlite");
     let lock_path = root.path().join("forge.sqlite.lock");
     let core = ForgeCore::open_sqlite(&path).expect("open");
+    core.create_account("alice", "alice-password-1", UserRole::User)
+        .expect("alice");
     let again = ForgeCore::open_sqlite(&path).expect("a second handle in this process");
+
+    // Another name for the same database.
+    let elsewhere = private_directory();
+    let symlink = elsewhere.path().join("alias.sqlite");
+    std::os::unix::fs::symlink(&path, &symlink).expect("symlink");
+    let through_symlink = ForgeCore::open_sqlite(&symlink).expect("the symlink shares the lock");
+    assert!(
+        !elsewhere.path().join("alias.sqlite.lock").exists(),
+        "an alias never takes a lock of its own"
+    );
+    let child = std::process::Command::new("flock")
+        .args(["--nonblock", "--conflict-exit-code", "75"])
+        .arg(&lock_path)
+        .arg("true")
+        .status()
+        .expect("flock(1)");
+    assert_eq!(
+        child.code(),
+        Some(75),
+        "another process cannot take the store"
+    );
+    drop(through_symlink);
+    let hard_link = elsewhere.path().join("hard.sqlite");
+    std::fs::hard_link(&path, &hard_link).expect("hard link");
+    for name in [&hard_link, &path] {
+        let refused = ForgeCore::open_sqlite(name).unwrap_err();
+        assert!(refused.to_string().contains("store_aliased"), "{refused}");
+    }
+    assert!(!elsewhere.path().join("hard.sqlite.lock").exists());
+    std::fs::remove_file(&hard_link).expect("unlink");
+    core.create_account("bob", "bob-password-12", UserRole::User)
+        .expect("the holder still writes");
     let other = std::fs::OpenOptions::new()
         .write(true)
         .open(&lock_path)
@@ -345,7 +385,16 @@ fn a_store_this_process_has_open_refuses_another_process() {
     let refused = ForgeCore::open_sqlite(&path).unwrap_err();
     assert!(refused.to_string().contains("store_locked"), "{refused}");
     drop(other);
-    ForgeCore::open_sqlite(&path).expect("free again");
+    let reopened = ForgeCore::open_sqlite(&path).expect("free again");
+    let logins: Vec<String> = reopened
+        .list_accounts()
+        .into_iter()
+        .map(|account| account.login)
+        .collect();
+    assert!(
+        logins.contains(&"alice".to_string()) && logins.contains(&"bob".to_string()),
+        "the holder's writes survive: {logins:?}"
+    );
 }
 
 /// A holder that is letting go is waited for, not reported as another

@@ -34,13 +34,18 @@ pub(super) struct SqliteStore {
 /// an exclusive lock on `<store>.lock` for as long as any handle to the store
 /// lives; an open from another process is refused with `store_locked`. Opens
 /// within one process share the lock.
+///
+/// The lock names the database, not the path an open was given: `<store>` is
+/// the database's canonical path, so a symlink to it takes the same lock. A
+/// hard link has no one canonical name, so a database file with more than one
+/// link is refused with `store_aliased`.
 #[derive(Debug)]
 struct StoreLock {
     /// The OS releases the lock when this file is closed.
     _file: std::fs::File,
 }
 
-/// The locks this process holds, by canonical lock-file path.
+/// The locks this process holds, by the database's canonical path.
 static OPEN_STORES: std::sync::LazyLock<parking_lot::Mutex<HashMap<PathBuf, Weak<StoreLock>>>> =
     std::sync::LazyLock::new(Default::default);
 
@@ -52,9 +57,54 @@ static OPEN_STORES: std::sync::LazyLock<parking_lot::Mutex<HashMap<PathBuf, Weak
 /// is still refused, after this wait.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
-fn lock_store(path: &Path) -> Result<Arc<StoreLock>> {
+/// The database a store path names: its canonical path when it exists, or
+/// its canonical directory and file name before the first open creates it.
+/// A database file with more than one hard link is refused, because another
+/// name for it would take another lock.
+fn store_identity(path: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::canonicalize(path) {
+        Ok(canonical) => {
+            let links = std::fs::metadata(&canonical)
+                .map_err(storage_error)?
+                .nlink();
+            if links > 1 {
+                return Err(ForgeError::Storage(format!(
+                    "store_aliased: {} has {links} hard links; open a store by its one name",
+                    path.display()
+                )));
+            }
+            Ok(canonical)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A dangling symlink would let SQLite create its target elsewhere.
+            if std::fs::symlink_metadata(path).is_ok() {
+                return Err(ForgeError::Storage(format!(
+                    "store_aliased: {} is a link to a database that does not exist",
+                    path.display()
+                )));
+            }
+            let name = path.file_name().ok_or_else(|| {
+                ForgeError::Storage(format!("store path {} names no file", path.display()))
+            })?;
+            let parent = match path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent,
+                _ => Path::new("."),
+            };
+            Ok(std::fs::canonicalize(parent)
+                .map_err(storage_error)?
+                .join(name))
+        }
+        Err(error) => Err(storage_error(error)),
+    }
+}
+
+/// Lock the database `path` names, and return the lock with that database's
+/// canonical path, which every connection then opens.
+fn lock_store(path: &Path) -> Result<(Arc<StoreLock>, PathBuf)> {
     use std::os::unix::fs::OpenOptionsExt;
-    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let key = store_identity(path)?;
+    let lock_path = PathBuf::from(format!("{}.lock", key.display()));
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -62,7 +112,6 @@ fn lock_store(path: &Path) -> Result<Arc<StoreLock>> {
         .mode(0o600)
         .open(&lock_path)
         .map_err(storage_error)?;
-    let key = std::fs::canonicalize(&lock_path).map_err(storage_error)?;
     let deadline = std::time::Instant::now() + LOCK_WAIT;
     loop {
         // The registry is held only for one look, never while waiting, so
@@ -71,13 +120,13 @@ fn lock_store(path: &Path) -> Result<Arc<StoreLock>> {
         {
             let mut stores = OPEN_STORES.lock();
             if let Some(lock) = stores.get(&key).and_then(Weak::upgrade) {
-                return Ok(lock);
+                return Ok((lock, key));
             }
             match file.try_lock() {
                 Ok(()) => {
                     let lock = Arc::new(StoreLock { _file: file });
-                    stores.insert(key, Arc::downgrade(&lock));
-                    return Ok(lock);
+                    stores.insert(key.clone(), Arc::downgrade(&lock));
+                    return Ok((lock, key));
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {}
                 Err(std::fs::TryLockError::Error(error)) => return Err(storage_error(error)),
@@ -101,7 +150,7 @@ impl SqliteStore {
         {
             std::fs::create_dir_all(parent).map_err(storage_error)?;
         }
-        let lock = lock_store(&path)?;
+        let (lock, path) = lock_store(&path)?;
         let store = Self { path, _lock: lock };
         let conn = store.connect()?;
         apply_migrations(&conn)?;
