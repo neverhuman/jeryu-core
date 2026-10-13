@@ -18,7 +18,7 @@ SignRail artifact-support signing details:
 The release structure is intentionally artifact-backed:
 
 - Version source: `Cargo.toml`, `Cargo.lock`, and `jeryu-wsversion`.
-- Changelog source: `CHANGELOG.md`.
+- Changelog source: `CHANGELOG.md`, written when a release is cut.
 - Release process doc: `docs/release-process.md`.
 - Release control surface: `docs/release.md`.
 - CI or script evidence: `target/ci-fast/publish.json` and `target/jankurai/`.
@@ -33,7 +33,8 @@ The release structure is intentionally artifact-backed:
   own version.
 - Rust crate versions live in the root workspace manifest and `Cargo.lock`;
   workspace members must use `version.workspace = true`.
-- User-facing changes are summarized in `CHANGELOG.md`.
+- Release notes are generated at release time from the commits since the last
+  release; changes do not add entries to `CHANGELOG.md`.
 - Release candidates record the Git commit SHA, artifact checksums, SBOM
   digests, and rollback target.
 - SignRail artifact-support evidence uses the Git commit SHA as its release
