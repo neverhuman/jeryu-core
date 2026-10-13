@@ -550,6 +550,47 @@ fn a_store_this_process_has_open_refuses_another_process() {
         "only the real store's rows: {logins:?}"
     );
 
+    // The database renamed under a live store, with a symlink left at its old
+    // name (Grok's review on 54161d9): the store's next write is refused, since
+    // its name is now a link and not the file, and no second store opens the
+    // file by its new name, in this process or another, though that name has
+    // a `.lock` of its own: the store also locks the file itself.
+    let moved_root = private_directory();
+    let original = moved_root.path().join("forge.sqlite");
+    let renamed = moved_root.path().join("moved.sqlite");
+    let live = ForgeCore::open_sqlite(&original).expect("open");
+    live.create_account("gina", "gina-password-123", UserRole::User)
+        .expect("gina");
+    std::fs::rename(&original, &renamed).expect("rename");
+    std::os::unix::fs::symlink(&renamed, &original).expect("a link at the old name");
+    let relinked = live
+        .create_account("hank", "hank-password-123", UserRole::User)
+        .unwrap_err();
+    assert!(
+        relinked.to_string().starts_with("store_replaced:"),
+        "{relinked}"
+    );
+    for name in [&renamed, &original] {
+        let second = ForgeCore::open_sqlite(name).unwrap_err();
+        assert!(
+            second.to_string().starts_with("store_locked:"),
+            "{}: {second}",
+            name.display()
+        );
+    }
+    probe_in_another_process(&renamed, "store_locked: another store has");
+    drop(live);
+    let logins: Vec<String> = ForgeCore::open_sqlite(&renamed)
+        .expect("the renamed database opens once its store is gone")
+        .list_accounts()
+        .into_iter()
+        .map(|account| account.login)
+        .collect();
+    assert!(
+        logins.contains(&"gina".to_string()) && !logins.contains(&"hank".to_string()),
+        "only the rows the live store wrote before the rename: {logins:?}"
+    );
+
     // A valid store left in WAL mode by another tool (this store never sets
     // it): its writes go to the `-wal` file, so the header check would never
     // see them. It is refused by its header before SQLite opens it, and left

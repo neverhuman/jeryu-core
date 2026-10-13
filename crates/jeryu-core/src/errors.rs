@@ -38,8 +38,9 @@ pub enum ForgeError {
     /// The display text starts with a stable code: `store_locked` (another
     /// process, or another open in this process, has the database),
     /// `store_aliased` (the database file has a second hard link, or the path
-    /// is a link to nothing), or `store_replaced` (the path no longer names
-    /// the file this store opened).
+    /// is a link to nothing), `store_replaced` (the path no longer names
+    /// the file this store opened), or `store_journal` (the database is in WAL
+    /// mode; the store keeps a rollback journal and converts it only offline).
     ///
     /// purpose: keep one writer per forge database, so its in-memory state is the truth.
     /// reason: a second writer, or another name or file for the database, would let two states overwrite each other.

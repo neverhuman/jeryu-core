@@ -32,6 +32,9 @@ pub(super) struct SqliteStore {
     /// swapped later cannot redirect a write.
     conn: Arc<parking_lot::Mutex<Connection>>,
     _lock: Arc<StoreLock>,
+    /// Our own descriptor on the database file, holding an exclusive lock on
+    /// the file itself for as long as the store lives (see `lock_database`).
+    _held: Arc<std::fs::File>,
 }
 
 /// A file's device and inode.
@@ -39,11 +42,14 @@ type FileIdentity = (u64, u64);
 
 /// The identity of the one file `path` names now. When the store already
 /// pinned its file (`expected`), anything else at the path is `store_replaced`;
-/// so is something that is not a regular file. Only then is a second hard link
+/// so is something that is not a regular file, a symlink included. Only then is a second hard link
 /// `store_aliased`, because another name for the file would take another lock.
 fn file_identity(path: &Path, expected: Option<FileIdentity>) -> Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(path).map_err(storage_error)?;
+    // Every caller passes the database's canonical path, which names the file
+    // itself, so a link found there later is something else at that name, not
+    // the file: it is not followed.
+    let meta = std::fs::symlink_metadata(path).map_err(storage_error)?;
     let identity = (meta.dev(), meta.ino());
     if expected.is_some_and(|expected| expected != identity) {
         return Err(ForgeError::StoreCustody(format!(
@@ -106,6 +112,33 @@ fn open_pinned(path: &Path, expected: Option<FileIdentity>) -> Result<std::fs::F
     Ok(file)
 }
 
+/// The lock on `<store>.lock` follows the name the database had when a store
+/// opened it. Renamed while that store lives, the database would be reached
+/// by a new name with a lock of its own, so the store also locks the
+/// database file through its own descriptor: an exclusive `flock`, held as
+/// long as the store, which another descriptor on the same file cannot take,
+/// from this process or another, whatever name it came through. SQLite locks
+/// with `fcntl`, which this does not touch. A holder that is letting go is
+/// waited for as in `lock_store`.
+fn lock_database(file: &std::fs::File, path: &Path) -> Result<()> {
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error)) => return Err(storage_error(error)),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(ForgeError::StoreCustody(format!(
+                "store_locked: another store has the database {} names open, under another \
+                 name; one store writes a database, so share it by cloning its ForgeCore",
+                path.display()
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// The store keeps a rollback journal. Its own opens never set WAL, but the
 /// mode persists in the file, so a store another tool left in WAL mode is
 /// refused rather than converted on open: see `open_bound`.
@@ -138,7 +171,10 @@ fn refuse_wal(file: &std::fs::File, path: &Path) -> Result<()> {
 /// written into the database header's `user_version` field through the
 /// connection must be read back from our own descriptor on the pinned file.
 /// The field is then put back.
-fn open_bound(path: &Path, expected: Option<FileIdentity>) -> Result<(Connection, FileIdentity)> {
+fn open_bound(
+    path: &Path,
+    expected: Option<FileIdentity>,
+) -> Result<(Connection, FileIdentity, std::fs::File)> {
     use std::os::unix::fs::{FileExt, MetadataExt};
     // An existing store is pinned before the open; a new one only once SQLite
     // has created its file.
@@ -173,6 +209,9 @@ fn open_bound(path: &Path, expected: Option<FileIdentity>) -> Result<(Connection
         Some(file) => file,
         None => open_pinned(path, None)?,
     };
+    // Before anything writes: the database file itself, whatever name it is
+    // reached by now.
+    lock_database(&pinned, path)?;
     let meta = pinned.metadata().map_err(storage_error)?;
     let identity = (meta.dev(), meta.ino());
     let replaced = || {
@@ -226,7 +265,7 @@ fn open_bound(path: &Path, expected: Option<FileIdentity>) -> Result<(Connection
     file_identity(path, Some(identity))?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(storage_error)?;
-    Ok((conn, identity))
+    Ok((conn, identity, pinned))
 }
 
 /// One process writes a store. Its in-memory state is the truth and every
@@ -360,12 +399,13 @@ impl SqliteStore {
         // Under the lock: open the store's one connection, creating the file
         // for a new store, and pin the file it is bound to. A file swapped in
         // since the identity was decided, or around the open, is refused.
-        let (conn, identity) = open_bound(&path, seen)?;
+        let (conn, identity, held) = open_bound(&path, seen)?;
         let store = Self {
             path,
             identity,
             conn: Arc::new(parking_lot::Mutex::new(conn)),
             _lock: lock,
+            _held: Arc::new(held),
         };
         let conn = store.connect()?;
         apply_migrations(&conn)?;
