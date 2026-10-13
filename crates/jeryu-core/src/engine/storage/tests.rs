@@ -552,8 +552,10 @@ fn a_store_this_process_has_open_refuses_another_process() {
 
     // A valid store left in WAL mode by another tool (this store never sets
     // it): its writes go to the `-wal` file, so the header check would never
-    // see them. It opens, moved back to a rollback journal under the store's
-    // lock, with every committed row, including those still only in the WAL.
+    // see them. It is refused by its header before SQLite opens it, and left
+    // as it was: nothing converts a journal before the binding is proven.
+    // Once converted offline, it opens with every committed row, including
+    // one that was only in the WAL.
     let wal = private_directory();
     let wal_path = wal.path().join("forge.sqlite");
     drop(
@@ -575,29 +577,148 @@ fn a_store_this_process_has_open_refuses_another_process() {
         i32::from_be_bytes(bytes[60..64].try_into().expect("four bytes"))
     };
     assert_ne!(header(&wal_path), 7, "the commit is only in the WAL");
-    // While another connection has it open in WAL mode, it cannot move, and
-    // the open is refused rather than misread as a swap.
-    let busy = ForgeCore::open_sqlite(&wal_path).unwrap_err();
-    assert!(busy.to_string().starts_with("store_journal:"), "{busy}");
+    let sidecar = wal.path().join("forge.sqlite-wal");
+    let before = (
+        std::fs::read(&wal_path).expect("db bytes"),
+        std::fs::read(&sidecar).expect("wal bytes"),
+    );
+    let refused = ForgeCore::open_sqlite(&wal_path).unwrap_err();
+    assert!(
+        refused.to_string().starts_with("store_journal:"),
+        "{refused}"
+    );
+    assert_eq!(
+        (
+            std::fs::read(&wal_path).expect("db bytes"),
+            std::fs::read(&sidecar).expect("wal bytes"),
+        ),
+        before,
+        "a refused WAL-mode store and its WAL are untouched"
+    );
     drop(walled);
-    let opened = ForgeCore::open_sqlite(&wal_path).expect("a WAL-mode store opens");
+    let still = ForgeCore::open_sqlite(&wal_path).unwrap_err();
+    assert!(still.to_string().starts_with("store_journal:"), "{still}");
+    let offline = Connection::open(&wal_path).expect("raw");
+    let mode: String = offline
+        .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+        .expect("delete");
+    assert_eq!(mode, "delete", "converted offline");
+    drop(offline);
+    let opened = ForgeCore::open_sqlite(&wal_path).expect("the converted store opens");
     assert!(
         opened
             .list_accounts()
             .iter()
             .any(|account| account.login == "frank"),
-        "the WAL-mode store's rows are loaded"
+        "the converted store's rows are loaded"
     );
     drop(opened);
-    let raw = Connection::open(&wal_path).expect("raw");
-    let mode: String = raw
-        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
-        .expect("mode");
-    assert_eq!(mode, "delete", "the store keeps a rollback journal");
-    let version: i64 = raw
+    let version: i64 = Connection::open(&wal_path)
+        .expect("raw")
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("version");
     assert_eq!(version, 7, "the commit that was only in the WAL survives");
+
+    // A WAL-backed replacement swapped in after the real file is pinned and
+    // its header checked, before SQLite opens the name: the open refuses
+    // without checkpointing into the replacement or changing its mode, so
+    // its database and WAL bytes are as they were, and the real store is
+    // untouched and opens afterwards. With another connection holding the
+    // replacement's WAL live or not, and with the replacement swapped back
+    // out during the open or left in place. Left in place with no other
+    // connection, this store's connection is the last one on it when the
+    // refusal closes it, and only no-checkpoint-on-close keeps its WAL out.
+    for (held_open, swap_back) in [(true, true), (false, true), (true, false), (false, false)] {
+        let case = format!("held_open={held_open} swap_back={swap_back}");
+        let race = private_directory();
+        let real = race.path().join("forge.sqlite");
+        let impostor = race.path().join("impostor.sqlite");
+        let held = race.path().join("held.sqlite");
+        drop(ForgeCore::open_sqlite(&real).expect("real"));
+        drop(ForgeCore::open_sqlite(&impostor).expect("impostor"));
+        let replacement = Connection::open(&impostor).expect("raw");
+        replacement
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .expect("keep the WAL");
+        let mode: String = replacement
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .expect("wal replacement");
+        assert_eq!(mode, "wal");
+        replacement
+            .execute_batch("PRAGMA wal_autocheckpoint = 0; PRAGMA user_version = 9;")
+            .expect("a commit only in the replacement's WAL");
+        let holder = held_open.then_some(replacement);
+        let sidecar = |db: &std::path::Path, suffix: &str| {
+            let mut name = db.as_os_str().to_owned();
+            name.push(suffix);
+            PathBuf::from(name)
+        };
+        let pinned = |db: &std::path::Path| {
+            (
+                std::fs::read(db).expect("db bytes"),
+                std::fs::read(sidecar(db, "-wal")).expect("wal bytes"),
+            )
+        };
+        let replacement_bytes = pinned(&impostor);
+        assert!(
+            !replacement_bytes.1.is_empty(),
+            "the replacement has a live WAL"
+        );
+        let real_bytes = std::fs::read(&real).expect("real bytes");
+        let (hook_real, hook_impostor, hook_held) = (real.clone(), impostor.clone(), held.clone());
+        let moves = move |from: &std::path::Path, to: &std::path::Path| {
+            for suffix in ["-wal", "-shm"] {
+                if sidecar(from, suffix).exists() {
+                    std::fs::rename(sidecar(from, suffix), sidecar(to, suffix)).expect("sidecar");
+                }
+            }
+            std::fs::rename(from, to).expect("database");
+        };
+        *super::OPEN_HOOK.lock() = Some(Box::new(move |opening, before| {
+            if opening != hook_real.as_path() {
+                return;
+            }
+            if before {
+                moves(&hook_real, &hook_held);
+                moves(&hook_impostor, &hook_real);
+            } else if swap_back {
+                moves(&hook_real, &hook_impostor);
+                moves(&hook_held, &hook_real);
+            }
+        }));
+        let raced = ForgeCore::open_sqlite(&real).unwrap_err();
+        *super::OPEN_HOOK.lock() = None;
+        assert!(raced.to_string().starts_with("store_"), "{case}: {raced}");
+        if !swap_back {
+            assert_eq!(
+                pinned(&real),
+                replacement_bytes,
+                "{case}: the replacement's database and WAL are as they were"
+            );
+            moves(&real, &impostor);
+            moves(&held, &real);
+        }
+        assert_eq!(
+            pinned(&impostor),
+            replacement_bytes,
+            "{case}: the replacement's database and WAL are as they were"
+        );
+        let mode: String = Connection::open(&impostor)
+            .expect("raw")
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("mode");
+        assert_eq!(mode, "wal", "{case}: the replacement's mode is unchanged");
+        drop(holder);
+        assert_eq!(
+            std::fs::read(&real).expect("real bytes"),
+            real_bytes,
+            "{case}: the real database is untouched"
+        );
+        ForgeCore::open_sqlite(&real).expect("the real store opens once the race is gone");
+    }
 }
 
 /// A holder that is letting go is waited for, not reported as another

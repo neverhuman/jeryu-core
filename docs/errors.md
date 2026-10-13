@@ -150,9 +150,9 @@ database file has a second hard link, or the path is a link to nothing; open
 it by its one path and remove the extra link. `store_replaced`: the path no
 longer names the file this store opened; do not move or replace forge.sqlite
 while the forge runs, and restart it. `store_journal`: the database is in WAL
-mode and another connection has it open, so it cannot be moved back to the
-rollback journal the store keeps; close the other connection (a `sqlite3`
-shell, a backup tool) and restart the forge.
+mode, and the store keeps a rollback journal; the forge never converts it on
+open. With the forge stopped, run `PRAGMA journal_mode = DELETE;` on it once
+(for example with the `sqlite3` shell), then start the forge.
 
 ## Waitlist
 

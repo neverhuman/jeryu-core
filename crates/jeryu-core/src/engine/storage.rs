@@ -106,6 +106,30 @@ fn open_pinned(path: &Path, expected: Option<FileIdentity>) -> Result<std::fs::F
     Ok(file)
 }
 
+/// The store keeps a rollback journal. Its own opens never set WAL, but the
+/// mode persists in the file, so a store another tool left in WAL mode is
+/// refused rather than converted on open: see `open_bound`.
+fn journal_refused(path: &Path) -> ForgeError {
+    ForgeError::StoreCustody(format!(
+        "store_journal: {} is in WAL mode, and this store keeps a rollback journal; with the \
+         forge stopped, run `PRAGMA journal_mode = DELETE;` on it once, then start the forge",
+        path.display()
+    ))
+}
+
+/// Refuse a WAL-mode database by its header, read through the pinned
+/// descriptor before SQLite opens anything: bytes 18 and 19 (the file
+/// format's write and read versions) are 2 in WAL mode and 1 otherwise. A
+/// file too short to have a header is left to SQLite.
+fn refuse_wal(file: &std::fs::File, path: &Path) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+    let mut versions = [0_u8; 2];
+    if file.read_exact_at(&mut versions, 18).is_ok() && versions.contains(&2) {
+        return Err(journal_refused(path));
+    }
+    Ok(())
+}
+
 /// Open the store's one SQLite connection and prove it writes the pinned
 /// database file. Checking the path around the open is not enough (both
 /// checks read the name, not the file SQLite opened), and finding some new
@@ -122,11 +146,22 @@ fn open_bound(path: &Path, expected: Option<FileIdentity>) -> Result<(Connection
         Some(_) => Some(open_pinned(path, expected)?),
         None => None,
     };
+    if let Some(file) = &pinned_before {
+        refuse_wal(file, path)?;
+    }
     #[cfg(test)]
     if let Some(hook) = OPEN_HOOK.lock().as_ref() {
         hook(path, true);
     }
     let conn = Connection::open(path).map_err(storage_error)?;
+    // Until the binding is proven, this connection only reads: if it turns
+    // out to be bound to another file, closing it must not checkpoint that
+    // file's WAL into it either.
+    conn.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        true,
+    )
+    .map_err(storage_error)?;
     let original: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(storage_error)?;
@@ -162,35 +197,19 @@ fn open_bound(path: &Path, expected: Option<FileIdentity>) -> Result<(Connection
         }
         _ => storage_error(error),
     };
-    // The store keeps a rollback journal, so a commit reaches the database
-    // file itself, where the check below reads it; in WAL mode it would reach
-    // only the `-wal` file. This store never sets WAL, but the mode persists
-    // in the file, so a store another tool left in WAL mode is moved back
-    // here, under the store's lock, which writes the WAL's commits into the
-    // file. A store that cannot move (another connection has it open in WAL
-    // mode) is refused, not misread as a swap.
-    let stuck = |journal: &str| {
-        ForgeError::StoreCustody(format!(
-            "store_journal: {} keeps a {journal} journal that cannot be moved to a rollback \
-             journal while another connection has it open",
-            path.display()
-        ))
-    };
+    // The store keeps a rollback journal, so the nonce's commit reaches the
+    // database file itself, where the check below reads it; in WAL mode it
+    // would reach only the `-wal` file. A WAL-mode store was refused before
+    // the open (`refuse_wal`); a WAL-mode file swapped in since then is
+    // refused here. Nothing changes the journal before the binding is
+    // proven: SQLite finds `-wal` by the path, not by the file it opened, so
+    // moving a journal through an unproven connection could checkpoint one
+    // file's commits into another.
     let journal: String = conn
-        .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
-        .map_err(|error| match &error {
-            rusqlite::Error::SqliteFailure(failure, _)
-                if matches!(
-                    failure.code,
-                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-                ) =>
-            {
-                stuck("WAL")
-            }
-            _ => moved(error),
-        })?;
-    if !journal.eq_ignore_ascii_case("delete") {
-        return Err(stuck(&journal));
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(storage_error)?;
+    if journal.eq_ignore_ascii_case("wal") {
+        return Err(journal_refused(path));
     }
     conn.execute_batch(&format!("PRAGMA user_version = {nonce};"))
         .map_err(moved)?;
