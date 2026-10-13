@@ -1106,6 +1106,15 @@ fn load_bot_operations(conn: &Connection, state: &mut State) -> Result<()> {
                 serde_json::from_str::<super::vault::SealedSecret>(json).is_ok()
             });
             if !sealed {
+                conn.execute(
+                    "DELETE FROM bot_operations WHERE bot_id = ?1 AND operation = ?2 AND request_key = ?3",
+                    params![
+                        operation.bot_id.to_string(),
+                        operation.operation,
+                        operation.request_key,
+                    ],
+                )
+                .map_err(storage_error)?;
                 continue;
             }
         }

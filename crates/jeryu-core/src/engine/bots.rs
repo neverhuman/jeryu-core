@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use uuid::Uuid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::auth::require_login;
 use super::{ForgeCore, require_name};
@@ -29,6 +29,7 @@ pub(super) const REFRESH_OPERATION: &str = "bot.token.refresh";
 const REFRESH_REPLAY_KIND: &str = "bot.refresh.replay";
 const REFRESH_REPLAY_PROVIDER: &str = "jeryu-bot";
 const IDEMPOTENCY_KEY_MIN: usize = 32;
+const IDEMPOTENCY_KEY_MAX: usize = 128;
 const ACTIVITY_TTL_DAYS: i64 = 90;
 const ACTIVITY_COALESCE_SECS: i64 = 60;
 const ACTIVITY_CAP: usize = 500;
@@ -712,9 +713,6 @@ impl ForgeCore {
         } else {
             None
         };
-        if existing.expires_at <= now {
-            return invalid();
-        }
         let Some(bot) = state.bots.get(&existing.bot_id).cloned() else {
             return invalid();
         };
@@ -789,11 +787,23 @@ impl ForgeCore {
             )?;
             return invalid();
         }
+        // An unused expired token is an invalid credential. A spent token,
+        // including one whose expiry has also passed, already took the reuse
+        // path above so the family is revoked the same way as a normal refresh.
+        if existing.expires_at <= now {
+            return invalid();
+        }
         let previous = state.clone();
         if let Some(row) = state.bot_refresh.get_mut(&hash) {
             row.used_at = Some(now);
         }
-        let session = issue_refresh(&mut state, &bot, &key, now)?;
+        let session = match issue_refresh(&mut state, &bot, &key, now) {
+            Ok(session) => session,
+            Err(error) => {
+                *state = previous;
+                return Err(error);
+            }
+        };
         let sealed = match seal_refresh_replay(self.vault.as_deref(), &hash, &session) {
             Ok(sealed) => sealed,
             Err(error) => {
@@ -1615,9 +1625,12 @@ fn validate_task(
 
 fn require_refresh_idempotency_key(value: &str) -> Result<()> {
     require_name("request key", value)?;
-    if value.len() < IDEMPOTENCY_KEY_MIN || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+    if value.len() < IDEMPOTENCY_KEY_MIN
+        || value.len() > IDEMPOTENCY_KEY_MAX
+        || !value.bytes().all(|byte| byte.is_ascii_graphic())
+    {
         return Err(ForgeError::Validation(
-            "idempotency key must be at least 32 visible characters".to_string(),
+            "idempotency key must be 32 to 128 visible characters".to_string(),
         ));
     }
     Ok(())
@@ -1677,7 +1690,7 @@ fn seal_refresh_replay(
     let Some(vault) = vault else {
         return Err(vault_unavailable());
     };
-    let replay = RefreshReplay {
+    let mut replay = RefreshReplay {
         bot_id: session.bot.id,
         key_id: session.key_id.clone(),
         generation: session.generation,
@@ -1687,6 +1700,7 @@ fn seal_refresh_replay(
     let plaintext = Zeroizing::new(serde_json::to_vec(&replay).map_err(|error| {
         ForgeError::Storage(format!("bot refresh replay encode failed: {error}"))
     })?);
+    replay.refresh_token.zeroize();
     let bot_id = session.bot.id.to_string();
     let binding = refresh_replay_binding(presented_hash, &bot_id, session.generation);
     let sealed = vault.seal(&binding, &plaintext)?;
@@ -2620,6 +2634,112 @@ mod tests {
         );
         let after = core.list_account_bots("alice").unwrap()[0].credential_generation;
         assert_eq!(after, successor.generation);
+    }
+
+    #[test]
+    fn idempotent_refresh_revokes_a_spent_token_after_it_expires() {
+        let (core, _) = fixture();
+        let core = vaulted(core);
+        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let first = core
+            .exchange_bot_enrollment_key(&enrolled.enrollment_key)
+            .unwrap();
+        let digest = "44".repeat(32);
+        let successor = core
+            .rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &digest)
+            .unwrap();
+        core.force_bot_refresh_used_before_grace(&first.refresh_token);
+        core.force_bot_refresh_expired(&first.refresh_token);
+        assert!(
+            core.rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &digest)
+                .is_err()
+        );
+        assert!(
+            core.rotate_bot_refresh_token(&successor.refresh_token)
+                .is_err()
+        );
+        let generation = core.list_account_bots("alice").unwrap()[0].credential_generation;
+        assert!(generation > successor.generation);
+    }
+
+    #[test]
+    fn refresh_idempotency_rejects_a_long_key_and_the_reserved_operation() {
+        let (core, _) = fixture();
+        let core = vaulted(core);
+        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let first = core
+            .exchange_bot_enrollment_key(&enrolled.enrollment_key)
+            .unwrap();
+        let digest = "55".repeat(32);
+        let too_long = "a".repeat(IDEMPOTENCY_KEY_MAX + 1);
+        assert!(matches!(
+            core.rotate_bot_refresh_token_idempotent(&first.refresh_token, &too_long, &digest),
+            Err(ForgeError::Validation(message)) if message.contains("128")
+        ));
+        assert!(matches!(
+            core.reserve_bot_operation(enrolled.bot.id, REFRESH_OPERATION, RETRY_KEY, &digest),
+            Err(ForgeError::Validation(message)) if message.contains("reserved")
+        ));
+        assert!(matches!(
+            core.finish_bot_operation(enrolled.bot.id, REFRESH_OPERATION, RETRY_KEY, "{}"),
+            Err(ForgeError::Validation(message)) if message.contains("reserved")
+        ));
+    }
+
+    #[test]
+    fn idempotent_refresh_drops_an_unsealed_row_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forge.sqlite");
+        let (presented, successor) = {
+            let core = ForgeCore::open_sqlite(&path)
+                .unwrap()
+                .with_vault_key(crate::VaultKey::from_bytes(&[11; 32]).expect("vault key"));
+            core.create_account("alice", PASSWORD, UserRole::User)
+                .unwrap();
+            let enrolled = enroll(&core, "atlas", BotReach::General);
+            let first = core
+                .exchange_bot_enrollment_key(&enrolled.enrollment_key)
+                .unwrap();
+            let digest = "66".repeat(32);
+            let successor = core
+                .rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &digest)
+                .unwrap();
+            (first.refresh_token, successor.refresh_token)
+        };
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            let changed = conn
+                .execute(
+                    "UPDATE bot_operations SET result_json = ?1 WHERE operation = ?2",
+                    rusqlite::params!["{\"refresh_token\":\"jbr_planted\"}", REFRESH_OPERATION],
+                )
+                .unwrap();
+            assert_eq!(changed, 1);
+        }
+        let core = ForgeCore::open_sqlite(&path)
+            .unwrap()
+            .with_vault_key(crate::VaultKey::from_bytes(&[11; 32]).expect("vault key"));
+        let digest = "66".repeat(32);
+        assert!(
+            core.rotate_bot_refresh_token_idempotent(&presented, RETRY_KEY, &digest)
+                .is_err()
+        );
+        assert!(core.rotate_bot_refresh_token(&successor).is_err());
+        let trail = core.list_audit("alice/atlas").unwrap();
+        assert!(
+            trail
+                .iter()
+                .any(|entry| entry.action == "bot.refresh.reuse")
+        );
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let planted: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM bot_operations WHERE result_json LIKE '%jbr_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(planted, 0, "unsealed refresh row was not dropped");
     }
 
     #[test]

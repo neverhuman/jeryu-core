@@ -7,10 +7,14 @@ the newest refresh token they receive.
 
 ## Refresh Retries
 
-`POST /api/v1/bot/token/refresh` clients that opt in to idempotency should send
-the same `Idempotency-Key` when retrying a request whose response may have been
-lost. The key is at least 32 visible characters from a CSPRNG, and it is bound
-to the presented refresh token as well as the request body. Core records the
+The engine method is `rotate_bot_refresh_token_idempotent`. No edge route in
+this repository reads an `Idempotency-Key` header yet, so a client cannot call
+this path over HTTP until that route exists. Callers that do opt in send the
+same idempotency key when retrying a request whose response may have been lost.
+Core accepts 32 to 128 visible ASCII characters. It cannot tell whether the
+caller drew them from a CSPRNG; a predictable key lets anyone who later sees
+the spent refresh token replay the successor during the grace window. The key
+is bound to the presented refresh token as well as the request body. Core records the
 rotation and a vault-sealed copy of the successor token in one write. The
 sqlite row holds ciphertext, not the token. A retry that presents the
 just-spent refresh token with the same key and body, within the five-minute
