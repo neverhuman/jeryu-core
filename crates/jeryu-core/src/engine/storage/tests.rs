@@ -719,6 +719,71 @@ fn a_store_this_process_has_open_refuses_another_process() {
         );
         ForgeCore::open_sqlite(&real).expect("the real store opens once the race is gone");
     }
+
+    // The same substitution, with the replacement's `-shm` a symlink to a
+    // sentinel outside the store's directory: SQLite opens its sidecars
+    // without following links, so the open is refused, nothing is written
+    // through the link, and the real store is untouched.
+    let race = private_directory();
+    let outside = private_directory();
+    let real = race.path().join("forge.sqlite");
+    let impostor = race.path().join("impostor.sqlite");
+    let held = race.path().join("held.sqlite");
+    let sentinel = outside.path().join("sentinel");
+    std::fs::write(&sentinel, vec![0x5a_u8; 65_536]).expect("sentinel");
+    drop(ForgeCore::open_sqlite(&real).expect("real"));
+    drop(ForgeCore::open_sqlite(&impostor).expect("impostor"));
+    let mode: String = Connection::open(&impostor)
+        .expect("raw")
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .expect("wal replacement");
+    assert_eq!(mode, "wal");
+    let real_bytes = std::fs::read(&real).expect("real bytes");
+    let (hook_real, hook_impostor, hook_held, hook_sentinel) = (
+        real.clone(),
+        impostor.clone(),
+        held.clone(),
+        sentinel.clone(),
+    );
+    *super::OPEN_HOOK.lock() = Some(Box::new(move |opening, before| {
+        if opening != hook_real.as_path() {
+            return;
+        }
+        let shm = hook_real.with_file_name("forge.sqlite-shm");
+        if before {
+            std::fs::rename(&hook_real, &hook_held).expect("hold the real file");
+            std::fs::rename(&hook_impostor, &hook_real).expect("swap the replacement in");
+            std::os::unix::fs::symlink(&hook_sentinel, &shm).expect("an -shm link out");
+        } else {
+            let _ = std::fs::remove_file(&shm);
+            std::fs::rename(&hook_real, &hook_impostor).expect("swap the replacement out");
+            std::fs::rename(&hook_held, &hook_real).expect("put the real file back");
+        }
+    }));
+    let escaped = ForgeCore::open_sqlite(&real);
+    *super::OPEN_HOOK.lock() = None;
+    assert!(escaped.is_err(), "an open through a linked -shm is refused");
+    assert_eq!(
+        std::fs::read(&sentinel).expect("sentinel"),
+        vec![0x5a_u8; 65_536],
+        "nothing is written through the link"
+    );
+    // The refusal can come before the open's second hook, which swaps back:
+    // then put the real file back here.
+    let shm = real.with_file_name("forge.sqlite-shm");
+    if std::fs::symlink_metadata(&shm).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        std::fs::remove_file(&shm).expect("leftover link");
+    }
+    if held.exists() {
+        std::fs::rename(&real, &impostor).expect("swap the replacement out");
+        std::fs::rename(&held, &real).expect("put the real file back");
+    }
+    assert_eq!(
+        std::fs::read(&real).expect("real bytes"),
+        real_bytes,
+        "the real database is untouched"
+    );
+    ForgeCore::open_sqlite(&real).expect("the real store opens once the race is gone");
 }
 
 /// A holder that is letting go is waited for, not reported as another
