@@ -10,7 +10,7 @@ statement_timeout = "60s"
 estimated_rows = 0
 deploy_phase = "expand"
 app_compatibility = "new_app_old_db"
-requires = ["0019_provider_connections"]
+requires = ["0021_bot_kind_free_form"]
 rollback = "db/rollbacks/0022_provider_connection_rotation.sql"
 backfill = "none; every existing row keeps its values and has no rotation in flight"
 data_classification = "secret"
@@ -21,3 +21,8 @@ tests = [
   "a_rotation_left_in_flight_is_auth_required_after_a_restart",
   "migration_0022_keeps_every_connection_row",
 ]
+approval = "forge-api"
+backup = "VACUUM INTO copy of forge.sqlite before apply"
+restore = "restore that snapshot when no connection has entered auth_required or recorded a rotation since; otherwise recover forward"
+irreversible = false
+verify = "provider_connections has rotation_secret_version and rotation_started_at; COUNT(*) of provider_connections unchanged; every id, owner_id, provider, state, connection_generation, secret_version and sealed_secret unchanged; the state CHECK accepts auth_required"
