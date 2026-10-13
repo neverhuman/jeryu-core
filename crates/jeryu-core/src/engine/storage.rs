@@ -25,11 +25,11 @@ use self::migrations::apply_migrations;
 pub(super) struct SqliteStore {
     path: PathBuf,
     /// The database file's device and inode when the store opened: the file
-    /// SQLite's one connection was bound to.
+    /// SQLite's one connection was proven to write.
     identity: FileIdentity,
-    /// The store's one connection, opened once and bound to `identity` by the
-    /// descriptor SQLite opened. Nothing reopens the database by its path, so
-    /// a name swapped later cannot redirect a write.
+    /// The store's one connection, opened once and proven to write `identity`
+    /// (see `open_bound`). Nothing reopens the database by its path, so a name
+    /// swapped later cannot redirect a write.
     conn: Arc<parking_lot::Mutex<Connection>>,
     _lock: Arc<StoreLock>,
 }
@@ -67,27 +67,6 @@ fn file_identity(path: &Path, expected: Option<FileIdentity>) -> Result<FileIden
     Ok(identity)
 }
 
-/// The regular files this process has open, by descriptor, read from
-/// `/proc/self/fd` (each entry is followed to the file it names).
-#[cfg(target_os = "linux")]
-fn open_files() -> Result<std::collections::BTreeMap<String, FileIdentity>> {
-    use std::os::unix::fs::MetadataExt;
-    let mut files = std::collections::BTreeMap::new();
-    for entry in std::fs::read_dir("/proc/self/fd").map_err(storage_error)? {
-        let entry = entry.map_err(storage_error)?;
-        // A descriptor closed since the listing has no metadata: skip it.
-        if let Ok(meta) = std::fs::metadata(entry.path())
-            && meta.is_file()
-        {
-            files.insert(
-                entry.file_name().to_string_lossy().into_owned(),
-                (meta.dev(), meta.ino()),
-            );
-        }
-    }
-    Ok(files)
-}
-
 /// A test-only hook around the store's one `Connection::open`, called with
 /// the path and `true` just before it and `false` just after, so a case can
 /// move files across that interval deterministically.
@@ -96,40 +75,106 @@ pub(super) type OpenHook = Box<dyn Fn(&Path, bool) + Send>;
 #[cfg(test)]
 pub(super) static OPEN_HOOK: parking_lot::Mutex<Option<OpenHook>> = parking_lot::Mutex::new(None);
 
-/// Open the store's one SQLite connection and bind it to the database file:
-/// the descriptor SQLite opened must be the file `expected` pinned (or, for a
-/// store created now, the one file the path names, with one link). Checking
-/// the path before and after the open is not enough, because both checks
-/// read the current name, not the file SQLite opened.
+/// Our own descriptor on the database file, opened without following a link
+/// and checked to be the one file `expected` pinned (if given): a regular file
+/// with one link.
+fn open_pinned(path: &Path, expected: Option<FileIdentity>) -> Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::MetadataExt;
+    let fd = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| storage_error(std::io::Error::from(error)))?;
+    let file = std::fs::File::from(fd);
+    let meta = file.metadata().map_err(storage_error)?;
+    let identity = (meta.dev(), meta.ino());
+    if !meta.is_file() || expected.is_some_and(|expected| expected != identity) {
+        return Err(ForgeError::StoreCustody(format!(
+            "store_replaced: {} named another file while it was being opened",
+            path.display()
+        )));
+    }
+    if meta.nlink() > 1 {
+        return Err(ForgeError::StoreCustody(format!(
+            "store_aliased: {} has {} hard links; open a store by its one name",
+            path.display(),
+            meta.nlink()
+        )));
+    }
+    Ok(file)
+}
+
+/// Open the store's one SQLite connection and prove it writes the pinned
+/// database file. Checking the path around the open is not enough (both
+/// checks read the name, not the file SQLite opened), and finding some new
+/// descriptor on the file is not enough either (another could have opened
+/// it). So the proof goes through the connection itself: a fresh random value
+/// written into the database header's `user_version` field through the
+/// connection must be read back from our own descriptor on the pinned file.
+/// The field is then put back.
 fn open_bound(path: &Path, expected: Option<FileIdentity>) -> Result<(Connection, FileIdentity)> {
-    #[cfg(target_os = "linux")]
-    let before = open_files()?;
+    use std::os::unix::fs::{FileExt, MetadataExt};
+    // An existing store is pinned before the open; a new one only once SQLite
+    // has created its file.
+    let pinned_before = match expected {
+        Some(_) => Some(open_pinned(path, expected)?),
+        None => None,
+    };
     #[cfg(test)]
     if let Some(hook) = OPEN_HOOK.lock().as_ref() {
         hook(path, true);
     }
     let conn = Connection::open(path).map_err(storage_error)?;
-    // Make SQLite read the file now, so its descriptor is open.
-    conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
+    let original: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(storage_error)?;
     #[cfg(test)]
     if let Some(hook) = OPEN_HOOK.lock().as_ref() {
         hook(path, false);
     }
-    let identity = file_identity(path, expected)?;
-    #[cfg(target_os = "linux")]
-    {
-        let opened = open_files()?
-            .into_iter()
-            .filter(|(fd, file)| before.get(fd) != Some(file))
-            .any(|(_, file)| file == identity);
-        if !opened {
-            return Err(ForgeError::StoreCustody(format!(
-                "store_replaced: {} named another file while it was being opened",
-                path.display()
-            )));
+    let pinned = match pinned_before {
+        Some(file) => file,
+        None => open_pinned(path, None)?,
+    };
+    let meta = pinned.metadata().map_err(storage_error)?;
+    let identity = (meta.dev(), meta.ino());
+    let replaced = || {
+        ForgeError::StoreCustody(format!(
+            "store_replaced: {} named another file while it was being opened",
+            path.display()
+        ))
+    };
+    let nonce = loop {
+        let candidate = i64::from(uuid::Uuid::new_v4().as_u128() as i32);
+        if candidate != 0 && candidate != original {
+            break candidate;
         }
+    };
+    // SQLite itself refuses to write a file that was moved since it opened it
+    // (SQLITE_READONLY_DBMOVED): that is the swap, too.
+    let moved = |error: rusqlite::Error| match &error {
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.extended_code == rusqlite::ffi::SQLITE_READONLY_DBMOVED =>
+        {
+            replaced()
+        }
+        _ => storage_error(error),
+    };
+    conn.execute_batch(&format!("PRAGMA user_version = {nonce};"))
+        .map_err(moved)?;
+    // The header's user_version: four big-endian bytes at offset 60.
+    let mut field = [0_u8; 4];
+    let written = pinned.read_exact_at(&mut field, 60).is_ok()
+        && i64::from(i32::from_be_bytes(field)) == nonce;
+    conn.execute_batch(&format!("PRAGMA user_version = {original};"))
+        .map_err(storage_error)?;
+    if !written {
+        return Err(replaced());
     }
+    // And the name still names that file, with one link.
+    file_identity(path, Some(identity))?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(storage_error)?;
     Ok((conn, identity))

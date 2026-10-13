@@ -488,9 +488,10 @@ fn a_store_this_process_has_open_refuses_another_process() {
     );
 
     // A file swapped in just before the one open and swapped back just after
-    // it (CONNECTION-IDENTITY-ABA): the name reads right on both sides, but
-    // the descriptor SQLite opened is the impostor's, so the open is refused
-    // and nothing of the impostor is loaded.
+    // it (CONNECTION-IDENTITY-ABA): the name reads right on both sides, and an
+    // independent descriptor on the real file is newly open across the check,
+    // but the connection SQLite holds is the impostor's, so the open is
+    // refused and nothing of the impostor is loaded.
     let race = private_directory();
     let real = race.path().join("forge.sqlite");
     let impostor = race.path().join("impostor.sqlite");
@@ -509,6 +510,8 @@ fn a_store_this_process_has_open_refuses_another_process() {
     }
     let real_bytes = std::fs::read(&real).expect("real bytes");
     let (hook_real, hook_impostor, hook_held) = (real.clone(), impostor.clone(), held.clone());
+    let decoy: std::sync::Arc<parking_lot::Mutex<Option<std::fs::File>>> = Default::default();
+    let hook_decoy = decoy.clone();
     *super::OPEN_HOOK.lock() = Some(Box::new(move |opening, before| {
         if opening != hook_real.as_path() {
             return;
@@ -519,10 +522,17 @@ fn a_store_this_process_has_open_refuses_another_process() {
         } else {
             std::fs::rename(&hook_real, &hook_impostor).expect("swap the impostor out");
             std::fs::rename(&hook_held, &hook_real).expect("put the real file back");
+            // A plain reader on the real file, newly open across the check.
+            *hook_decoy.lock() = Some(std::fs::File::open(&hook_real).expect("decoy"));
         }
     }));
     let raced = ForgeCore::open_sqlite(&real).unwrap_err();
     *super::OPEN_HOOK.lock() = None;
+    assert!(
+        decoy.lock().is_some(),
+        "the decoy was open across the check"
+    );
+    drop(decoy.lock().take());
     assert!(raced.to_string().starts_with("store_replaced:"), "{raced}");
     assert_eq!(
         std::fs::read(&real).expect("real bytes"),
