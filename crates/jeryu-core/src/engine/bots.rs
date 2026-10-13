@@ -8,9 +8,11 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::{Algorithm, Argon2, Params, Version};
 use chrono::{DateTime, Duration, Utc};
 use rand_core::{OsRng, RngCore};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use super::auth::require_login;
 use super::{ForgeCore, require_name};
@@ -23,7 +25,10 @@ const CROCKFORD: &[u8] = b"0123456789abcdefghjkmnpqrstvwxyz";
 const REFRESH_TTL_HOURS: i64 = 12;
 const ROTATION_GRACE_MINUTES: i64 = 5;
 const OPERATION_TTL_HOURS: i64 = 24;
-const REFRESH_OPERATION: &str = "bot.token.refresh";
+pub(super) const REFRESH_OPERATION: &str = "bot.token.refresh";
+const REFRESH_REPLAY_KIND: &str = "bot.refresh.replay";
+const REFRESH_REPLAY_PROVIDER: &str = "jeryu-bot";
+const IDEMPOTENCY_KEY_MIN: usize = 32;
 const ACTIVITY_TTL_DAYS: i64 = 90;
 const ACTIVITY_COALESCE_SECS: i64 = 60;
 const ACTIVITY_CAP: usize = 500;
@@ -682,7 +687,7 @@ impl ForgeCore {
         request_key: &str,
         body_digest: &str,
     ) -> Result<BotSession> {
-        require_name("request key", request_key)?;
+        require_refresh_idempotency_key(request_key)?;
         if body_digest.len() != 64 || !body_digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(ForgeError::Validation(
                 "operation digest must be 64 hex characters".to_string(),
@@ -694,27 +699,70 @@ impl ForgeCore {
         let Some(existing) = state.bot_refresh.get(&hash).cloned() else {
             return invalid();
         };
-        let map_key = (
-            existing.bot_id,
-            REFRESH_OPERATION.to_string(),
-            request_key.to_string(),
-        );
+        let map_key = refresh_operation_key(existing.bot_id, &hash, request_key);
         prune_bot_operations(&mut state, now);
-        if let Some(operation) = state.bot_operations.get(&map_key) {
+        let replay_json = if let Some(operation) = state.bot_operations.get(&map_key) {
             if operation.body_digest != body_digest {
                 return Err(ForgeError::Conflict("idempotency_conflict".to_string()));
             }
-            if let Some(result_json) = &operation.result_json {
-                if existing
-                    .used_at
-                    .is_some_and(|used_at| within_rotation_grace(now, used_at))
-                {
-                    return serde_json::from_str(result_json).map_err(|error| {
-                        ForgeError::Storage(format!("bot refresh replay decode failed: {error}"))
-                    });
+            match &operation.result_json {
+                Some(result_json) => Some(result_json.clone()),
+                None => return Err(ForgeError::Conflict("idempotency_in_progress".to_string())),
+            }
+        } else {
+            None
+        };
+        if existing.expires_at <= now {
+            return invalid();
+        }
+        let Some(bot) = state.bots.get(&existing.bot_id).cloned() else {
+            return invalid();
+        };
+        let Some(key) = state.bot_keys.get(&existing.key_id).cloned() else {
+            return invalid();
+        };
+        // The same checks as a fresh rotation. A suspended, revoked, or
+        // retired bot does not receive a stored successor during the grace.
+        if !bot_account_matches(&state, &bot)
+            || bot.credential_generation != existing.generation
+            || !key_is_live(&key, now)
+        {
+            return invalid();
+        }
+        if let Some(result_json) = replay_json {
+            match existing.used_at {
+                Some(used_at) if within_rotation_grace(now, used_at) => {
+                    let session = match open_refresh_replay(
+                        self.vault.as_deref(),
+                        &state,
+                        &existing,
+                        &hash,
+                        &result_json,
+                        &bot,
+                    )? {
+                        Some(session) => session,
+                        None => return invalid(),
+                    };
+                    let actor = bot.owner.clone();
+                    let subject = format!("{}/{}", bot.owner, bot.slug);
+                    let bot_id = bot.id;
+                    let key_id = existing.key_id.clone();
+                    drop(state);
+                    self.record_bot_audit(
+                        &actor,
+                        "bot.refresh.replay",
+                        &subject,
+                        "completed",
+                        bot_id,
+                        Some(&key_id),
+                        None,
+                    )?;
+                    return Ok(session);
                 }
-            } else {
-                return Err(ForgeError::Conflict("idempotency_in_progress".to_string()));
+                Some(_) => {}
+                // A completed row whose presented token was never marked used
+                // is not a retry of this rotation.
+                None => return invalid(),
             }
         }
         // Reuse outside the operation replay path keeps the strict family
@@ -741,37 +789,26 @@ impl ForgeCore {
             )?;
             return invalid();
         }
-        if existing.expires_at <= now {
-            return invalid();
-        }
-        let Some(bot) = state.bots.get(&existing.bot_id).cloned() else {
-            return invalid();
-        };
-        let Some(key) = state.bot_keys.get(&existing.key_id).cloned() else {
-            return invalid();
-        };
-        if !bot_account_matches(&state, &bot)
-            || bot.credential_generation != existing.generation
-            || !key_is_live(&key, now)
-        {
-            return invalid();
-        }
         let previous = state.clone();
         if let Some(row) = state.bot_refresh.get_mut(&hash) {
             row.used_at = Some(now);
         }
         let session = issue_refresh(&mut state, &bot, &key, now)?;
-        let result_json = serde_json::to_string(&session).map_err(|error| {
-            ForgeError::Storage(format!("bot refresh replay encode failed: {error}"))
-        })?;
+        let sealed = match seal_refresh_replay(self.vault.as_deref(), &hash, &session) {
+            Ok(sealed) => sealed,
+            Err(error) => {
+                *state = previous;
+                return Err(error);
+            }
+        };
         state.bot_operations.insert(
             map_key,
             BotOperationRecord {
                 bot_id: existing.bot_id,
                 operation: REFRESH_OPERATION.to_string(),
-                request_key: request_key.to_string(),
+                request_key: refresh_request_key(&hash, request_key),
                 body_digest: body_digest.to_string(),
-                result_json: Some(result_json),
+                result_json: Some(sealed),
                 created_at: now,
             },
         );
@@ -1101,6 +1138,16 @@ impl ForgeCore {
         if let Some(token) = state.bot_refresh.get_mut(&hash) {
             token.used_at =
                 Some(Utc::now() - Duration::minutes(ROTATION_GRACE_MINUTES) - Duration::seconds(1));
+        }
+    }
+
+    /// Mark a refresh token used inside the grace, without rotating it.
+    #[cfg(test)]
+    pub fn force_bot_refresh_used_now(&self, refresh_token: &str) {
+        let hash = token_hash(refresh_token);
+        let mut state = self.state.write();
+        if let Some(token) = state.bot_refresh.get_mut(&hash) {
+            token.used_at = Some(Utc::now());
         }
     }
 
@@ -1566,6 +1613,140 @@ fn validate_task(
     Ok(())
 }
 
+fn require_refresh_idempotency_key(value: &str) -> Result<()> {
+    require_name("request key", value)?;
+    if value.len() < IDEMPOTENCY_KEY_MIN || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(ForgeError::Validation(
+            "idempotency key must be at least 32 visible characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn refresh_request_key(token_hash: &str, request_key: &str) -> String {
+    format!("{token_hash}:{request_key}")
+}
+
+fn refresh_operation_key(
+    bot_id: Uuid,
+    token_hash: &str,
+    request_key: &str,
+) -> (Uuid, String, String) {
+    (
+        bot_id,
+        REFRESH_OPERATION.to_string(),
+        refresh_request_key(token_hash, request_key),
+    )
+}
+
+/// Successor material sealed into `bot_operations`. It is not `BotSession`:
+/// that type stays unserializable so a refresh token cannot be stored by accident.
+#[derive(Serialize, Deserialize)]
+struct RefreshReplay {
+    bot_id: Uuid,
+    key_id: String,
+    generation: u64,
+    refresh_token: String,
+    refresh_expires_at: DateTime<Utc>,
+}
+
+fn refresh_replay_binding<'a>(
+    token_hash: &'a str,
+    bot_id: &'a str,
+    generation: u64,
+) -> super::vault::SealBinding<'a> {
+    super::vault::SealBinding {
+        connection_id: token_hash,
+        owner_id: bot_id,
+        provider: REFRESH_REPLAY_PROVIDER,
+        generation,
+        secret_version: 1,
+        credential_kind: REFRESH_REPLAY_KIND,
+    }
+}
+
+fn vault_unavailable() -> ForgeError {
+    ForgeError::Validation("vault_unavailable: this server has no vault key configured".into())
+}
+
+fn seal_refresh_replay(
+    vault: Option<&super::vault::VaultKey>,
+    presented_hash: &str,
+    session: &BotSession,
+) -> Result<String> {
+    let Some(vault) = vault else {
+        return Err(vault_unavailable());
+    };
+    let replay = RefreshReplay {
+        bot_id: session.bot.id,
+        key_id: session.key_id.clone(),
+        generation: session.generation,
+        refresh_token: session.refresh_token.clone(),
+        refresh_expires_at: session.refresh_expires_at,
+    };
+    let plaintext = Zeroizing::new(serde_json::to_vec(&replay).map_err(|error| {
+        ForgeError::Storage(format!("bot refresh replay encode failed: {error}"))
+    })?);
+    let bot_id = session.bot.id.to_string();
+    let binding = refresh_replay_binding(presented_hash, &bot_id, session.generation);
+    let sealed = vault.seal(&binding, &plaintext)?;
+    serde_json::to_string(&sealed)
+        .map_err(|error| ForgeError::Storage(format!("bot refresh replay encode failed: {error}")))
+}
+
+/// `Ok(None)` is an invalid credential: the stored row is not this token's
+/// unused successor. A missing vault is an error, because the caller asked
+/// for a replay this server cannot open.
+fn open_refresh_replay(
+    vault: Option<&super::vault::VaultKey>,
+    state: &super::State,
+    existing: &BotRefreshRecord,
+    presented_hash: &str,
+    result_json: &str,
+    bot: &BotRecord,
+) -> Result<Option<BotSession>> {
+    let Some(vault) = vault else {
+        return Err(vault_unavailable());
+    };
+    let Ok(sealed) = serde_json::from_str::<super::vault::SealedSecret>(result_json) else {
+        return Ok(None);
+    };
+    let bot_id = existing.bot_id.to_string();
+    let binding = refresh_replay_binding(presented_hash, &bot_id, existing.generation);
+    let Ok(opened) = vault.open(&binding, &sealed) else {
+        return Ok(None);
+    };
+    let Ok(replay) = serde_json::from_slice::<RefreshReplay>(&opened) else {
+        return Ok(None);
+    };
+    if replay.bot_id != existing.bot_id
+        || replay.key_id != existing.key_id
+        || replay.generation != existing.generation
+        || replay.generation != bot.credential_generation
+    {
+        return Ok(None);
+    }
+    let successor_hash = token_hash(&replay.refresh_token);
+    let Some(successor) = state.bot_refresh.get(&successor_hash) else {
+        return Ok(None);
+    };
+    if successor.bot_id != existing.bot_id
+        || successor.key_id != existing.key_id
+        || successor.generation != existing.generation
+        || successor.used_at.is_some()
+        || successor.expires_at <= Utc::now()
+    {
+        return Ok(None);
+    }
+    Ok(Some(BotSession {
+        bot: BotSummary::from(bot),
+        key_id: existing.key_id.clone(),
+        generation: existing.generation,
+        refresh_token: replay.refresh_token,
+        refresh_expires_at: replay.refresh_expires_at,
+    }))
+}
+
 fn issue_refresh(
     state: &mut super::State,
     bot: &BotRecord,
@@ -1989,6 +2170,12 @@ mod tests {
     }
 
     const PASSWORD: &str = "correct-horse-battery";
+    /// 32 visible characters. Shorter keys are rejected so a logged "retry-1" cannot open a replay.
+    const RETRY_KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn vaulted(core: ForgeCore) -> ForgeCore {
+        core.with_vault_key(crate::VaultKey::from_bytes(&[11; 32]).expect("vault key"))
+    }
 
     fn fixture() -> (ForgeCore, String) {
         let core = ForgeCore::new();
@@ -2264,7 +2451,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("forge.sqlite");
         let (original_refresh, replayed) = {
-            let core = ForgeCore::open_sqlite(&path).unwrap();
+            let core = ForgeCore::open_sqlite(&path)
+                .unwrap()
+                .with_vault_key(crate::VaultKey::from_bytes(&[11; 32]).expect("vault key"));
             core.create_account("alice", PASSWORD, UserRole::User)
                 .unwrap();
             core.create_repository(
@@ -2285,34 +2474,59 @@ mod tests {
                 .unwrap();
             let digest = "ab".repeat(32);
             let rotated = core
-                .rotate_bot_refresh_token_idempotent(&first.refresh_token, "retry-1", &digest)
+                .rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &digest)
                 .unwrap();
             (first.refresh_token, rotated)
         };
-        let core = ForgeCore::open_sqlite(&path).unwrap();
+        let stored = std::fs::read(&path).unwrap();
+        assert!(
+            !stored.windows(4).any(|window| window == b"jbr_"),
+            "sqlite holds a plaintext refresh token"
+        );
+        let core = ForgeCore::open_sqlite(&path)
+            .unwrap()
+            .with_vault_key(crate::VaultKey::from_bytes(&[11; 32]).expect("vault key"));
         let digest = "ab".repeat(32);
         let retry = core
-            .rotate_bot_refresh_token_idempotent(&original_refresh, "retry-1", &digest)
+            .rotate_bot_refresh_token_idempotent(&original_refresh, RETRY_KEY, &digest)
             .unwrap();
-        assert_eq!(retry, replayed);
+        // The sealed replay returns the same successor credential. The live bot
+        // summary can move `last_auth` when the retry is recorded, so the whole
+        // session is not a byte match of the first response.
+        assert_eq!(retry.refresh_token, replayed.refresh_token);
+        assert_eq!(retry.refresh_expires_at, replayed.refresh_expires_at);
+        assert_eq!(retry.key_id, replayed.key_id);
+        assert_eq!(retry.generation, replayed.generation);
+        assert_eq!(retry.bot.id, replayed.bot.id);
+        assert_eq!(
+            retry.bot.credential_generation,
+            replayed.bot.credential_generation
+        );
         assert_ne!(retry.refresh_token, original_refresh);
+        let trail = core.list_audit("alice/atlas").unwrap();
+        assert!(
+            trail
+                .iter()
+                .any(|entry| entry.action == "bot.refresh.replay")
+        );
         assert!(core.rotate_bot_refresh_token(&retry.refresh_token).is_ok());
     }
 
     #[test]
     fn idempotent_refresh_replay_expires_after_grace() {
         let (core, _) = fixture();
+        let core = vaulted(core);
         let enrolled = enroll(&core, "atlas", BotReach::General);
         let first = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
         let digest = "cd".repeat(32);
         let second = core
-            .rotate_bot_refresh_token_idempotent(&first.refresh_token, "retry-1", &digest)
+            .rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &digest)
             .unwrap();
         core.force_bot_refresh_used_before_grace(&first.refresh_token);
         assert!(
-            core.rotate_bot_refresh_token_idempotent(&first.refresh_token, "retry-1", &digest)
+            core.rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &digest)
                 .is_err()
         );
         assert!(
@@ -2324,18 +2538,88 @@ mod tests {
     #[test]
     fn idempotent_refresh_rejects_a_different_body() {
         let (core, _) = fixture();
+        let core = vaulted(core);
         let enrolled = enroll(&core, "atlas", BotReach::General);
         let first = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
         let digest = "ef".repeat(32);
-        core.rotate_bot_refresh_token_idempotent(&first.refresh_token, "retry-1", &digest)
+        core.rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &digest)
             .unwrap();
         let other = "01".repeat(32);
         assert!(matches!(
-            core.rotate_bot_refresh_token_idempotent(&first.refresh_token, "retry-1", &other),
+            core.rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &other),
             Err(ForgeError::Conflict(message)) if message == "idempotency_conflict"
         ));
+    }
+
+    #[test]
+    fn idempotent_refresh_rejects_a_short_key_and_does_not_cross_tokens() {
+        let (core, _) = fixture();
+        let core = vaulted(core);
+        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let first = core
+            .exchange_bot_enrollment_key(&enrolled.enrollment_key)
+            .unwrap();
+        let second = core
+            .exchange_bot_enrollment_key(&enrolled.enrollment_key)
+            .unwrap();
+        let digest = "11".repeat(32);
+        assert!(matches!(
+            core.rotate_bot_refresh_token_idempotent(&first.refresh_token, "retry-1", &digest),
+            Err(ForgeError::Validation(message)) if message.contains("32")
+        ));
+        let first_next = core
+            .rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &digest)
+            .unwrap();
+        let second_next = core
+            .rotate_bot_refresh_token_idempotent(&second.refresh_token, RETRY_KEY, &digest)
+            .unwrap();
+        assert_ne!(first_next.refresh_token, second_next.refresh_token);
+        let first_retry = core
+            .rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &digest)
+            .unwrap();
+        assert_eq!(first_retry.refresh_token, first_next.refresh_token);
+        let second_retry = core
+            .rotate_bot_refresh_token_idempotent(&second.refresh_token, RETRY_KEY, &digest)
+            .unwrap();
+        assert_eq!(second_retry.refresh_token, second_next.refresh_token);
+    }
+
+    #[test]
+    fn idempotent_refresh_replay_stops_when_the_bot_or_successor_is_spent() {
+        let (core, _) = fixture();
+        let core = vaulted(core);
+        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let first = core
+            .exchange_bot_enrollment_key(&enrolled.enrollment_key)
+            .unwrap();
+        let digest = "22".repeat(32);
+        let rotated = core
+            .rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &digest)
+            .unwrap();
+        core.force_bot_refresh_used_now(&rotated.refresh_token);
+        assert!(
+            core.rotate_bot_refresh_token_idempotent(&first.refresh_token, RETRY_KEY, &digest)
+                .is_err()
+        );
+        let generation = core.list_account_bots("alice").unwrap()[0].credential_generation;
+        assert_eq!(generation, rotated.generation);
+
+        let again = core
+            .exchange_bot_enrollment_key(&enrolled.enrollment_key)
+            .unwrap();
+        let other = "33".repeat(32);
+        let successor = core
+            .rotate_bot_refresh_token_idempotent(&again.refresh_token, RETRY_KEY, &other)
+            .unwrap();
+        core.suspend_bot("alice", enrolled.bot.id).unwrap();
+        assert!(
+            core.rotate_bot_refresh_token_idempotent(&again.refresh_token, RETRY_KEY, &other)
+                .is_err()
+        );
+        let after = core.list_account_bots("alice").unwrap()[0].credential_generation;
+        assert_eq!(after, successor.generation);
     }
 
     #[test]

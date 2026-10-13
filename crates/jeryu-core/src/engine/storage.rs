@@ -1098,6 +1098,17 @@ fn load_bot_operations(conn: &Connection, state: &mut State) -> Result<()> {
             result_json: row.get(4).map_err(storage_error)?,
             created_at: parse_time(row.get(5).map_err(storage_error)?)?,
         };
+        // A `bot.token.refresh` row from before sealing, or one planted through
+        // the old free-form idempotency API, is not a vault envelope. Drop it
+        // rather than replaying an attacker-authored session.
+        if operation.operation == super::bots::REFRESH_OPERATION {
+            let sealed = operation.result_json.as_deref().is_some_and(|json| {
+                serde_json::from_str::<super::vault::SealedSecret>(json).is_ok()
+            });
+            if !sealed {
+                continue;
+            }
+        }
         state.bot_operations.insert(
             (
                 operation.bot_id,

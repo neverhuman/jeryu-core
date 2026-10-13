@@ -244,7 +244,10 @@ pub struct BotAccessTokenAuth {
 
 /// Access token material the edge turns into a short-lived JWT. The refresh
 /// token is returned once per exchange or rotation.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Not serializable: a refresh token in this value must never be written to
+/// sqlite, a snapshot, or an audit row. A lost-response replay seals its own
+/// payload instead of storing this struct.
+#[derive(Clone, PartialEq, Eq)]
 pub struct BotSession {
     pub bot: BotSummary,
     pub key_id: String,

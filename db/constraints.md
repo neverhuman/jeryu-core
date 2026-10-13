@@ -375,7 +375,10 @@ Adds `bots`, `bot_keys`, `bot_refresh_tokens`, `bot_operations`, and
 `bot_activity`. A bot belongs to one account. Its reach is general, a
 repository list, or one task, and Core rejects a reach that includes a
 repository the account cannot already read. Enrollment secrets are Argon2id
-PHC strings. Refresh tokens store only a SHA-256. Activity rows have no secret
+PHC strings. Refresh tokens store only a SHA-256. A lost-response replay
+keeps the successor token only as vault-sealed ciphertext in
+`bot_operations.result_json`; a `bot.token.refresh` row that is not sealed is
+dropped when the database opens. Activity rows have no secret
 column. `(owner, slug)` is unique. `auth_epoch` copies the account epoch at
 enrollment. Password change, disable, and lock leave it stale, revoke
 enrollment keys, drop refresh tokens, and increase `credential_generation`.
