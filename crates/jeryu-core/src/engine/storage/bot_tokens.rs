@@ -1,5 +1,5 @@
 //! Agent tokens (migration 0020): State-owned rows holding only the SHA-256 of
-//! each token.
+//! each token. Migration 0023 adds who issued each one.
 
 use rusqlite::{Connection, params};
 
@@ -14,8 +14,8 @@ pub(super) fn stage_bot_access_tokens(conn: &Connection, state: &State) -> Resul
             r#"
             INSERT INTO temp.bot_access_tokens (
               token_hash, token_id, bot_id, key_id, generation, label, created_at,
-              expires_at, last_used_at, revoked_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+              expires_at, last_used_at, revoked_at, issued_by
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             "#,
             params![
                 record.token_hash,
@@ -28,6 +28,7 @@ pub(super) fn stage_bot_access_tokens(conn: &Connection, state: &State) -> Resul
                 time(record.expires_at),
                 optional_time(record.last_used_at),
                 optional_time(record.revoked_at),
+                record.issued_by,
             ],
         )
         .map_err(storage_error)?;
@@ -39,7 +40,7 @@ pub(super) fn load_bot_access_tokens(conn: &Connection, state: &mut State) -> Re
     let mut stmt = conn
         .prepare(
             "SELECT token_hash, token_id, bot_id, key_id, generation, label, created_at, \
-             expires_at, last_used_at, revoked_at FROM bot_access_tokens",
+             expires_at, last_used_at, revoked_at, issued_by FROM bot_access_tokens",
         )
         .map_err(storage_error)?;
     let mut rows = stmt.query([]).map_err(storage_error)?;
@@ -56,6 +57,7 @@ pub(super) fn load_bot_access_tokens(conn: &Connection, state: &mut State) -> Re
             expires_at: parse_time(row.get(7).map_err(storage_error)?)?,
             last_used_at: parse_optional_time(row.get(8).map_err(storage_error)?)?,
             revoked_at: parse_optional_time(row.get(9).map_err(storage_error)?)?,
+            issued_by: row.get(10).map_err(storage_error)?,
         };
         state
             .bot_access_tokens

@@ -5,7 +5,9 @@
 //! non-admin rights, cut down by the bot's reach, checked again per request.
 //! A token is valid while the bot's credential generation is the one it was
 //! issued under, so suspending or revoking the bot, or any owner account event
-//! that bumps the generation, ends it. Rotating the bot's enrollment key does
+//! that bumps the generation, ends it. A team bot's token also records who
+//! issued it, and works only while that person may still issue one (record
+//! 0008). Rotating the bot's enrollment key does
 //! not: the enrollment key and a token are separate secrets, and a token is
 //! ended by revoking it. Only its SHA-256 is
 //! stored, and it is looked up by that hash.
@@ -15,7 +17,7 @@ use uuid::Uuid;
 
 use super::ForgeCore;
 use super::bots::{
-    bot_account_matches, explain_bot, key_is_live, new_key_id, new_secret, owned_bot, token_hash,
+    bot_account_matches, explain_bot, key_is_live, managed_bot, new_key_id, new_secret, token_hash,
 };
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
@@ -36,6 +38,8 @@ pub(super) struct BotAccessTokenRecord {
     pub key_id: String,
     pub generation: u64,
     pub label: Option<String>,
+    /// The login that issued it; `None` for tokens issued before record 0008.
+    pub issued_by: Option<String>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
@@ -48,6 +52,7 @@ impl From<&BotAccessTokenRecord> for BotAccessTokenSummary {
             token_id: record.token_id.clone(),
             bot_id: record.bot_id,
             label: record.label.clone(),
+            issued_by: record.issued_by.clone(),
             created_at: record.created_at,
             expires_at: record.expires_at,
             last_used_at: record.last_used_at,
@@ -57,8 +62,9 @@ impl From<&BotAccessTokenRecord> for BotAccessTokenSummary {
 }
 
 impl ForgeCore {
-    /// Issue a new agent token for one of `actor`'s bots. The token is in the
-    /// result once and is never stored or returned again.
+    /// Issue a new agent token for a bot `actor` manages: their own bot, or a
+    /// team bot they steward. The token is in the result once and is never
+    /// stored or returned again.
     pub fn issue_bot_access_token(
         &self,
         actor: &str,
@@ -86,7 +92,7 @@ impl ForgeCore {
         let token = format!("{AGENT_TOKEN_PREFIX}{token_id}.{}", new_secret()?);
         let now = Utc::now();
         let mut state = self.state.write();
-        let bot = owned_bot(&state, actor, bot_id)?;
+        let bot = managed_bot(&state, actor, bot_id)?;
         if !bot_account_matches(&state, &bot) {
             return Err(ForgeError::Validation(
                 "the bot is not active; agent tokens need an active bot".to_string(),
@@ -121,6 +127,7 @@ impl ForgeCore {
             key_id: key_id.clone(),
             generation: bot.credential_generation,
             label: label.clone(),
+            issued_by: Some(actor.to_string()),
             created_at: now,
             expires_at: now + Duration::days(i64::from(ttl_days)),
             last_used_at: None,
@@ -158,7 +165,7 @@ impl ForgeCore {
         bot_id: Uuid,
     ) -> Result<Vec<BotAccessTokenSummary>> {
         let state = self.state.read();
-        owned_bot(&state, actor, bot_id)?;
+        managed_bot(&state, actor, bot_id)?;
         let mut tokens: Vec<_> = state
             .bot_access_tokens
             .values()
@@ -178,7 +185,7 @@ impl ForgeCore {
     ) -> Result<BotAccessTokenSummary> {
         let now = Utc::now();
         let mut state = self.state.write();
-        let bot = owned_bot(&state, actor, bot_id)?;
+        let bot = managed_bot(&state, actor, bot_id)?;
         let Some(hash) = state
             .bot_access_tokens
             .iter()
@@ -224,7 +231,10 @@ impl ForgeCore {
             let state = self.state.read();
             let record = state.bot_access_tokens.get(&hash).ok_or_else(invalid)?;
             let bot = state.bots.get(&record.bot_id).ok_or_else(invalid)?;
-            if !bot_account_matches(&state, bot) || !token_is_live(record, bot, now) {
+            if !bot_account_matches(&state, bot)
+                || !token_is_live(record, bot, now)
+                || !super::team_bots::issuer_still_stewards(&state, bot, record)
+            {
                 return Err(invalid());
             }
             // Calls are authorized under one of the bot's live keys, whichever

@@ -227,7 +227,11 @@ impl ForgeError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BotRecord {
     pub id: Uuid,
+    /// The person's login, or the organization's for a team bot.
     pub owner: String,
+    pub owner_kind: BotOwnerKind,
+    /// A team bot's steward team in its organization; `None` for a person's bot.
+    pub steward_team: Option<String>,
     pub slug: String,
     pub display_name: String,
     pub kind: BotKind,
@@ -254,6 +258,9 @@ impl From<&BotRecord> for BotSummary {
         Self {
             id: bot.id,
             owner: bot.owner.clone(),
+            owner_kind: bot.owner_kind,
+            steward_team: bot.steward_team.clone(),
+            acting_login: acting_login(bot),
             slug: bot.slug.clone(),
             display_name: bot.display_name.clone(),
             kind: bot.kind.clone(),
@@ -325,31 +332,14 @@ impl ForgeCore {
         env: &str,
     ) -> Result<BotEnrollment> {
         let account = self.active_account(actor)?;
-        require_login(slug)?;
-        require_name("display name", display_name)?;
-        if display_name.trim().chars().count() > 80 {
-            return Err(ForgeError::Validation(
-                "display name may not exceed 80 characters".to_string(),
-            ));
-        }
-        if env != "live" && env != "test" {
-            return Err(ForgeError::Validation(
-                "bot key environment must be live or test".to_string(),
-            ));
-        }
+        validate_enrollment(slug, display_name, env)?;
         let reach = self.normalize_reach(&account.login, reach)?;
-        let key_id = new_key_id()?;
-        let secret = new_secret()?;
-        let prefix = if env == "test" {
-            KEY_PREFIX_TEST
-        } else {
-            KEY_PREFIX_LIVE
-        };
-        let enrollment_key = format!("{prefix}.{key_id}.{secret}");
         let now = Utc::now();
         let bot = BotRecord {
             id: Uuid::new_v4(),
             owner: account.login.clone(),
+            owner_kind: BotOwnerKind::User,
+            steward_team: None,
             slug: slug.to_string(),
             display_name: display_name.trim().to_string(),
             kind,
@@ -367,12 +357,31 @@ impl ForgeCore {
             created_at: now,
             updated_at: now,
         };
+        self.store_enrolled_bot(&account.login, bot, env)
+    }
+
+    /// Store a validated new bot with a fresh enrollment key, and audit it.
+    /// A slug is unique per owner.
+    pub(super) fn store_enrolled_bot(
+        &self,
+        actor: &str,
+        bot: BotRecord,
+        env: &str,
+    ) -> Result<BotEnrollment> {
+        let key_id = new_key_id()?;
+        let secret = new_secret()?;
+        let prefix = if env == "test" {
+            KEY_PREFIX_TEST
+        } else {
+            KEY_PREFIX_LIVE
+        };
+        let enrollment_key = format!("{prefix}.{key_id}.{secret}");
         let key = BotKeyRecord {
             key_id: key_id.clone(),
             bot_id: bot.id,
             secret_hash: hash_secret(&secret)?,
             env: env.to_string(),
-            created_at: now,
+            created_at: bot.created_at,
             retired_at: None,
             revoked_at: None,
         };
@@ -395,7 +404,7 @@ impl ForgeCore {
         let bot_id = bot.id;
         drop(state);
         self.record_bot_audit(
-            &account.login,
+            actor,
             "bot.enroll",
             &subject,
             "completed",
@@ -417,7 +426,7 @@ impl ForgeCore {
             .read()
             .bots
             .values()
-            .filter(|bot| bot.owner == actor)
+            .filter(|bot| bot.owner_kind == BotOwnerKind::User && bot.owner == actor)
             .map(BotSummary::from)
             .collect();
         bots.sort_by(|left, right| left.slug.cmp(&right.slug));
@@ -461,7 +470,7 @@ impl ForgeCore {
         let enrollment_key = format!("{KEY_PREFIX_LIVE}.{key_id}.{secret}");
         let secret_hash = hash_secret(&secret)?;
         let mut state = self.state.write();
-        let mut bot = owned_bot(&state, actor, bot_id)?;
+        let mut bot = managed_bot(&state, actor, bot_id)?;
         if bot.status == BotStatus::Revoked {
             return Err(ForgeError::NotFound(format!("bot {bot_id}")));
         }
@@ -473,9 +482,13 @@ impl ForgeCore {
         }
         // A stale epoch means the account password changed, or the account was
         // disabled and later unlocked. Previous keys are revoked now. They do
-        // not keep the five-minute rotation grace.
-        let epoch_was_stale = bot.auth_epoch != stored.auth_epoch;
-        bot.auth_epoch = stored.auth_epoch;
+        // not keep the five-minute rotation grace. A team bot follows no
+        // person's account, so its epoch never goes stale.
+        let epoch_was_stale =
+            bot.owner_kind == BotOwnerKind::User && bot.auth_epoch != stored.auth_epoch;
+        if bot.owner_kind == BotOwnerKind::User {
+            bot.auth_epoch = stored.auth_epoch;
+        }
         bot.updated_at = now;
         if epoch_was_stale {
             bot.credential_generation = bot.credential_generation.saturating_add(1);
@@ -535,7 +548,7 @@ impl ForgeCore {
     pub fn revoke_bot(&self, actor: &str, bot_id: Uuid) -> Result<BotSummary> {
         let now = Utc::now();
         let mut state = self.state.write();
-        let mut bot = owned_bot(&state, actor, bot_id)?;
+        let mut bot = managed_bot(&state, actor, bot_id)?;
         let key_id = live_key_id(&state, bot_id);
         let previous = state.clone();
         bot.status = BotStatus::Revoked;
@@ -598,7 +611,10 @@ impl ForgeCore {
         let Some(bot) = state.bots.get(&key.bot_id).cloned() else {
             return invalid();
         };
-        if !bot_account_matches(&state, &bot) {
+        // A team bot authenticates with agent tokens only. Its enrollment key
+        // is never exchangeable, so no credential a steward once saw outlives
+        // their stewardship.
+        if bot.owner_kind == BotOwnerKind::Organization || !bot_account_matches(&state, &bot) {
             return invalid();
         }
         let previous = state.clone();
@@ -881,8 +897,8 @@ impl ForgeCore {
             .filter(|key| key.bot_id == bot.id && key_is_live(key, Utc::now()))
             .ok_or_else(|| ForgeError::Validation(INVALID.to_string()))?;
         let _ = key;
-        let can_read = owner_grant_allows(&state, &bot.owner, &call.owner, &call.repo, false);
-        let can_write = owner_grant_allows(&state, &bot.owner, &call.owner, &call.repo, true);
+        let can_read = bot_grant_allows(&state, bot, &call.owner, &call.repo, false);
+        let can_write = bot_grant_allows(&state, bot, &call.owner, &call.repo, true);
         let denied = if call.effect == BotEffect::Write && !can_write {
             Some(if can_read {
                 "insufficient_scope"
@@ -899,11 +915,12 @@ impl ForgeCore {
         if let Some(code) = denied {
             let owner = bot.owner.clone();
             let slug = bot.slug.clone();
+            let actor = acting_login(bot);
             let bot_id = bot.id;
             let key_id = call.key_id.clone();
             drop(state);
             self.record_bot_audit(
-                &owner,
+                &actor,
                 "bot.authorize",
                 &format!("{owner}/{slug}"),
                 "failed",
@@ -1165,7 +1182,7 @@ impl ForgeCore {
 
     fn set_bot_status(&self, actor: &str, bot_id: Uuid, status: BotStatus) -> Result<BotSummary> {
         let mut state = self.state.write();
-        let mut bot = owned_bot(&state, actor, bot_id)?;
+        let mut bot = managed_bot(&state, actor, bot_id)?;
         if bot.status == BotStatus::Revoked {
             return Err(ForgeError::NotFound(format!("bot {bot_id}")));
         }
@@ -1244,11 +1261,11 @@ impl ForgeCore {
 
     fn owned_summary(&self, actor: &str, bot_id: Uuid) -> Result<BotSummary> {
         let state = self.state.read();
-        let bot = owned_bot(&state, actor, bot_id)?;
+        let bot = managed_bot(&state, actor, bot_id)?;
         Ok(BotSummary::from(&bot))
     }
 
-    fn normalize_reach(&self, actor: &str, reach: BotReach) -> Result<BotReach> {
+    pub(super) fn normalize_reach(&self, actor: &str, reach: BotReach) -> Result<BotReach> {
         match reach {
             BotReach::General => Ok(BotReach::General),
             BotReach::Owners { owners } => self.normalize_owners(owners),
@@ -1341,13 +1358,30 @@ impl ForgeCore {
     }
 }
 
+/// Slug, display name and key environment, shared by every enrollment.
+pub(super) fn validate_enrollment(slug: &str, display_name: &str, env: &str) -> Result<()> {
+    require_login(slug)?;
+    require_name("display name", display_name)?;
+    if display_name.trim().chars().count() > 80 {
+        return Err(ForgeError::Validation(
+            "display name may not exceed 80 characters".to_string(),
+        ));
+    }
+    if env != "live" && env != "test" {
+        return Err(ForgeError::Validation(
+            "bot key environment must be live or test".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Drop refresh tokens and bump generation for every bot owned by `login`.
 /// Enrollment keys are revoked. `auth_epoch` stays stale until the owner rotates.
 pub(super) fn invalidate_account_bots(state: &mut super::State, login: &str, now: DateTime<Utc>) {
     let ids: Vec<Uuid> = state
         .bots
         .values()
-        .filter(|bot| bot.owner == login)
+        .filter(|bot| bot.owner_kind == BotOwnerKind::User && bot.owner == login)
         .map(|bot| bot.id)
         .collect();
     for id in &ids {
@@ -1366,10 +1400,27 @@ pub(super) fn invalidate_account_bots(state: &mut super::State, login: &str, now
         .retain(|_, token| !ids.contains(&token.bot_id));
 }
 
-pub(super) fn owned_bot(state: &super::State, actor: &str, bot_id: Uuid) -> Result<BotRecord> {
+/// The bot, when `actor` may manage it: the owner of a person's bot, or a
+/// steward or forge administrator for a team bot. Any other bot is not found.
+pub(super) fn managed_bot(state: &super::State, actor: &str, bot_id: Uuid) -> Result<BotRecord> {
     match state.bots.get(&bot_id) {
-        Some(bot) if bot.owner == actor => Ok(bot.clone()),
+        Some(bot) if may_manage_bot(state, actor, bot) => Ok(bot.clone()),
         _ => Err(ForgeError::NotFound(format!("bot {bot_id}"))),
+    }
+}
+
+pub(super) fn may_manage_bot(state: &super::State, actor: &str, bot: &BotRecord) -> bool {
+    match bot.owner_kind {
+        BotOwnerKind::User => bot.owner == actor,
+        BotOwnerKind::Organization => super::team_bots::is_steward(state, bot, actor),
+    }
+}
+
+/// The login a bot acts, authors and is audited as.
+pub(super) fn acting_login(bot: &BotRecord) -> String {
+    match bot.owner_kind {
+        BotOwnerKind::User => bot.owner.clone(),
+        BotOwnerKind::Organization => team_bot_login(&bot.owner, &bot.slug),
     }
 }
 
@@ -1378,10 +1429,9 @@ fn reach_lists_repo(state: &super::State, bot: &BotRecord, owner: &str, repo: &s
         // A public repository is readable by every account, so a public read
         // would list every general bot on the forge. Only an explicit grant
         // puts a general bot on this roster.
-        BotReach::General => owner_has_grant(state, &bot.owner, owner, repo),
+        BotReach::General => bot_has_grant(state, bot, owner, repo),
         BotReach::Owners { owners } => {
-            owners.iter().any(|item| item == owner)
-                && owner_has_grant(state, &bot.owner, owner, repo)
+            owners.iter().any(|item| item == owner) && bot_has_grant(state, bot, owner, repo)
         }
         BotReach::Repositories { repos } => repos
             .iter()
@@ -1447,6 +1497,34 @@ fn owner_has_grant(state: &super::State, login: &str, owner: &str, repo: &str) -
     })
 }
 
+/// The explicit grant a bot acts under: its owner's for a person's bot, its
+/// own for a team bot.
+fn bot_has_grant(state: &super::State, bot: &BotRecord, owner: &str, repo: &str) -> bool {
+    match bot.owner_kind {
+        BotOwnerKind::User => owner_has_grant(state, &bot.owner, owner, repo),
+        BotOwnerKind::Organization => {
+            super::team_bots::grant_access(state, bot.id, owner, repo).is_some()
+        }
+    }
+}
+
+/// The bot's grant, plus a public read for any active bot. Forge admin is not
+/// a grant, and no bot is ever an administrator.
+fn bot_grant_allows(
+    state: &super::State,
+    bot: &BotRecord,
+    owner: &str,
+    repo: &str,
+    write: bool,
+) -> bool {
+    match bot.owner_kind {
+        BotOwnerKind::User => owner_grant_allows(state, &bot.owner, owner, repo, write),
+        BotOwnerKind::Organization => {
+            super::team_bots::grant_allows(state, bot.id, owner, repo, write)
+        }
+    }
+}
+
 /// Explicit repository grant, plus a public read for any active account.
 /// Forge admin is not a grant.
 fn owner_grant_allows(
@@ -1485,6 +1563,11 @@ fn owner_grant_allows(
 pub(super) fn bot_account_matches(state: &super::State, bot: &BotRecord) -> bool {
     if bot.status != BotStatus::Active {
         return false;
+    }
+    if bot.owner_kind == BotOwnerKind::Organization {
+        // No person's account stands behind a team bot: it lives while it is
+        // active and its organization exists.
+        return state.organizations.contains_key(&bot.owner);
     }
     state.accounts.get(&bot.owner).is_some_and(|account| {
         account.status.permits_authentication() && account.auth_epoch == bot.auth_epoch
@@ -1567,7 +1650,7 @@ fn reach_allows(state: &super::State, bot: &BotRecord, call: &BotCall) -> bool {
         // does not put another owner's repository inside a family reach.
         BotReach::Owners { owners } => {
             owners.iter().any(|owner| owner == &call.owner)
-                && owner_has_grant(state, &bot.owner, &call.owner, &call.repo)
+                && bot_has_grant(state, bot, &call.owner, &call.repo)
         }
         BotReach::Repositories { repos } => repos
             .iter()

@@ -528,3 +528,33 @@ Rollback/backfill:
 - Rollback retains the rebuilt table (see
   `db/rollbacks/0022_provider_connection_rotation.sql`); a binary from before
   0022 cannot load an `auth_required` row, so recover forward.
+
+## 0023 Team Bots
+
+An organization may own a bot (records 0008 and 0009). `bots.owner` referenced
+`user_accounts(login)`, and an organization is not an account, so 0023 rebuilds
+`bots` without that foreign key.
+
+Constraint policy:
+- `owner_kind` is `user` or `organization`; every existing bot becomes `user`.
+- `steward_team` is set exactly when `owner_kind = 'organization'` (a `CHECK`).
+- `(owner, slug)` stays unique and `idx_bots_owner` is recreated. Core keeps
+  account and organization logins apart, and neither is ever deleted, so the
+  dropped cascade is never needed; a bot whose owner is missing never
+  authenticates.
+- `bot_repo_grants(bot_id, repo_id)` holds a team bot's own grants: `access`
+  is `read` or `write` only, and both keys cascade from `bots` and
+  `repositories`.
+- `bot_access_tokens.issued_by` is `NULL` on every token issued before 0023.
+
+Rebuild and foreign keys:
+- The same as 0021: foreign keys off around one transaction, the bot child
+  tables may not gain a `foreign_key_check` violation, and the caller's setting
+  is restored. The guard is the `owner_kind` column.
+
+Rollback/backfill:
+- No backfill. Take a `VACUUM INTO` copy before applying to a populated store.
+- `db/rollbacks/0023_team_bots.sql` keeps the new shape. A binary from before
+  0023 cannot load a team bot and would delete grants and issuers on its next
+  save; restore the snapshot only when none was created since, otherwise
+  recover forward.

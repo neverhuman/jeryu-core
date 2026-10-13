@@ -80,6 +80,10 @@ const ROLLBACKS: &[(&str, &str)] = &[
         "0022_provider_connection_rotation.sql",
         include_str!("../../../../../db/rollbacks/0022_provider_connection_rotation.sql"),
     ),
+    (
+        "0023_team_bots.sql",
+        include_str!("../../../../../db/rollbacks/0023_team_bots.sql"),
+    ),
 ];
 
 fn db_dir(kind: &str) -> PathBuf {
@@ -607,4 +611,125 @@ fn migration_0022_keeps_every_connection_row() {
         .is_err(),
         "only a connected row can have a rotation in flight"
     );
+}
+
+/// A database at 0022 holding a person's bot with every kind of child row.
+fn pre_0023_connection_with_a_bot() -> Connection {
+    let conn = pre_0021_connection_with_a_bot();
+    apply_migration_0021(&conn).expect("0021");
+    apply_migration_0022(&conn).expect("0022");
+    assert!(!column_exists(&conn, "bots", "owner_kind").expect("columns"));
+    conn
+}
+
+/// 0023 rebuilds `bots` without the `user_accounts` foreign key so an
+/// organization can own a bot. Every bot becomes a person's bot, every child
+/// row survives and still cascades, tokens gain an empty issuer, and the
+/// caller's foreign-key setting is restored.
+#[test]
+fn migration_0023_rebuilds_bots_and_keeps_children() {
+    let conn = pre_0023_connection_with_a_bot();
+    let children = [
+        "bot_keys",
+        "bot_refresh_tokens",
+        "bot_operations",
+        "bot_activity",
+        "bot_access_tokens",
+    ];
+
+    apply_migrations(&conn).expect("upgrade");
+
+    assert!(!bots_sql(&conn).contains("user_accounts"));
+    let (kind, owner_kind, steward): (String, String, Option<String>) = conn
+        .query_row(
+            "SELECT kind, owner_kind, steward_team FROM bots WHERE id = 'b1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read bot");
+    assert_eq!(
+        (kind.as_str(), owner_kind.as_str(), steward),
+        ("grok", "user", None)
+    );
+    for table in children {
+        assert_eq!(count(&conn, table), 1, "{table} keeps its row");
+    }
+    let issuer: Option<String> = conn
+        .query_row("SELECT issued_by FROM bot_access_tokens", [], |row| {
+            row.get(0)
+        })
+        .expect("issuer column");
+    assert_eq!(issuer, None);
+    assert_eq!(count(&conn, "bot_repo_grants"), 0);
+    let foreign_keys: i64 = conn
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .expect("pragma");
+    assert_eq!(foreign_keys, 1, "foreign keys are back on");
+
+    let insert = |id: &str, owner_kind: &str, steward: Option<&str>| {
+        conn.execute(
+            r#"
+            INSERT INTO bots (
+              id, owner, owner_kind, steward_team, slug, display_name, kind, status,
+              reach_json, auth_epoch, credential_generation, created_at, updated_at
+            ) VALUES (?1, 'acme', ?2, ?3, ?1, 'Bot', 'agent', 'active', '{"mode":"general"}',
+                      0, 1, '2026-06-01T00:00:00Z', '2026-06-01T00:00:00Z')
+            "#,
+            rusqlite::params![id, owner_kind, steward],
+        )
+    };
+    insert("t1", "organization", Some("stewards")).expect("a team bot");
+    assert!(
+        insert("t2", "organization", None).is_err(),
+        "a team bot needs stewards"
+    );
+    assert!(
+        insert("t3", "user", Some("stewards")).is_err(),
+        "a person's bot has none"
+    );
+    assert!(insert("t4", "robot", None).is_err(), "unknown owner kind");
+    conn.execute_batch(
+        r#"
+        INSERT INTO repositories (id, owner, name, full_name, private, default_branch,
+                                  archived, disabled, created_at, updated_at)
+        VALUES ('r1', 'acme', 'widgets', 'acme/widgets', 1, 'main', 0, 0,
+                '2026-06-01T00:00:00Z', '2026-06-01T00:00:00Z');
+        INSERT INTO bot_repo_grants (bot_id, repo_id, access, granted_by, granted_at)
+        VALUES ('t1', 'r1', 'write', 'root', '2026-06-01T00:00:00Z');
+        "#,
+    )
+    .expect("a grant");
+    assert!(
+        conn.execute(
+            "INSERT INTO bot_repo_grants (bot_id, repo_id, access, granted_by, granted_at)
+             VALUES ('b1', 'r1', 'admin', 'root', '2026-06-01T00:00:00Z')",
+            [],
+        )
+        .is_err(),
+        "a bot is never granted admin"
+    );
+
+    conn.execute("DELETE FROM bots WHERE id = 'b1'", [])
+        .expect("delete bot");
+    for table in children {
+        assert_eq!(count(&conn, table), 0, "{table} cascades with its bot");
+    }
+    conn.execute("DELETE FROM bots WHERE id = 't1'", [])
+        .expect("delete team bot");
+    assert_eq!(
+        count(&conn, "bot_repo_grants"),
+        0,
+        "grants cascade with their bot"
+    );
+}
+
+/// On the new shape 0023 is a no-op, so reopening changes nothing.
+#[test]
+fn migration_0023_is_idempotent_on_the_new_shape() {
+    let conn = pre_0023_connection_with_a_bot();
+    apply_migrations(&conn).expect("upgrade");
+    let before = schema_snapshot(&conn);
+    apply_migrations(&conn).expect("reapply");
+    assert_eq!(schema_snapshot(&conn), before);
+    assert_eq!(count(&conn, "bot_access_tokens"), 1);
 }

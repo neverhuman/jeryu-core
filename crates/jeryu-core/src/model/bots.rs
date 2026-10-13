@@ -95,6 +95,79 @@ impl From<BotKind> for String {
     }
 }
 
+/// Who owns a bot (record 0008). A person's bot acts as that person, cut down
+/// by reach. An organization's bot is a team bot: it holds its own grants,
+/// is run by a steward team, and acts as its own name, never as a person.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BotOwnerKind {
+    #[default]
+    User,
+    Organization,
+}
+
+impl BotOwnerKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Organization => "organization",
+        }
+    }
+}
+
+/// Suffix of a team bot's acting login. Account logins are lowercase letters,
+/// digits, hyphen and underscore only, so no account can carry it.
+pub const TEAM_BOT_LOGIN_SUFFIX: &str = "[bot]";
+
+/// The name a team bot acts, authors and is audited as:
+/// `<organization>.<slug>[bot]`.
+#[must_use]
+pub fn team_bot_login(organization: &str, slug: &str) -> String {
+    format!("{organization}.{slug}{TEAM_BOT_LOGIN_SUFFIX}")
+}
+
+/// Split a team bot's acting login into organization and slug. Anything that
+/// is not exactly that shape, including every account login, is `None`.
+#[must_use]
+pub fn parse_team_bot_login(login: &str) -> Option<(&str, &str)> {
+    let name = login.strip_suffix(TEAM_BOT_LOGIN_SUFFIX)?;
+    let (organization, slug) = name.split_once('.')?;
+    let canonical = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+            })
+    };
+    (canonical(organization) && canonical(slug)).then_some((organization, slug))
+}
+
+/// A repository right held by a team bot itself. Never `admin`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BotRepoAccess {
+    Read,
+    Write,
+}
+
+impl BotRepoAccess {
+    #[must_use]
+    pub fn allows_write(self) -> bool {
+        self == Self::Write
+    }
+}
+
+/// One grant a team bot holds on one repository.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BotRepoGrant {
+    pub bot_id: Uuid,
+    pub owner: String,
+    pub repo: String,
+    pub access: BotRepoAccess,
+    pub granted_by: String,
+    pub granted_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BotStatus {
@@ -124,7 +197,8 @@ pub struct BotRepoRef {
     pub name: String,
 }
 
-/// What a bot may touch. Every arm is narrower than, or equal to, the owner's grants.
+/// What a bot may touch. Every arm is narrower than, or equal to, the grants
+/// the bot acts under: its owner's for a person's bot, its own for a team bot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum BotReach {
@@ -156,7 +230,17 @@ impl BotReach {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BotSummary {
     pub id: Uuid,
+    /// The person's login, or the organization's for a team bot.
     pub owner: String,
+    #[serde(default)]
+    pub owner_kind: BotOwnerKind,
+    /// The team whose members steward a team bot; `None` for a person's bot.
+    #[serde(default)]
+    pub steward_team: Option<String>,
+    /// The login the bot acts as: its owner for a person's bot,
+    /// `<organization>.<slug>[bot]` for a team bot.
+    #[serde(default)]
+    pub acting_login: String,
     pub slug: String,
     pub display_name: String,
     pub kind: BotKind,
@@ -225,6 +309,9 @@ pub struct BotAccessTokenSummary {
     pub token_id: String,
     pub bot_id: Uuid,
     pub label: Option<String>,
+    /// Who issued it. Absent on tokens issued before record 0008.
+    #[serde(default)]
+    pub issued_by: Option<String>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,

@@ -35,6 +35,9 @@ mod commit_status;
 mod deployments;
 mod issues;
 mod jankurai;
+mod organizations;
+#[cfg(test)]
+mod organizations_tests;
 mod provider_connections;
 #[cfg(test)]
 mod provider_connections_tests;
@@ -46,6 +49,9 @@ mod repository_transfer;
 mod repository_transfer_state;
 mod reviews;
 mod storage;
+mod team_bots;
+#[cfg(test)]
+mod team_bots_tests;
 mod vault;
 mod waitlist;
 mod webhooks;
@@ -78,6 +84,9 @@ struct State {
     bot_access_tokens: HashMap<String, bot_tokens::BotAccessTokenRecord>,
     bot_operations: HashMap<(Uuid, String, String), bots::BotOperationRecord>,
     bot_activity: Vec<BotActivityEvent>,
+    /// Team bots' own repository grants (record 0008), keyed by bot id and
+    /// repository id, so a repository move keeps them.
+    bot_repo_grants: HashMap<(Uuid, Uuid), team_bots::BotRepoGrantRecord>,
     provider_connections: HashMap<String, provider_connections::ConnectionRecord>,
     invitations: HashMap<Uuid, AccountInvitation>,
     activation_challenges: HashMap<String, ActivationChallenge>,

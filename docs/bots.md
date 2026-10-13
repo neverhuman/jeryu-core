@@ -37,3 +37,31 @@ body. If the successor itself was already used, the replay is refused and the
 family is not revoked again. The shipped bot proxy does not send an idempotency key,
 so it stays on the ordinary single-use refresh path. A server with no vault
 key refuses the idempotent path rather than storing the token.
+
+## Team Bots
+
+A bot is owned by a person or by an organization (records 0008 and 0009 in
+jeryu-deploy's `docs/adr/`). A person's bot is unchanged: it acts as its
+owner, under the owner's non-admin grants cut down by its reach.
+
+An organization's bot is a team bot (`engine/team_bots.rs`):
+
+- **Its own grants.** `grant_bot_repository` gives it `read` or `write` on one
+  repository, never `admin`; only that repository's administrators, or a forge
+  administrator, may. Grants are keyed by bot id and repository id, so a
+  repository move keeps them and deleting the repository drops them. Its
+  reach narrows those grants exactly as for a person's bot.
+- **Its own name.** It acts as `<organization>.<slug>[bot]`
+  (`team_bot_login`). Account logins cannot contain `.` or `[`, so no account
+  can carry that name. `repo_access_for` resolves it to the bot's own grant,
+  so every `user_can_*` check sees the bot's rights and never `admin`.
+  `bot_acting_account` gives the edge the account summary to run a request as.
+- **Stewards.** Members of the bot's steward team, and forge administrators,
+  rotate its key, suspend or revoke it, read its activity, and issue or revoke
+  its tokens. The organization's owners enroll team bots, and steward them
+  only from the team.
+- **Agent tokens only.** Exchanging a team bot's enrollment key always fails.
+  Each agent token records `issued_by`, and authenticates only while that
+  login may still steward the bot. Leaving the steward team, or a disabled or
+  locked account, revokes the tokens that person issued; a password change
+  does not. `revoke_issued_team_bot_tokens` revokes all of one person's at once.

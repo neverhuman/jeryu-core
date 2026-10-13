@@ -43,6 +43,23 @@ pub struct Organization {
     pub login: String,
     pub display_name: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Accounts that run the organization (record 0009). A row stored before
+    /// owners existed reads as none, and is run by forge administrators.
+    #[serde(default)]
+    pub owners: Vec<String>,
+    /// The administrator who created it, when it was created through
+    /// [`crate::ForgeCore::create_organization_as`].
+    #[serde(default)]
+    pub created_by: Option<String>,
+}
+
+/// An organization with the teams a viewer may see in it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrganizationView {
+    pub organization: Organization,
+    pub teams: Vec<Team>,
+    /// The viewer may change owners, teams and members.
+    pub can_manage: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

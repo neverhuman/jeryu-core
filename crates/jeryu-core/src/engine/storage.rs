@@ -15,6 +15,7 @@ mod deployments;
 mod migrations;
 mod provider_connections;
 mod snapshot;
+mod team_bots;
 #[cfg(test)]
 mod tests;
 
@@ -681,6 +682,7 @@ fn stage_state(conn: &Connection, state: &State) -> Result<()> {
     stage_bots(conn, state)?;
     provider_connections::stage_provider_connections(conn, state)?;
     bot_tokens::stage_bot_access_tokens(conn, state)?;
+    team_bots::stage_bot_repo_grants(conn, state)?;
     for invitation in state.invitations.values() {
         conn.execute(
             r#"
@@ -1197,6 +1199,7 @@ fn load_state(conn: &Connection) -> Result<State> {
     load_repository_transfers(conn, &mut state)?;
     load_repository_aliases(conn, &mut state)?;
     load_repo_grants(conn, &mut state)?;
+    team_bots::load_bot_repo_grants(conn, &mut state)?;
     load_labels(conn, &mut state)?;
     load_issues(conn, &mut state)?;
     load_issue_comments(conn, &mut state)?;
@@ -1304,8 +1307,12 @@ fn stage_bots(conn: &Connection, state: &State) -> Result<()> {
             INSERT INTO temp.bots (
               id, owner, slug, display_name, kind, status, reach_json, auth_epoch,
               credential_generation, last_successful_access, last_auth, last_mutation,
-              last_heartbeat, last_action, last_outcome, last_repo, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+              last_heartbeat, last_action, last_outcome, last_repo, created_at, updated_at,
+              owner_kind, steward_team
+            ) VALUES (
+              ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+              ?19, ?20
+            )
             "#,
             params![
                 bot.id.to_string(),
@@ -1326,6 +1333,8 @@ fn stage_bots(conn: &Connection, state: &State) -> Result<()> {
                 bot.last_repo,
                 time(bot.created_at),
                 time(bot.updated_at),
+                bot.owner_kind.as_str(),
+                bot.steward_team,
             ],
         )
         .map_err(storage_error)?;
@@ -1412,7 +1421,7 @@ fn stage_bots(conn: &Connection, state: &State) -> Result<()> {
 fn load_bots(conn: &Connection, state: &mut State) -> Result<()> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, owner, slug, display_name, kind, status, reach_json, auth_epoch, credential_generation, last_successful_access, last_auth, last_mutation, last_heartbeat, last_action, last_outcome, last_repo, created_at, updated_at FROM bots",
+            "SELECT id, owner, slug, display_name, kind, status, reach_json, auth_epoch, credential_generation, last_successful_access, last_auth, last_mutation, last_heartbeat, last_action, last_outcome, last_repo, created_at, updated_at, owner_kind, steward_team FROM bots",
         )
         .map_err(storage_error)?;
     let mut rows = stmt.query([]).map_err(storage_error)?;
@@ -1422,6 +1431,8 @@ fn load_bots(conn: &Connection, state: &mut State) -> Result<()> {
         let bot = super::bots::BotRecord {
             id: parse_uuid(row.get(0).map_err(storage_error)?)?,
             owner: row.get(1).map_err(storage_error)?,
+            owner_kind: from_text(row.get(18).map_err(storage_error)?)?,
+            steward_team: row.get(19).map_err(storage_error)?,
             slug: row.get(2).map_err(storage_error)?,
             display_name: row.get(3).map_err(storage_error)?,
             kind: from_text(row.get(4).map_err(storage_error)?)?,

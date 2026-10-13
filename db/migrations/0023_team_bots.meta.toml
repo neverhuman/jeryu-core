@@ -1,0 +1,28 @@
+# jankurai:migration v1
+id = "0023_team_bots"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 100
+deploy_phase = "expand"
+app_compatibility = "new_app_old_db"
+requires = ["0022_provider_connection_rotation"]
+rollback = "db/rollbacks/0023_team_bots.sql"
+backfill = "none; every bot is copied unchanged as a person's bot with no steward team, every agent token keeps its row with issued_by NULL, bot_repo_grants starts empty"
+data_classification = "credentials"
+tenant_impact = "Adds organization-owned team bots. A team bot's rights are only its own read/write grants, made by repository administrators; a person's bot is unchanged. bots.owner no longer references user_accounts because an organization is not an account; Core keeps account and organization logins apart."
+tests = [
+  "db-migration-analyze",
+  "migration_0023_rebuilds_bots_and_keeps_children",
+  "migration_0023_is_idempotent_on_the_new_shape",
+  "team_bot_survives_sqlite_reopen",
+]
+approval = "forge-api"
+backup = "VACUUM INTO copy of forge.sqlite before apply"
+restore = "restore that snapshot when no team bot was enrolled and no agent token issued since; otherwise recover forward"
+irreversible = false
+verify = "bots has owner_kind and steward_team and no foreign key to user_accounts; COUNT(*) of bots and of bot_keys, bot_refresh_tokens, bot_operations, bot_activity and bot_access_tokens unchanged; every bot has owner_kind 'user'; bot_repo_grants exists and is empty; bot_access_tokens has issued_by; pragma_foreign_key_check of the bot child tables adds no row"

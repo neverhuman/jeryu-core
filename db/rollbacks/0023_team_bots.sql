@@ -1,0 +1,11 @@
+-- Retain the rebuilt bots table, bot_repo_grants and issued_by. Restoring the
+-- user_accounts foreign key would reject every team bot, and a rebuild that
+-- drops team bots would cascade into their keys, tokens, activity and grants.
+-- An older application cannot load a team bot and would delete its grants and
+-- issuers on its next save: never run it against a database that holds one.
+-- Restore a verified pre-0023 VACUUM INTO copy only when no team bot has been
+-- enrolled and no agent token issued since; otherwise recover forward.
+-- timeout-guard:
+--   lock_timeout = '5s'
+--   statement_timeout = '60s'
+SELECT '0023 rollback retains team bots; restore the pre-migration snapshot or recover forward' AS rollback_notice;

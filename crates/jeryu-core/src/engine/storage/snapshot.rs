@@ -41,7 +41,7 @@ const OWNED_TABLES: &[OwnedTable] = &[
     },
     OwnedTable {
         name: "bots",
-        columns: "id,owner,slug,display_name,kind,status,reach_json,auth_epoch,credential_generation,last_successful_access,last_auth,last_mutation,last_heartbeat,last_action,last_outcome,last_repo,created_at,updated_at",
+        columns: "id,owner,slug,display_name,kind,status,reach_json,auth_epoch,credential_generation,last_successful_access,last_auth,last_mutation,last_heartbeat,last_action,last_outcome,last_repo,created_at,updated_at,owner_kind,steward_team",
         primary_key: "id",
     },
     OwnedTable {
@@ -66,7 +66,7 @@ const OWNED_TABLES: &[OwnedTable] = &[
     },
     OwnedTable {
         name: "bot_access_tokens",
-        columns: "token_hash,token_id,bot_id,key_id,generation,label,created_at,expires_at,last_used_at,revoked_at",
+        columns: "token_hash,token_id,bot_id,key_id,generation,label,created_at,expires_at,last_used_at,revoked_at,issued_by",
         primary_key: "token_hash",
     },
     OwnedTable {
@@ -123,6 +123,12 @@ const OWNED_TABLES: &[OwnedTable] = &[
         name: "repo_access_grants",
         columns: "login,repo_id,access,granted_by,granted_at",
         primary_key: "login,repo_id",
+    },
+    // After both parents: `bots` above and `repositories`.
+    OwnedTable {
+        name: "bot_repo_grants",
+        columns: "bot_id,repo_id,access,granted_by,granted_at",
+        primary_key: "bot_id,repo_id",
     },
     OwnedTable {
         name: "labels",

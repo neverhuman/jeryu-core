@@ -1,0 +1,23 @@
+# jankurai:migration v1
+id = "0023_team_bots_rollback"
+owner = "forge-api"
+reviewer = "forge-api"
+approval = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "new_app_old_db"
+rollback = "restore the verified pre-0023 VACUUM INTO snapshot of forge.sqlite"
+roll_forward = "db/migrations/0023_team_bots.sql"
+backup = "VACUUM INTO copy of forge.sqlite before apply"
+restore = "restore that snapshot when no team bot, bot grant or issued agent token would be lost; otherwise recover forward"
+irreversible = false
+backfill = "none; this script does not change the bots table"
+data_classification = "credentials"
+tenant_impact = "A person's bot stays isolated by owner login; a team bot keeps only its own grants."
+verify = "SELECT rollback_notice FROM the script; bots table remains"
+tests = ["db-migration-analyze", "team_bot_survives_sqlite_reopen"]

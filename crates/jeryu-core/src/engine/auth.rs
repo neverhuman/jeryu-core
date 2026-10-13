@@ -35,7 +35,7 @@ impl ForgeCore {
         require_login(login)?;
         require_password(password)?;
         let mut state = self.state.write();
-        if state.accounts.contains_key(login) {
+        if state.accounts.contains_key(login) || state.organizations.contains_key(login) {
             return Err(ForgeError::Conflict(format!("account {login}")));
         }
         let previous = state.clone();
@@ -427,7 +427,9 @@ impl ForgeCore {
         }
         let activation_secret = random_secret()?;
         let mut state = self.state.write();
-        if state.accounts.contains_key(canonical_login) {
+        if state.accounts.contains_key(canonical_login)
+            || state.organizations.contains_key(canonical_login)
+        {
             return Err(ForgeError::Conflict(format!("account {canonical_login}")));
         }
         if bootstrap_owner
@@ -778,6 +780,11 @@ impl ForgeCore {
             .personal_tokens
             .retain(|_, token| token.login != login);
         super::bots::invalidate_account_bots(&mut state, login, Utc::now());
+        // A steward who can no longer sign in takes the team bot tokens they
+        // issued with them (record 0008); other stewards' tokens keep working.
+        if !status.permits_authentication() {
+            super::team_bots::revoke_tokens_issued_by(&mut state, login, Utc::now());
+        }
         self.persist_after_mutation(&mut state, previous)?;
         Ok(updated.into())
     }
@@ -896,6 +903,11 @@ impl ForgeCore {
     /// wrappers, which canonicalize the scope first.
     pub fn repo_access_for(&self, login: &str, owner: &str, repo: &str) -> Option<RepoAccessLevel> {
         let state = self.state.read();
+        // A team bot's acting login is no account: it holds exactly its own
+        // grants (record 0008). No account login can have this shape.
+        if parse_team_bot_login(login).is_some() {
+            return super::team_bots::acting_repo_access(&state, login, owner, repo);
+        }
         let account = state.accounts.get(login)?;
         if !account.status.permits_authentication() {
             return None;

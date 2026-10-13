@@ -63,6 +63,8 @@ impl ForgeCore {
             login: request.login.clone(),
             display_name: request.display_name,
             created_at: Utc::now(),
+            owners: Vec::new(),
+            created_by: None,
         };
         state
             .organizations

@@ -545,6 +545,10 @@ impl ForgeCore {
         for grant_key in grant_keys {
             state.repo_grants.remove(&grant_key);
         }
+        // Team bots' own grants name the repository by id.
+        state
+            .bot_repo_grants
+            .retain(|(_, repo_id), _| *repo_id != removed_repo.id);
         // Old-name redirects and the move history reference the repository
         // UUID; they go with it instead of pointing at nothing.
         state
