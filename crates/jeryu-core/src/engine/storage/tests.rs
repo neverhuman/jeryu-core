@@ -315,15 +315,56 @@ fn changed_existing_row_preserves_future_not_null_column_without_default() {
     assert_eq!(retained, (original_rowid, vec![0_u8, 17, 128, 255]));
 }
 
-/// One process writes a store. A lock taken through another open file
-/// description conflicts exactly as another process's would (`flock` locks
-/// belong to the open file description), so it stands in for one here; a
-/// real child process (`flock -n`) checks the same lock.
+/// The entry point of the separate process `a_store_this_process_has_open_refuses_another_process`
+/// starts: when `JERYU_STORE_LOCK_PROBE` names a store path, it opens it through
+/// the production constructor and exits 0 when refused with the expected code
+/// (`JERYU_STORE_LOCK_PROBE_CODE`), 3 when the open succeeds, 4 on any other
+/// error. Without the variable it does nothing, so a plain run passes it.
+#[test]
+fn store_lock_probe_in_a_separate_process() {
+    let Some(path) = std::env::var_os("JERYU_STORE_LOCK_PROBE") else {
+        return;
+    };
+    let expected = std::env::var("JERYU_STORE_LOCK_PROBE_CODE").expect("expected code");
+    let code = match ForgeCore::open_sqlite(PathBuf::from(path)) {
+        Ok(_) => 3,
+        Err(error) if error.to_string().contains(&expected) => 0,
+        Err(error) => {
+            eprintln!("probe: {error}");
+            4
+        }
+    };
+    std::process::exit(code);
+}
+
+/// Run `store_lock_probe_in_a_separate_process` in a new process of this test
+/// binary against `path`, and return its exit code.
+fn probe_in_another_process(path: &std::path::Path, expected: &str) -> Option<i32> {
+    std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "core::storage::tests::store_lock_probe_in_a_separate_process",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("JERYU_STORE_LOCK_PROBE", path)
+        .env("JERYU_STORE_LOCK_PROBE_CODE", expected)
+        .status()
+        .expect("probe process")
+        .code()
+}
+
+/// One process writes a store, and one store in it: each open has its own
+/// in-memory state and refresh locks, so a second open while the first lives
+/// is refused like another process (share a store by cloning its ForgeCore).
 ///
-/// The lock names the database, not the path an open was given: an open
-/// through a symlink shares the canonical lock and never makes its own, and a
-/// database with a second hard link is refused (STORE-LOCK-ALIAS). The holder
-/// keeps the lock and its state through all of it.
+/// The lock names the database, not the path an open was given
+/// (STORE-LOCK-ALIAS): a separate process opening it through a symlink is
+/// refused and makes no lock of its own, a second hard link refuses every
+/// name, and a file swapped under a live store is refused, not written. The
+/// holder keeps the lock and its rows through all of it. A lock taken through
+/// another open file description conflicts as another process's would, and
+/// flock(1) checks the sidecar from a real child too.
 #[test]
 fn a_store_this_process_has_open_refuses_another_process() {
     let root = private_directory();
@@ -332,13 +373,26 @@ fn a_store_this_process_has_open_refuses_another_process() {
     let core = ForgeCore::open_sqlite(&path).expect("open");
     core.create_account("alice", "alice-password-1", UserRole::User)
         .expect("alice");
-    let again = ForgeCore::open_sqlite(&path).expect("a second handle in this process");
+    let shared = core.clone();
+    let second = ForgeCore::open_sqlite(&path).unwrap_err();
+    assert!(
+        second
+            .to_string()
+            .contains("store_locked: this process already has"),
+        "{second}"
+    );
 
-    // Another name for the same database.
+    // Another name for the same database, from another directory.
     let elsewhere = private_directory();
     let symlink = elsewhere.path().join("alias.sqlite");
     std::os::unix::fs::symlink(&path, &symlink).expect("symlink");
-    let through_symlink = ForgeCore::open_sqlite(&symlink).expect("the symlink shares the lock");
+    let refused = ForgeCore::open_sqlite(&symlink).unwrap_err();
+    assert!(refused.to_string().contains("store_locked"), "{refused}");
+    assert_eq!(
+        probe_in_another_process(&symlink, "store_locked: another process has"),
+        Some(0),
+        "a separate process opening the symlink is refused"
+    );
     assert!(
         !elsewhere.path().join("alias.sqlite.lock").exists(),
         "an alias never takes a lock of its own"
@@ -352,19 +406,30 @@ fn a_store_this_process_has_open_refuses_another_process() {
     assert_eq!(
         child.code(),
         Some(75),
-        "another process cannot take the store"
+        "the sidecar is held against a child"
     );
-    drop(through_symlink);
+
     let hard_link = elsewhere.path().join("hard.sqlite");
     std::fs::hard_link(&path, &hard_link).expect("hard link");
-    for name in [&hard_link, &path] {
-        let refused = ForgeCore::open_sqlite(name).unwrap_err();
-        assert!(refused.to_string().contains("store_aliased"), "{refused}");
-    }
-    assert!(!elsewhere.path().join("hard.sqlite.lock").exists());
+    assert_eq!(
+        probe_in_another_process(&hard_link, "store_aliased"),
+        Some(0),
+        "a separate process opening a hard link is refused"
+    );
+    let refused = ForgeCore::open_sqlite(&path).unwrap_err();
+    assert!(refused.to_string().contains("store_aliased"), "{refused}");
+    assert!(
+        shared
+            .create_account("mallory", "mallory-password", UserRole::User)
+            .is_err(),
+        "the holder writes nothing while its file has a second name"
+    );
     std::fs::remove_file(&hard_link).expect("unlink");
-    core.create_account("bob", "bob-password-12", UserRole::User)
+    assert!(!elsewhere.path().join("hard.sqlite.lock").exists());
+    shared
+        .create_account("bob", "bob-password-12", UserRole::User)
         .expect("the holder still writes");
+
     let other = std::fs::OpenOptions::new()
         .write(true)
         .open(&lock_path)
@@ -378,13 +443,14 @@ fn a_store_this_process_has_open_refuses_another_process() {
         matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
         "the lock lasts while any handle lives"
     );
-    drop(again);
+    drop(shared);
     other
         .try_lock()
         .expect("the lock goes with the last handle");
     let refused = ForgeCore::open_sqlite(&path).unwrap_err();
     assert!(refused.to_string().contains("store_locked"), "{refused}");
     drop(other);
+
     let reopened = ForgeCore::open_sqlite(&path).expect("free again");
     let logins: Vec<String> = reopened
         .list_accounts()
@@ -392,9 +458,19 @@ fn a_store_this_process_has_open_refuses_another_process() {
         .map(|account| account.login)
         .collect();
     assert!(
-        logins.contains(&"alice".to_string()) && logins.contains(&"bob".to_string()),
-        "the holder's writes survive: {logins:?}"
+        logins.contains(&"alice".to_string())
+            && logins.contains(&"bob".to_string())
+            && !logins.contains(&"mallory".to_string()),
+        "the holder's writes survive, and only those: {logins:?}"
     );
+    // A file swapped in under the path takes no write from this store.
+    let impostor = root.path().join("impostor.sqlite");
+    std::fs::copy(&path, &impostor).expect("copy");
+    std::fs::rename(&impostor, &path).expect("swap");
+    let swapped = reopened
+        .create_account("carol", "carol-password-1", UserRole::User)
+        .unwrap_err();
+    assert!(swapped.to_string().contains("store_replaced"), "{swapped}");
 }
 
 /// A holder that is letting go is waited for, not reported as another

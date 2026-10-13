@@ -576,7 +576,11 @@ fn failed_review_write_rolls_back_profile_and_review() {
     assert_eq!(snapshot(&core, number), before);
     conn.execute_batch("DROP TRIGGER reject_review_insert;")
         .unwrap();
-    let reopened = ForgeCore::open_sqlite(&db).unwrap();
+    // What is on disk, read through a copy: the store stays open and writing,
+    // and one store writes a database.
+    let on_disk = temp.path().join("on-disk.sqlite");
+    std::fs::copy(&db, &on_disk).unwrap();
+    let reopened = ForgeCore::open_sqlite(&on_disk).unwrap();
     assert!(reopened.get_user("new-reviewer").is_err());
     assert_eq!(snapshot(&reopened, number), before);
     drop(reopened);
@@ -590,6 +594,7 @@ fn failed_review_write_rolls_back_profile_and_review() {
     assert_eq!(snapshot(&core, number), before);
     conn.execute_batch("DROP TRIGGER reject_dismissal_insert;")
         .unwrap();
+    drop(core);
     let reopened = ForgeCore::open_sqlite(&db).unwrap();
     assert_eq!(snapshot(&reopened, number), before);
 }

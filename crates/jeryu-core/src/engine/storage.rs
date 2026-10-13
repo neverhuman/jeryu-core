@@ -24,7 +24,28 @@ use self::migrations::apply_migrations;
 #[derive(Debug, Clone)]
 pub(super) struct SqliteStore {
     path: PathBuf,
+    /// The database file's device and inode when the store opened. Every
+    /// connection checks the path still names that one file.
+    identity: FileIdentity,
     _lock: Arc<StoreLock>,
+}
+
+/// A file's device and inode.
+type FileIdentity = (u64, u64);
+
+/// The identity of the one file `path` names now. A file with a second hard
+/// link is refused, because another name for it would take another lock.
+fn file_identity(path: &Path) -> Result<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).map_err(storage_error)?;
+    if meta.nlink() > 1 {
+        return Err(ForgeError::Storage(format!(
+            "store_aliased: {} has {} hard links; open a store by its one name",
+            path.display(),
+            meta.nlink()
+        )));
+    }
+    Ok((meta.dev(), meta.ino()))
 }
 
 /// One process writes a store. Its in-memory state is the truth and every
@@ -32,8 +53,10 @@ pub(super) struct SqliteStore {
 /// undo the first one's writes, and could refresh a provider connection the
 /// first is refreshing (connection-v1 §3). The first open in a process takes
 /// an exclusive lock on `<store>.lock` for as long as any handle to the store
-/// lives; an open from another process is refused with `store_locked`. Opens
-/// within one process share the lock.
+/// lives; an open from another process is refused with `store_locked`. So is
+/// a second open in this process while the first store lives: each open has
+/// its own in-memory state and refresh locks, so two would undo each other as
+/// two processes would. Share one store by cloning its `ForgeCore`.
 ///
 /// The lock names the database, not the path an open was given: `<store>` is
 /// the database's canonical path, so a symlink to it takes the same lock. A
@@ -61,20 +84,11 @@ const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// its canonical directory and file name before the first open creates it.
 /// A database file with more than one hard link is refused, because another
 /// name for it would take another lock.
-fn store_identity(path: &Path) -> Result<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
+fn store_identity(path: &Path) -> Result<(PathBuf, Option<FileIdentity>)> {
     match std::fs::canonicalize(path) {
         Ok(canonical) => {
-            let links = std::fs::metadata(&canonical)
-                .map_err(storage_error)?
-                .nlink();
-            if links > 1 {
-                return Err(ForgeError::Storage(format!(
-                    "store_aliased: {} has {links} hard links; open a store by its one name",
-                    path.display()
-                )));
-            }
-            Ok(canonical)
+            let identity = file_identity(&canonical)?;
+            Ok((canonical, Some(identity)))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // A dangling symlink would let SQLite create its target elsewhere.
@@ -91,19 +105,23 @@ fn store_identity(path: &Path) -> Result<PathBuf> {
                 Some(parent) if !parent.as_os_str().is_empty() => parent,
                 _ => Path::new("."),
             };
-            Ok(std::fs::canonicalize(parent)
-                .map_err(storage_error)?
-                .join(name))
+            Ok((
+                std::fs::canonicalize(parent)
+                    .map_err(storage_error)?
+                    .join(name),
+                None,
+            ))
         }
         Err(error) => Err(storage_error(error)),
     }
 }
 
 /// Lock the database `path` names, and return the lock with that database's
-/// canonical path, which every connection then opens.
-fn lock_store(path: &Path) -> Result<(Arc<StoreLock>, PathBuf)> {
+/// canonical path, which every connection then opens, and the file identity
+/// seen before the lock was taken, if the database existed.
+fn lock_store(path: &Path) -> Result<(Arc<StoreLock>, PathBuf, Option<FileIdentity>)> {
     use std::os::unix::fs::OpenOptionsExt;
-    let key = store_identity(path)?;
+    let (key, seen) = store_identity(path)?;
     let lock_path = PathBuf::from(format!("{}.lock", key.display()));
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -114,27 +132,34 @@ fn lock_store(path: &Path) -> Result<(Arc<StoreLock>, PathBuf)> {
         .map_err(storage_error)?;
     let deadline = std::time::Instant::now() + LOCK_WAIT;
     loop {
-        // The registry is held only for one look, never while waiting, so
-        // another open of the same store in this process shares the lock as
-        // soon as one of them has it.
-        {
+        // The registry is held only for one look, never while waiting. A store
+        // this process still has open is waited for like another process's:
+        // its last handle may be closing on another thread.
+        let open_here = {
             let mut stores = OPEN_STORES.lock();
-            if let Some(lock) = stores.get(&key).and_then(Weak::upgrade) {
-                return Ok((lock, key));
-            }
-            match file.try_lock() {
-                Ok(()) => {
-                    let lock = Arc::new(StoreLock { _file: file });
-                    stores.insert(key.clone(), Arc::downgrade(&lock));
-                    return Ok((lock, key));
+            if stores.get(&key).and_then(Weak::upgrade).is_some() {
+                true
+            } else {
+                match file.try_lock() {
+                    Ok(()) => {
+                        let lock = Arc::new(StoreLock { _file: file });
+                        stores.insert(key.clone(), Arc::downgrade(&lock));
+                        return Ok((lock, key, seen));
+                    }
+                    Err(std::fs::TryLockError::WouldBlock) => false,
+                    Err(std::fs::TryLockError::Error(error)) => return Err(storage_error(error)),
                 }
-                Err(std::fs::TryLockError::WouldBlock) => {}
-                Err(std::fs::TryLockError::Error(error)) => return Err(storage_error(error)),
             }
-        }
+        };
         if std::time::Instant::now() >= deadline {
+            let holder = if open_here {
+                "this process already has"
+            } else {
+                "another process has"
+            };
             return Err(ForgeError::Storage(format!(
-                "store_locked: another process has {} open; one process writes a store",
+                "store_locked: {holder} {} open; one store writes a database, so share it by \
+                 cloning its ForgeCore",
                 path.display()
             )));
         }
@@ -150,8 +175,23 @@ impl SqliteStore {
         {
             std::fs::create_dir_all(parent).map_err(storage_error)?;
         }
-        let (lock, path) = lock_store(&path)?;
-        let store = Self { path, _lock: lock };
+        let (lock, path, seen) = lock_store(&path)?;
+        // Under the lock: create the file if this is a new store, then pin the
+        // one file this store writes. A file swapped in since the identity was
+        // decided is refused, not adopted.
+        drop(Connection::open(&path).map_err(storage_error)?);
+        let identity = file_identity(&path)?;
+        if seen.is_some_and(|seen| seen != identity) {
+            return Err(ForgeError::Storage(format!(
+                "store_replaced: {} changed while it was being opened",
+                path.display()
+            )));
+        }
+        let store = Self {
+            path,
+            identity,
+            _lock: lock,
+        };
         let conn = store.connect()?;
         apply_migrations(&conn)?;
         let mut state = load_state(&conn)?;
@@ -242,7 +282,21 @@ impl SqliteStore {
     }
 
     fn connect(&self) -> Result<Connection> {
+        // The path must name the store's own file on both sides of the open,
+        // with no second link, so a moved or swapped file cannot take writes.
+        let replaced = || {
+            ForgeError::Storage(format!(
+                "store_replaced: {} no longer names the database this store opened",
+                self.path.display()
+            ))
+        };
+        if file_identity(&self.path)? != self.identity {
+            return Err(replaced());
+        }
         let conn = Connection::open(&self.path).map_err(storage_error)?;
+        if file_identity(&self.path)? != self.identity {
+            return Err(replaced());
+        }
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(storage_error)?;
         Ok(conn)

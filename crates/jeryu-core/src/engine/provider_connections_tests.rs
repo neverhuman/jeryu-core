@@ -368,6 +368,7 @@ fn provider_connections_survive_sqlite_reopen_without_plaintext() {
     // An unrelated write must not drop the connection from the snapshot.
     core.create_account("carol", "vault-test-password", UserRole::User)
         .expect("carol");
+    drop(core);
     let core = ForgeCore::open_sqlite(&path).expect("reopen again");
     assert_eq!(core.list_provider_connections("user/alice").len(), 1);
 }
@@ -644,8 +645,12 @@ fn a_rotation_left_in_flight_is_auth_required_after_a_restart() {
     let mut after_restart = None;
     core.refresh_provider_secret("user/alice", &binding, REFRESH_LOCK_TIMEOUT, |_| {
         // The process dies here, after the provider was called: what the store
-        // holds now is what a restarted server finds.
-        let restarted = ForgeCore::open_sqlite(&path)
+        // holds now is what a restarted server finds. That is read from a copy
+        // of the file, because this process still has the store open, and one
+        // store writes a database.
+        let on_disk = root.path().join("after-death.sqlite");
+        std::fs::copy(&path, &on_disk).expect("copy the store as it is on disk");
+        let restarted = ForgeCore::open_sqlite(&on_disk)
             .expect("reopen")
             .with_vault_key(key(7));
         after_restart = Some((
@@ -694,6 +699,7 @@ fn a_rotated_secret_that_cannot_be_saved_fences_the_connection_and_mints_nothing
         "neither the old secret nor the rotated one is used"
     );
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("writable");
+    drop(core);
     let restarted = ForgeCore::open_sqlite(&path)
         .expect("reopen")
         .with_vault_key(key(7));

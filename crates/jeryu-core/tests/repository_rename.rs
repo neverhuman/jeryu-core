@@ -382,6 +382,7 @@ fn failed_disk_move_rolls_the_state_back() {
         .collect();
     assert_eq!(phases, vec!["requested".to_string(), "failed".to_string()]);
 
+    drop(core);
     let reopened = ForgeCore::open_sqlite(&database).unwrap();
     assert_moved(&reopened, "jain-split", "jain-todo");
     assert!(reopened.get_repository("veox", "jain-todo").is_err());
@@ -474,6 +475,7 @@ fn deleting_a_renamed_repository_drops_its_redirects() {
         core.get_repository("jain-split", "jain-todo"),
         Err(ForgeError::NotFound(_))
     ));
+    drop(core);
     let reopened = ForgeCore::open_sqlite(&database).unwrap();
     assert!(reopened.get_repository("jain-split", "jain-todo").is_err());
 }
