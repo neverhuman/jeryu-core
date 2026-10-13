@@ -149,7 +149,10 @@ directory, and share a store by cloning its ForgeCore. `store_aliased`: the
 database file has a second hard link, or the path is a link to nothing; open
 it by its one path and remove the extra link. `store_replaced`: the path no
 longer names the file this store opened; do not move or replace forge.sqlite
-while the forge runs, and restart it.
+while the forge runs, and restart it. `store_journal`: the database is in WAL
+mode and another connection has it open, so it cannot be moved back to the
+rollback journal the store keeps; close the other connection (a `sqlite3`
+shell, a backup tool) and restart the forge.
 
 ## Waitlist
 

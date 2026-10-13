@@ -549,6 +549,55 @@ fn a_store_this_process_has_open_refuses_another_process() {
         logins.contains(&"erin".to_string()) && !logins.contains(&"mallory".to_string()),
         "only the real store's rows: {logins:?}"
     );
+
+    // A valid store left in WAL mode by another tool (this store never sets
+    // it): its writes go to the `-wal` file, so the header check would never
+    // see them. It opens, moved back to a rollback journal under the store's
+    // lock, with every committed row, including those still only in the WAL.
+    let wal = private_directory();
+    let wal_path = wal.path().join("forge.sqlite");
+    drop(
+        ForgeCore::open_sqlite(&wal_path)
+            .expect("create")
+            .create_account("frank", "frank-password-12", UserRole::User)
+            .expect("frank"),
+    );
+    let walled = Connection::open(&wal_path).expect("raw");
+    let mode: String = walled
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .expect("wal");
+    assert_eq!(mode, "wal");
+    walled
+        .execute_batch("PRAGMA wal_autocheckpoint = 0; PRAGMA user_version = 7;")
+        .expect("a commit left in the WAL");
+    let header = |path: &std::path::Path| {
+        let bytes = std::fs::read(path).expect("header");
+        i32::from_be_bytes(bytes[60..64].try_into().expect("four bytes"))
+    };
+    assert_ne!(header(&wal_path), 7, "the commit is only in the WAL");
+    // While another connection has it open in WAL mode, it cannot move, and
+    // the open is refused rather than misread as a swap.
+    let busy = ForgeCore::open_sqlite(&wal_path).unwrap_err();
+    assert!(busy.to_string().starts_with("store_journal:"), "{busy}");
+    drop(walled);
+    let opened = ForgeCore::open_sqlite(&wal_path).expect("a WAL-mode store opens");
+    assert!(
+        opened
+            .list_accounts()
+            .iter()
+            .any(|account| account.login == "frank"),
+        "the WAL-mode store's rows are loaded"
+    );
+    drop(opened);
+    let raw = Connection::open(&wal_path).expect("raw");
+    let mode: String = raw
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("mode");
+    assert_eq!(mode, "delete", "the store keeps a rollback journal");
+    let version: i64 = raw
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 7, "the commit that was only in the WAL survives");
 }
 
 /// A holder that is letting go is waited for, not reported as another

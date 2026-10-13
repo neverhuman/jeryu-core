@@ -162,6 +162,36 @@ fn open_bound(path: &Path, expected: Option<FileIdentity>) -> Result<(Connection
         }
         _ => storage_error(error),
     };
+    // The store keeps a rollback journal, so a commit reaches the database
+    // file itself, where the check below reads it; in WAL mode it would reach
+    // only the `-wal` file. This store never sets WAL, but the mode persists
+    // in the file, so a store another tool left in WAL mode is moved back
+    // here, under the store's lock, which writes the WAL's commits into the
+    // file. A store that cannot move (another connection has it open in WAL
+    // mode) is refused, not misread as a swap.
+    let stuck = |journal: &str| {
+        ForgeError::StoreCustody(format!(
+            "store_journal: {} keeps a {journal} journal that cannot be moved to a rollback \
+             journal while another connection has it open",
+            path.display()
+        ))
+    };
+    let journal: String = conn
+        .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+        .map_err(|error| match &error {
+            rusqlite::Error::SqliteFailure(failure, _)
+                if matches!(
+                    failure.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) =>
+            {
+                stuck("WAL")
+            }
+            _ => moved(error),
+        })?;
+    if !journal.eq_ignore_ascii_case("delete") {
+        return Err(stuck(&journal));
+    }
     conn.execute_batch(&format!("PRAGMA user_version = {nonce};"))
         .map_err(moved)?;
     // The header's user_version: four big-endian bytes at offset 60.
