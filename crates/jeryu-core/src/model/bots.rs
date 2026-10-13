@@ -244,7 +244,7 @@ pub struct BotAccessTokenAuth {
 
 /// Access token material the edge turns into a short-lived JWT. The refresh
 /// token is returned once per exchange or rotation.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BotSession {
     pub bot: BotSummary,
     pub key_id: String,

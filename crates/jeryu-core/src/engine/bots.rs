@@ -23,6 +23,7 @@ const CROCKFORD: &[u8] = b"0123456789abcdefghjkmnpqrstvwxyz";
 const REFRESH_TTL_HOURS: i64 = 12;
 const ROTATION_GRACE_MINUTES: i64 = 5;
 const OPERATION_TTL_HOURS: i64 = 24;
+const REFRESH_OPERATION: &str = "bot.token.refresh";
 const ACTIVITY_TTL_DAYS: i64 = 90;
 const ACTIVITY_COALESCE_SECS: i64 = 60;
 const ACTIVITY_CAP: usize = 500;
@@ -675,6 +676,113 @@ impl ForgeCore {
         Ok(session)
     }
 
+    pub fn rotate_bot_refresh_token_idempotent(
+        &self,
+        refresh_token: &str,
+        request_key: &str,
+        body_digest: &str,
+    ) -> Result<BotSession> {
+        require_name("request key", request_key)?;
+        if body_digest.len() != 64 || !body_digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ForgeError::Validation(
+                "operation digest must be 64 hex characters".to_string(),
+            ));
+        }
+        let hash = token_hash(refresh_token);
+        let now = Utc::now();
+        let mut state = self.state.write();
+        let Some(existing) = state.bot_refresh.get(&hash).cloned() else {
+            return invalid();
+        };
+        let map_key = (
+            existing.bot_id,
+            REFRESH_OPERATION.to_string(),
+            request_key.to_string(),
+        );
+        prune_bot_operations(&mut state, now);
+        if let Some(operation) = state.bot_operations.get(&map_key) {
+            if operation.body_digest != body_digest {
+                return Err(ForgeError::Conflict("idempotency_conflict".to_string()));
+            }
+            if let Some(result_json) = &operation.result_json {
+                if existing
+                    .used_at
+                    .is_some_and(|used_at| within_rotation_grace(now, used_at))
+                {
+                    return serde_json::from_str(result_json).map_err(|error| {
+                        ForgeError::Storage(format!("bot refresh replay decode failed: {error}"))
+                    });
+                }
+            } else {
+                return Err(ForgeError::Conflict("idempotency_in_progress".to_string()));
+            }
+        }
+        // Reuse outside the operation replay path keeps the strict family
+        // revocation semantics of `rotate_bot_refresh_token`.
+        if existing.used_at.is_some() {
+            let bot_id = existing.bot_id;
+            let key_id = existing.key_id.clone();
+            let (actor, subject) = match state.bots.get(&bot_id) {
+                Some(bot) => (bot.owner.clone(), format!("{}/{}", bot.owner, bot.slug)),
+                None => ("bot".into(), bot_id.to_string()),
+            };
+            let previous = state.clone();
+            revoke_refresh_family(&mut state, bot_id, now);
+            self.persist_after_mutation(&mut state, previous)?;
+            drop(state);
+            self.record_bot_audit(
+                &actor,
+                "bot.refresh.reuse",
+                &subject,
+                "failed",
+                bot_id,
+                Some(&key_id),
+                None,
+            )?;
+            return invalid();
+        }
+        if existing.expires_at <= now {
+            return invalid();
+        }
+        let Some(bot) = state.bots.get(&existing.bot_id).cloned() else {
+            return invalid();
+        };
+        let Some(key) = state.bot_keys.get(&existing.key_id).cloned() else {
+            return invalid();
+        };
+        if !bot_account_matches(&state, &bot)
+            || bot.credential_generation != existing.generation
+            || !key_is_live(&key, now)
+        {
+            return invalid();
+        }
+        let previous = state.clone();
+        if let Some(row) = state.bot_refresh.get_mut(&hash) {
+            row.used_at = Some(now);
+        }
+        let session = issue_refresh(&mut state, &bot, &key, now)?;
+        let result_json = serde_json::to_string(&session).map_err(|error| {
+            ForgeError::Storage(format!("bot refresh replay encode failed: {error}"))
+        })?;
+        state.bot_operations.insert(
+            map_key,
+            BotOperationRecord {
+                bot_id: existing.bot_id,
+                operation: REFRESH_OPERATION.to_string(),
+                request_key: request_key.to_string(),
+                body_digest: body_digest.to_string(),
+                result_json: Some(result_json),
+                created_at: now,
+            },
+        );
+        if let Some(stored) = state.bots.get_mut(&bot.id) {
+            stored.last_auth = Some(now);
+            stored.updated_at = now;
+        }
+        self.persist_after_mutation(&mut state, previous)?;
+        Ok(session)
+    }
+
     /// Confirm the bot, key, generation, and account epoch without a repository.
     /// Repo and task checks stay on [`Self::authorize_bot`].
     pub fn authenticate_bot_access(
@@ -882,6 +990,9 @@ impl ForgeCore {
         body_digest: &str,
     ) -> Result<BotOperationGate> {
         require_name("operation", operation)?;
+        if operation == REFRESH_OPERATION {
+            return Err(ForgeError::Validation("reserved bot operation".to_string()));
+        }
         require_name("request key", request_key)?;
         if body_digest.len() != 64 || !body_digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(ForgeError::Validation(
@@ -894,10 +1005,7 @@ impl ForgeCore {
             return Err(ForgeError::NotFound(format!("bot {bot_id}")));
         }
         let previous = state.clone();
-        let cutoff = now - Duration::hours(OPERATION_TTL_HOURS);
-        state
-            .bot_operations
-            .retain(|_, record| record.created_at >= cutoff);
+        prune_bot_operations(&mut state, now);
         let map_key = (bot_id, operation.to_string(), request_key.to_string());
         if let Some(existing) = state.bot_operations.get(&map_key) {
             if existing.body_digest != body_digest {
@@ -936,6 +1044,9 @@ impl ForgeCore {
     ) -> Result<()> {
         serde_json::from_str::<serde_json::Value>(result_json)
             .map_err(|_| ForgeError::Validation("operation result must be json".to_string()))?;
+        if operation == REFRESH_OPERATION {
+            return Err(ForgeError::Validation("reserved bot operation".to_string()));
+        }
         let mut state = self.state.write();
         let map_key = (bot_id, operation.to_string(), request_key.to_string());
         let Some(existing) = state.bot_operations.get(&map_key) else {
@@ -980,6 +1091,16 @@ impl ForgeCore {
         let mut state = self.state.write();
         if let Some(token) = state.bot_refresh.get_mut(&hash) {
             token.expires_at = Utc::now() - Duration::seconds(1);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn force_bot_refresh_used_before_grace(&self, refresh_token: &str) {
+        let hash = token_hash(refresh_token);
+        let mut state = self.state.write();
+        if let Some(token) = state.bot_refresh.get_mut(&hash) {
+            token.used_at =
+                Some(Utc::now() - Duration::minutes(ROTATION_GRACE_MINUTES) - Duration::seconds(1));
         }
     }
 
@@ -1493,12 +1614,29 @@ fn cap_live_refresh(state: &mut super::State, bot_id: Uuid, now: DateTime<Utc>) 
     }
 }
 
+fn prune_bot_operations(state: &mut super::State, now: DateTime<Utc>) {
+    let operation_cutoff = now - Duration::hours(OPERATION_TTL_HOURS);
+    let refresh_cutoff = now - Duration::minutes(ROTATION_GRACE_MINUTES);
+    state.bot_operations.retain(|_, record| {
+        let cutoff = if record.operation == REFRESH_OPERATION {
+            refresh_cutoff
+        } else {
+            operation_cutoff
+        };
+        record.created_at >= cutoff
+    });
+}
+
 fn revoke_refresh_family(state: &mut super::State, bot_id: Uuid, now: DateTime<Utc>) {
     state.bot_refresh.retain(|_, token| token.bot_id != bot_id);
     if let Some(bot) = state.bots.get_mut(&bot_id) {
         bot.credential_generation = bot.credential_generation.saturating_add(1);
         bot.updated_at = now;
     }
+}
+
+fn within_rotation_grace(now: DateTime<Utc>, used_at: DateTime<Utc>) -> bool {
+    now <= used_at + Duration::minutes(ROTATION_GRACE_MINUTES)
 }
 
 pub(super) fn key_is_live(key: &BotKeyRecord, now: DateTime<Utc>) -> bool {
@@ -2119,6 +2257,85 @@ mod tests {
             ..stale
         };
         assert!(core.authorize_bot(&fresh).is_ok());
+    }
+
+    #[test]
+    fn idempotent_refresh_replays_lost_response_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forge.sqlite");
+        let (original_refresh, replayed) = {
+            let core = ForgeCore::open_sqlite(&path).unwrap();
+            core.create_account("alice", PASSWORD, UserRole::User)
+                .unwrap();
+            core.create_repository(
+                "alice",
+                CreateRepositoryRequest {
+                    name: "widgets".to_string(),
+                    private: true,
+                    description: None,
+                    default_branch: Some("main".to_string()),
+                },
+            )
+            .unwrap();
+            core.grant_repo_access("alice", "alice", "alice", "widgets", RepoAccessLevel::Write)
+                .unwrap();
+            let enrolled = enroll(&core, "atlas", BotReach::General);
+            let first = core
+                .exchange_bot_enrollment_key(&enrolled.enrollment_key)
+                .unwrap();
+            let digest = "ab".repeat(32);
+            let rotated = core
+                .rotate_bot_refresh_token_idempotent(&first.refresh_token, "retry-1", &digest)
+                .unwrap();
+            (first.refresh_token, rotated)
+        };
+        let core = ForgeCore::open_sqlite(&path).unwrap();
+        let digest = "ab".repeat(32);
+        let retry = core
+            .rotate_bot_refresh_token_idempotent(&original_refresh, "retry-1", &digest)
+            .unwrap();
+        assert_eq!(retry, replayed);
+        assert_ne!(retry.refresh_token, original_refresh);
+        assert!(core.rotate_bot_refresh_token(&retry.refresh_token).is_ok());
+    }
+
+    #[test]
+    fn idempotent_refresh_replay_expires_after_grace() {
+        let (core, _) = fixture();
+        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let first = core
+            .exchange_bot_enrollment_key(&enrolled.enrollment_key)
+            .unwrap();
+        let digest = "cd".repeat(32);
+        let second = core
+            .rotate_bot_refresh_token_idempotent(&first.refresh_token, "retry-1", &digest)
+            .unwrap();
+        core.force_bot_refresh_used_before_grace(&first.refresh_token);
+        assert!(
+            core.rotate_bot_refresh_token_idempotent(&first.refresh_token, "retry-1", &digest)
+                .is_err()
+        );
+        assert!(
+            core.rotate_bot_refresh_token(&second.refresh_token)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn idempotent_refresh_rejects_a_different_body() {
+        let (core, _) = fixture();
+        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let first = core
+            .exchange_bot_enrollment_key(&enrolled.enrollment_key)
+            .unwrap();
+        let digest = "ef".repeat(32);
+        core.rotate_bot_refresh_token_idempotent(&first.refresh_token, "retry-1", &digest)
+            .unwrap();
+        let other = "01".repeat(32);
+        assert!(matches!(
+            core.rotate_bot_refresh_token_idempotent(&first.refresh_token, "retry-1", &other),
+            Err(ForgeError::Conflict(message)) if message == "idempotency_conflict"
+        ));
     }
 
     #[test]
