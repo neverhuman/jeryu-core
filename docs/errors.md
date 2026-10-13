@@ -141,6 +141,19 @@ The forge could not read randomness or build the Argon2id hash for a new
 enrollment secret. Retry the enroll or rotate once. Do not keep the secret if
 the hash fails.
 
+## Store custody
+
+One forge process writes a database, through one store. `store_locked`: another
+process, or another open in this process, has it; run one forge per data
+directory, and share a store by cloning its ForgeCore. `store_aliased`: the
+database file has a second hard link, or the path is a link to nothing; open
+it by its one path and remove the extra link. `store_replaced`: the path no
+longer names the file this store opened; do not move or replace forge.sqlite
+while the forge runs, and restart it. `store_journal`: the database is in WAL
+mode, and the store keeps a rollback journal; the forge never converts it on
+open. With the forge stopped, run `PRAGMA journal_mode = DELETE;` on it once
+(for example with the `sqlite3` shell), then start the forge.
+
 ## Waitlist
 
 The public waitlist cannot store another new address. A repeat of an address

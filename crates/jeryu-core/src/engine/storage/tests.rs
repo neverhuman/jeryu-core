@@ -315,16 +315,175 @@ fn changed_existing_row_preserves_future_not_null_column_without_default() {
     assert_eq!(retained, (original_rowid, vec![0_u8, 17, 128, 255]));
 }
 
-/// One process writes a store. A lock taken through another open file
-/// description conflicts exactly as another process's would (`flock` locks
-/// belong to the open file description), so it stands in for one here.
+/// The separate process `a_store_this_process_has_open_refuses_another_process`
+/// starts. With `JERYU_STORE_LOCK_PROBE` naming a store, it opens that store
+/// through the production constructor and asserts the open is refused with
+/// `JERYU_STORE_LOCK_PROBE_CODE`; any other outcome fails this test, and so the
+/// child process. Without the variable it checks the probe's own premise: a
+/// store nobody holds opens.
+#[test]
+fn store_lock_probe_in_a_separate_process() {
+    let Some(path) = std::env::var_os("JERYU_STORE_LOCK_PROBE") else {
+        let root = private_directory();
+        ForgeCore::open_sqlite(root.path().join("forge.sqlite"))
+            .expect("a store nobody holds opens");
+        return;
+    };
+    let expected = std::env::var("JERYU_STORE_LOCK_PROBE_CODE").expect("expected code");
+    let refused = ForgeCore::open_sqlite(PathBuf::from(path))
+        .err()
+        .map(|error| error.to_string());
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|message| message.contains(&expected)),
+        "the separate process was not refused with {expected}: {refused:?}"
+    );
+}
+
+/// Run `store_lock_probe_in_a_separate_process` in a new process of this test
+/// binary against `path`, and require that it ran that one test and passed. A
+/// child that ran no test (a filter that matched nothing) is a failure, not a
+/// pass.
+fn probe_in_another_process(path: &std::path::Path, expected: &str) {
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "core::storage::tests::store_lock_probe_in_a_separate_process",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("JERYU_STORE_LOCK_PROBE", path)
+        .env("JERYU_STORE_LOCK_PROBE_CODE", expected)
+        .output()
+        .expect("probe process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "the separate process was not refused with {expected}: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The separate process the rename case starts to test SQLite's own write
+/// lock from outside: with `JERYU_SQLITE_WRITE_PROBE` naming a database, a
+/// plain connection must be refused `BEGIN IMMEDIATE` at once (another
+/// process holds the write lock). Without it, it checks its premise: a
+/// database nobody holds takes one.
+#[test]
+fn sqlite_write_probe_in_a_separate_process() {
+    let target = std::env::var_os("JERYU_SQLITE_WRITE_PROBE").map(PathBuf::from);
+    let root = private_directory();
+    let path = target
+        .clone()
+        .unwrap_or_else(|| root.path().join("probe.sqlite"));
+    let conn = Connection::open(&path).expect("raw");
+    conn.busy_timeout(std::time::Duration::ZERO)
+        .expect("no wait");
+    let begun = conn.execute_batch("BEGIN IMMEDIATE");
+    match target {
+        Some(_) => assert!(
+            begun.as_ref().is_err_and(|error| error
+                .sqlite_error_code()
+                .is_some_and(|code| code == rusqlite::ErrorCode::DatabaseBusy)),
+            "another process took the write lock the store's transaction holds: {begun:?}"
+        ),
+        None => begun.expect("a database nobody holds takes the write lock"),
+    }
+}
+
+/// Run `sqlite_write_probe_in_a_separate_process` against `path` in a new
+/// process of this test binary, and require that it ran that one test and
+/// passed.
+fn write_probe_in_another_process(path: &std::path::Path) {
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "core::storage::tests::sqlite_write_probe_in_a_separate_process",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("JERYU_SQLITE_WRITE_PROBE", path)
+        .output()
+        .expect("probe process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "the store's write lock did not hold against another process: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// One process writes a store, and one store in it: each open has its own
+/// in-memory state and refresh locks, so a second open while the first lives
+/// is refused like another process (share a store by cloning its ForgeCore).
+///
+/// The lock names the database, not the path an open was given
+/// (STORE-LOCK-ALIAS): a separate process opening it through a symlink is
+/// refused and makes no lock of its own, a second hard link refuses every
+/// name, and a file swapped under a live store is refused, not written. The
+/// holder keeps the lock and its rows through all of it. A lock taken through
+/// another open file description conflicts as another process's would, and
+/// flock(1) checks the sidecar from a real child too.
 #[test]
 fn a_store_this_process_has_open_refuses_another_process() {
     let root = private_directory();
     let path = root.path().join("forge.sqlite");
     let lock_path = root.path().join("forge.sqlite.lock");
     let core = ForgeCore::open_sqlite(&path).expect("open");
-    let again = ForgeCore::open_sqlite(&path).expect("a second handle in this process");
+    core.create_account("alice", "alice-password-1", UserRole::User)
+        .expect("alice");
+    let shared = core.clone();
+    let second = ForgeCore::open_sqlite(&path).unwrap_err();
+    assert!(
+        second
+            .to_string()
+            .contains("store_locked: this process already has"),
+        "{second}"
+    );
+
+    // Another name for the same database, from another directory.
+    let elsewhere = private_directory();
+    let symlink = elsewhere.path().join("alias.sqlite");
+    std::os::unix::fs::symlink(&path, &symlink).expect("symlink");
+    let refused = ForgeCore::open_sqlite(&symlink).unwrap_err();
+    assert!(refused.to_string().contains("store_locked"), "{refused}");
+    // A separate process opening the symlink is refused.
+    probe_in_another_process(&symlink, "store_locked: another process has");
+    assert!(
+        !elsewhere.path().join("alias.sqlite.lock").exists(),
+        "an alias never takes a lock of its own"
+    );
+    let child = std::process::Command::new("flock")
+        .args(["--nonblock", "--conflict-exit-code", "75"])
+        .arg(&lock_path)
+        .arg("true")
+        .status()
+        .expect("flock(1)");
+    assert_eq!(
+        child.code(),
+        Some(75),
+        "the sidecar is held against a child"
+    );
+
+    let hard_link = elsewhere.path().join("hard.sqlite");
+    std::fs::hard_link(&path, &hard_link).expect("hard link");
+    // A separate process opening a hard link is refused.
+    probe_in_another_process(&hard_link, "store_aliased");
+    let refused = ForgeCore::open_sqlite(&path).unwrap_err();
+    assert!(refused.to_string().contains("store_aliased"), "{refused}");
+    assert!(
+        shared
+            .create_account("mallory", "mallory-password", UserRole::User)
+            .is_err(),
+        "the holder writes nothing while its file has a second name"
+    );
+    std::fs::remove_file(&hard_link).expect("unlink");
+    assert!(!elsewhere.path().join("hard.sqlite.lock").exists());
+    shared
+        .create_account("bob", "bob-password-12", UserRole::User)
+        .expect("the holder still writes");
+
     let other = std::fs::OpenOptions::new()
         .write(true)
         .open(&lock_path)
@@ -338,14 +497,403 @@ fn a_store_this_process_has_open_refuses_another_process() {
         matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
         "the lock lasts while any handle lives"
     );
-    drop(again);
+    drop(shared);
     other
         .try_lock()
         .expect("the lock goes with the last handle");
     let refused = ForgeCore::open_sqlite(&path).unwrap_err();
     assert!(refused.to_string().contains("store_locked"), "{refused}");
     drop(other);
-    ForgeCore::open_sqlite(&path).expect("free again");
+
+    let reopened = ForgeCore::open_sqlite(&path).expect("free again");
+    let logins: Vec<String> = reopened
+        .list_accounts()
+        .into_iter()
+        .map(|account| account.login)
+        .collect();
+    assert!(
+        logins.contains(&"alice".to_string())
+            && logins.contains(&"bob".to_string())
+            && !logins.contains(&"mallory".to_string()),
+        "the holder's writes survive, and only those: {logins:?}"
+    );
+    // A file swapped in under the path takes no write from this store.
+    let impostor = root.path().join("impostor.sqlite");
+    std::fs::copy(&path, &impostor).expect("copy");
+    std::fs::rename(&impostor, &path).expect("swap");
+    let swapped = reopened
+        .create_account("carol", "carol-password-1", UserRole::User)
+        .unwrap_err();
+    assert!(swapped.to_string().contains("store_replaced"), "{swapped}");
+    // So does a directory in its place: replaced, not misread as hard links.
+    std::fs::remove_file(&path).expect("remove");
+    std::fs::create_dir(&path).expect("directory");
+    let directory = reopened
+        .create_account("dave", "dave-password-12", UserRole::User)
+        .unwrap_err();
+    assert!(
+        directory.to_string().starts_with("store_replaced:"),
+        "{directory}"
+    );
+
+    // A file swapped in just before the one open and swapped back just after
+    // it (CONNECTION-IDENTITY-ABA): the name reads right on both sides, and an
+    // independent descriptor on the real file is newly open across the check,
+    // but the connection SQLite holds is the impostor's, so the open is
+    // refused and nothing of the impostor is loaded.
+    let race = private_directory();
+    let real = race.path().join("forge.sqlite");
+    let impostor = race.path().join("impostor.sqlite");
+    let held = race.path().join("held.sqlite");
+    {
+        let real_core = ForgeCore::open_sqlite(&real).expect("real");
+        real_core
+            .create_account("erin", "erin-password-123", UserRole::User)
+            .expect("erin");
+    }
+    {
+        let other = ForgeCore::open_sqlite(&impostor).expect("impostor");
+        other
+            .create_account("mallory", "mallory-password", UserRole::User)
+            .expect("mallory");
+    }
+    let real_bytes = std::fs::read(&real).expect("real bytes");
+    let (hook_real, hook_impostor, hook_held) = (real.clone(), impostor.clone(), held.clone());
+    let decoy: std::sync::Arc<parking_lot::Mutex<Option<std::fs::File>>> = Default::default();
+    let hook_decoy = decoy.clone();
+    *super::OPEN_HOOK.lock() = Some(Box::new(move |opening, before| {
+        if opening != hook_real.as_path() {
+            return;
+        }
+        if before {
+            std::fs::rename(&hook_real, &hook_held).expect("hold the real file");
+            std::fs::rename(&hook_impostor, &hook_real).expect("swap the impostor in");
+        } else {
+            std::fs::rename(&hook_real, &hook_impostor).expect("swap the impostor out");
+            std::fs::rename(&hook_held, &hook_real).expect("put the real file back");
+            // A plain reader on the real file, newly open across the check.
+            *hook_decoy.lock() = Some(std::fs::File::open(&hook_real).expect("decoy"));
+        }
+    }));
+    let raced = ForgeCore::open_sqlite(&real).unwrap_err();
+    *super::OPEN_HOOK.lock() = None;
+    assert!(
+        decoy.lock().is_some(),
+        "the decoy was open across the check"
+    );
+    drop(decoy.lock().take());
+    assert!(raced.to_string().starts_with("store_replaced:"), "{raced}");
+    assert_eq!(
+        std::fs::read(&real).expect("real bytes"),
+        real_bytes,
+        "the real database is untouched"
+    );
+    let logins: Vec<String> = ForgeCore::open_sqlite(&real)
+        .expect("the real store opens once the race is gone")
+        .list_accounts()
+        .into_iter()
+        .map(|account| account.login)
+        .collect();
+    assert!(
+        logins.contains(&"erin".to_string()) && !logins.contains(&"mallory".to_string()),
+        "only the real store's rows: {logins:?}"
+    );
+
+    // The database renamed under a live store, with a symlink left at its old
+    // name (Grok's review on 54161d9): the store's next write is refused, since
+    // its name is now a link and not the file, and no second store opens the
+    // file by its new name, in this process or another, though that name has
+    // a `.lock` of its own: the store also locks the file itself.
+    let moved_root = private_directory();
+    let original = moved_root.path().join("forge.sqlite");
+    let renamed = moved_root.path().join("moved.sqlite");
+    let live = ForgeCore::open_sqlite(&original).expect("open");
+    live.create_account("gina", "gina-password-123", UserRole::User)
+        .expect("gina");
+    std::fs::rename(&original, &renamed).expect("rename");
+    std::os::unix::fs::symlink(&renamed, &original).expect("a link at the old name");
+    // With a write transaction open on the live store's connection, the
+    // refused opens by either name close no descriptor on its file, so
+    // SQLite's process-owned write lock still holds against another process
+    // (Codex TEST's SQL-LOCK-FD-CLOSE on 21f252d).
+    {
+        let store = live.storage.as_ref().expect("a sqlite store");
+        let conn = store.conn.lock();
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .expect("a write transaction");
+        for name in [&renamed, &original] {
+            let refused = ForgeCore::open_sqlite(name).unwrap_err();
+            assert!(
+                refused.to_string().starts_with("store_locked:"),
+                "{}: {refused}",
+                name.display()
+            );
+        }
+        write_probe_in_another_process(&renamed);
+        conn.execute_batch("ROLLBACK").expect("rollback");
+    }
+    let relinked = live
+        .create_account("hank", "hank-password-123", UserRole::User)
+        .unwrap_err();
+    assert!(
+        relinked.to_string().starts_with("store_replaced:"),
+        "{relinked}"
+    );
+    for name in [&renamed, &original] {
+        let second = ForgeCore::open_sqlite(name).unwrap_err();
+        assert!(
+            second.to_string().starts_with("store_locked:"),
+            "{}: {second}",
+            name.display()
+        );
+    }
+    probe_in_another_process(&renamed, "store_locked: another store has");
+    drop(live);
+    let logins: Vec<String> = ForgeCore::open_sqlite(&renamed)
+        .expect("the renamed database opens once its store is gone")
+        .list_accounts()
+        .into_iter()
+        .map(|account| account.login)
+        .collect();
+    assert!(
+        logins.contains(&"gina".to_string()) && !logins.contains(&"hank".to_string()),
+        "only the rows the live store wrote before the rename: {logins:?}"
+    );
+
+    // A valid store left in WAL mode by another tool (this store never sets
+    // it): its writes go to the `-wal` file, so the header check would never
+    // see them. It is refused by its header before SQLite opens it, and left
+    // as it was: nothing converts a journal before the binding is proven.
+    // Once converted offline, it opens with every committed row, including
+    // one that was only in the WAL.
+    let wal = private_directory();
+    let wal_path = wal.path().join("forge.sqlite");
+    drop(
+        ForgeCore::open_sqlite(&wal_path)
+            .expect("create")
+            .create_account("frank", "frank-password-12", UserRole::User)
+            .expect("frank"),
+    );
+    let walled = Connection::open(&wal_path).expect("raw");
+    let mode: String = walled
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .expect("wal");
+    assert_eq!(mode, "wal");
+    walled
+        .execute_batch("PRAGMA wal_autocheckpoint = 0; PRAGMA user_version = 7;")
+        .expect("a commit left in the WAL");
+    let header = |path: &std::path::Path| {
+        let bytes = std::fs::read(path).expect("header");
+        i32::from_be_bytes(bytes[60..64].try_into().expect("four bytes"))
+    };
+    assert_ne!(header(&wal_path), 7, "the commit is only in the WAL");
+    let sidecar = wal.path().join("forge.sqlite-wal");
+    let before = (
+        std::fs::read(&wal_path).expect("db bytes"),
+        std::fs::read(&sidecar).expect("wal bytes"),
+    );
+    let refused = ForgeCore::open_sqlite(&wal_path).unwrap_err();
+    assert!(
+        refused.to_string().starts_with("store_journal:"),
+        "{refused}"
+    );
+    assert_eq!(
+        (
+            std::fs::read(&wal_path).expect("db bytes"),
+            std::fs::read(&sidecar).expect("wal bytes"),
+        ),
+        before,
+        "a refused WAL-mode store and its WAL are untouched"
+    );
+    drop(walled);
+    let still = ForgeCore::open_sqlite(&wal_path).unwrap_err();
+    assert!(still.to_string().starts_with("store_journal:"), "{still}");
+    let offline = Connection::open(&wal_path).expect("raw");
+    let mode: String = offline
+        .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+        .expect("delete");
+    assert_eq!(mode, "delete", "converted offline");
+    drop(offline);
+    let opened = ForgeCore::open_sqlite(&wal_path).expect("the converted store opens");
+    assert!(
+        opened
+            .list_accounts()
+            .iter()
+            .any(|account| account.login == "frank"),
+        "the converted store's rows are loaded"
+    );
+    drop(opened);
+    let version: i64 = Connection::open(&wal_path)
+        .expect("raw")
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 7, "the commit that was only in the WAL survives");
+
+    // A WAL-backed replacement swapped in after the real file is pinned and
+    // its header checked, before SQLite opens the name: the open refuses
+    // without checkpointing into the replacement or changing its mode, so
+    // its database and WAL bytes are as they were, and the real store is
+    // untouched and opens afterwards. With another connection holding the
+    // replacement's WAL live or not, and with the replacement swapped back
+    // out during the open or left in place. Left in place with no other
+    // connection, this store's connection is the last one on it when the
+    // refusal closes it, and only no-checkpoint-on-close keeps its WAL out.
+    for (held_open, swap_back) in [(true, true), (false, true), (true, false), (false, false)] {
+        let case = format!("held_open={held_open} swap_back={swap_back}");
+        let race = private_directory();
+        let real = race.path().join("forge.sqlite");
+        let impostor = race.path().join("impostor.sqlite");
+        let held = race.path().join("held.sqlite");
+        drop(ForgeCore::open_sqlite(&real).expect("real"));
+        drop(ForgeCore::open_sqlite(&impostor).expect("impostor"));
+        let replacement = Connection::open(&impostor).expect("raw");
+        replacement
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .expect("keep the WAL");
+        let mode: String = replacement
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .expect("wal replacement");
+        assert_eq!(mode, "wal");
+        replacement
+            .execute_batch("PRAGMA wal_autocheckpoint = 0; PRAGMA user_version = 9;")
+            .expect("a commit only in the replacement's WAL");
+        let holder = held_open.then_some(replacement);
+        let sidecar = |db: &std::path::Path, suffix: &str| {
+            let mut name = db.as_os_str().to_owned();
+            name.push(suffix);
+            PathBuf::from(name)
+        };
+        let pinned = |db: &std::path::Path| {
+            (
+                std::fs::read(db).expect("db bytes"),
+                std::fs::read(sidecar(db, "-wal")).expect("wal bytes"),
+            )
+        };
+        let replacement_bytes = pinned(&impostor);
+        assert!(
+            !replacement_bytes.1.is_empty(),
+            "the replacement has a live WAL"
+        );
+        let real_bytes = std::fs::read(&real).expect("real bytes");
+        let (hook_real, hook_impostor, hook_held) = (real.clone(), impostor.clone(), held.clone());
+        let moves = move |from: &std::path::Path, to: &std::path::Path| {
+            for suffix in ["-wal", "-shm"] {
+                if sidecar(from, suffix).exists() {
+                    std::fs::rename(sidecar(from, suffix), sidecar(to, suffix)).expect("sidecar");
+                }
+            }
+            std::fs::rename(from, to).expect("database");
+        };
+        *super::OPEN_HOOK.lock() = Some(Box::new(move |opening, before| {
+            if opening != hook_real.as_path() {
+                return;
+            }
+            if before {
+                moves(&hook_real, &hook_held);
+                moves(&hook_impostor, &hook_real);
+            } else if swap_back {
+                moves(&hook_real, &hook_impostor);
+                moves(&hook_held, &hook_real);
+            }
+        }));
+        let raced = ForgeCore::open_sqlite(&real).unwrap_err();
+        *super::OPEN_HOOK.lock() = None;
+        assert!(raced.to_string().starts_with("store_"), "{case}: {raced}");
+        if !swap_back {
+            assert_eq!(
+                pinned(&real),
+                replacement_bytes,
+                "{case}: the replacement's database and WAL are as they were"
+            );
+            moves(&real, &impostor);
+            moves(&held, &real);
+        }
+        assert_eq!(
+            pinned(&impostor),
+            replacement_bytes,
+            "{case}: the replacement's database and WAL are as they were"
+        );
+        let mode: String = Connection::open(&impostor)
+            .expect("raw")
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("mode");
+        assert_eq!(mode, "wal", "{case}: the replacement's mode is unchanged");
+        drop(holder);
+        assert_eq!(
+            std::fs::read(&real).expect("real bytes"),
+            real_bytes,
+            "{case}: the real database is untouched"
+        );
+        ForgeCore::open_sqlite(&real).expect("the real store opens once the race is gone");
+    }
+
+    // The same substitution, with the replacement's `-shm` a symlink to a
+    // sentinel outside the store's directory: SQLite opens its sidecars
+    // without following links, so the open is refused, nothing is written
+    // through the link, and the real store is untouched.
+    let race = private_directory();
+    let outside = private_directory();
+    let real = race.path().join("forge.sqlite");
+    let impostor = race.path().join("impostor.sqlite");
+    let held = race.path().join("held.sqlite");
+    let sentinel = outside.path().join("sentinel");
+    std::fs::write(&sentinel, vec![0x5a_u8; 65_536]).expect("sentinel");
+    drop(ForgeCore::open_sqlite(&real).expect("real"));
+    drop(ForgeCore::open_sqlite(&impostor).expect("impostor"));
+    let mode: String = Connection::open(&impostor)
+        .expect("raw")
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .expect("wal replacement");
+    assert_eq!(mode, "wal");
+    let real_bytes = std::fs::read(&real).expect("real bytes");
+    let (hook_real, hook_impostor, hook_held, hook_sentinel) = (
+        real.clone(),
+        impostor.clone(),
+        held.clone(),
+        sentinel.clone(),
+    );
+    *super::OPEN_HOOK.lock() = Some(Box::new(move |opening, before| {
+        if opening != hook_real.as_path() {
+            return;
+        }
+        let shm = hook_real.with_file_name("forge.sqlite-shm");
+        if before {
+            std::fs::rename(&hook_real, &hook_held).expect("hold the real file");
+            std::fs::rename(&hook_impostor, &hook_real).expect("swap the replacement in");
+            std::os::unix::fs::symlink(&hook_sentinel, &shm).expect("an -shm link out");
+        } else {
+            let _ = std::fs::remove_file(&shm);
+            std::fs::rename(&hook_real, &hook_impostor).expect("swap the replacement out");
+            std::fs::rename(&hook_held, &hook_real).expect("put the real file back");
+        }
+    }));
+    let escaped = ForgeCore::open_sqlite(&real);
+    *super::OPEN_HOOK.lock() = None;
+    assert!(escaped.is_err(), "an open through a linked -shm is refused");
+    assert_eq!(
+        std::fs::read(&sentinel).expect("sentinel"),
+        vec![0x5a_u8; 65_536],
+        "nothing is written through the link"
+    );
+    // The refusal can come before the open's second hook, which swaps back:
+    // then put the real file back here.
+    let shm = real.with_file_name("forge.sqlite-shm");
+    if std::fs::symlink_metadata(&shm).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        std::fs::remove_file(&shm).expect("leftover link");
+    }
+    if held.exists() {
+        std::fs::rename(&real, &impostor).expect("swap the replacement out");
+        std::fs::rename(&held, &real).expect("put the real file back");
+    }
+    assert_eq!(
+        std::fs::read(&real).expect("real bytes"),
+        real_bytes,
+        "the real database is untouched"
+    );
+    ForgeCore::open_sqlite(&real).expect("the real store opens once the race is gone");
 }
 
 /// A holder that is letting go is waited for, not reported as another

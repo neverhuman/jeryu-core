@@ -214,7 +214,19 @@ fn identifiers(names: &str) -> String {
         .join(", ")
 }
 
+/// Drop the staging tables. The store keeps one connection, so staged rows
+/// (account and session data among them) must not outlive the persist that
+/// staged them, and a later persist must start empty.
+pub(super) fn drop_tables(conn: &Connection) -> Result<()> {
+    for table in OWNED_TABLES {
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS temp.\"{}\";", table.name))
+            .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
 pub(super) fn create_tables(conn: &Connection) -> Result<()> {
+    drop_tables(conn)?;
     for table in OWNED_TABLES {
         let name = table.name;
         let columns = identifiers(table.columns);
