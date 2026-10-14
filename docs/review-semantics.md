@@ -75,19 +75,24 @@ acceptance. These commands describe the required checks; they are not receipts.
 
 Core exposes `prepare_merge_override` and `finalize_merge_with_override` as a
 source integration primitive. Existing rules deserialize with
-`allow_merge_override=false` and an empty `merge_override_status_checks` list.
+`allow_merge_override=false` and empty status-context/status-creator allowlists.
 An active repository administrator other than the PR author can prepare a
-10-minute permit only when the branch explicitly opts in, excludes admins,
+10-minute permit only when the branch explicitly opts in,
 and every normal blocker is a failed commit status named in that allowlist.
+The latest failing status must come from an explicitly trusted authenticated CI
+creator; its full row is bound in the permit and recorded in the receipt. An
+active check-run rerun blocks the decision. `enforce_admins` stays independent,
+so the branch can keep force-push/deletion protection enforced for admins.
 Pending/missing checks, independent approvals, standing review holds, CODEOWNERS,
 proof, signed commits, history, draft state and exact-head checks remain binding.
 No installed branch protection is changed by this source change.
 
 The permit binds head, base, actor, reason, full protection and evaluation.
-Finalization rechecks all of them and current grants. SQLite storage is required;
-merge state and the completed audit entry commit in one transaction. Refusal
+Finalization rechecks all of them, the exact status evidence and current grants. SQLite storage is required;
+merge state and the completed audit entry commit in one transaction. Finalization refusal
 records a failed entry and persistence failure restores in-memory state. The
-`caller_passport_hash` audit field records an edge assertion, not a Core-verified
+`asserted_passport_hash` request requires a `passport:<64 lowercase hex>` shape.
+The `caller_passport_hash` audit field records an edge assertion, not a Core-verified
 passport: an integrating authenticated edge must independently validate that
 assertion and Git conflict/ref state, and recover a Git advance if finalization
 fails. This Core PR adds no HTTP bypass route or deployed override capability.

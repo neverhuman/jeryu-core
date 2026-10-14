@@ -12,7 +12,7 @@ pub struct MergeOverrideRequest {
     pub actor: String,
     pub reason: String,
     pub expected_head_sha: String,
-    pub expected_passport_hash: String,
+    pub asserted_passport_hash: String,
 }
 
 /// Opaque authorization bound to one PR and its core gate snapshot. Callers
@@ -28,6 +28,7 @@ pub struct MergeOverridePermit {
     pub(super) base_sha: String,
     pub(super) passport_hash: String,
     pub(super) expires_at: i64,
+    pub(super) status_evidence: Vec<CommitStatus>,
     pub(super) evaluation: crate::BranchProtectionEvaluation,
     pub(super) protection: BranchProtectionRule,
 }
@@ -44,6 +45,7 @@ impl MergeOverridePermit {
             "head_sha": self.head_sha,
             "caller_passport_hash": self.passport_hash,
             "blockers": self.evaluation.blockers,
+            "status_evidence": self.status_evidence,
             "merge_sha": merge_sha,
         })
     }
@@ -70,10 +72,9 @@ pub(super) fn validate_override(state: &super::State, pr: &PullRequest, actor: &
         pr.repo.clone(),
         pr.base.ref_name.clone(),
     ));
-    if protection.is_none_or(|rule| rule.enforce_admins || !rule.allow_merge_override) {
+    if protection.is_none_or(|rule| !rule.allow_merge_override) {
         return Err(ForgeError::Forbidden(
-            "merge override requires explicit allow_merge_override=true and enforce_admins=false"
-                .to_string(),
+            "merge override requires explicit allow_merge_override=true".to_string(),
         ));
     }
     if actor == pr.author {
@@ -103,33 +104,47 @@ pub(super) fn validate_override_evaluation(
     pr: &PullRequest,
     protection: &BranchProtectionRule,
     evaluation: &crate::BranchProtectionEvaluation,
-) -> Result<()> {
+) -> Result<Vec<CommitStatus>> {
+    let mut evidence = Vec::new();
     for blocker in &evaluation.blockers {
-        let allowed = if let crate::MergeBlocker::FailedStatusCheck { context } = blocker {
-            protection.merge_override_status_checks.contains(context)
-                && state
-                    .statuses
-                    .get(&(pr.owner.clone(), pr.repo.clone(), pr.head.sha.clone()))
-                    .into_iter()
-                    .flatten()
-                    .filter(|status| status.context == *context)
-                    .max_by_key(|status| status.updated_at)
-                    .is_some_and(|status| {
-                        matches!(
-                            status.state,
-                            CommitStatusState::Failure | CommitStatusState::Error
-                        )
-                    })
-        } else {
-            false
-        };
-        if !allowed {
-            return Err(ForgeError::BranchProtection(format!(
-                "override cannot clear {blocker:?}"
-            )));
+        if let crate::MergeBlocker::FailedStatusCheck { context } = blocker {
+            let status = state
+                .statuses
+                .get(&(pr.owner.clone(), pr.repo.clone(), pr.head.sha.clone()))
+                .into_iter()
+                .flatten()
+                .filter(|status| status.context == *context)
+                .max_by_key(|status| status.updated_at);
+            let running = state
+                .check_runs
+                .get(&(pr.owner.clone(), pr.repo.clone()))
+                .into_iter()
+                .flatten()
+                .any(|run| {
+                    run.head_sha == pr.head.sha
+                        && run.name == *context
+                        && run.status != CheckRunStatus::Completed
+                });
+            if protection.merge_override_status_checks.contains(context)
+                && !running
+                && let Some(status) = status
+                && protection
+                    .merge_override_status_creators
+                    .contains(&status.creator)
+                && matches!(
+                    status.state,
+                    CommitStatusState::Failure | CommitStatusState::Error
+                )
+            {
+                evidence.push(status.clone());
+                continue;
+            }
         }
+        return Err(ForgeError::BranchProtection(format!(
+            "override cannot clear {blocker:?}"
+        )));
     }
-    Ok(())
+    Ok(evidence)
 }
 
 impl ForgeCore {
@@ -150,7 +165,17 @@ impl ForgeCore {
                 "merge override requires durable audit storage".into(),
             ));
         }
-        if request.reason.trim().is_empty() || request.expected_passport_hash.trim().is_empty() {
+        if request.reason.trim().is_empty()
+            || !request
+                .asserted_passport_hash
+                .strip_prefix("passport:")
+                .is_some_and(|hash| {
+                    hash.len() == 64
+                        && hash
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+        {
             return Err(ForgeError::Validation(
                 "merge override requires a reason and caller passport assertion".to_string(),
             ));
@@ -173,10 +198,10 @@ impl ForgeCore {
                 repo.to_string(),
                 pr.base.ref_name.clone(),
             ))
-            .expect("validated protection")
+            .ok_or_else(|| ForgeError::Conflict("override protection disappeared".into()))?
             .clone();
         let evaluation = evaluate_locked(&state, pr, Some(&pr.head.sha));
-        validate_override_evaluation(&state, pr, &protection, &evaluation)?;
+        let status_evidence = validate_override_evaluation(&state, pr, &protection, &evaluation)?;
         let permit = MergeOverridePermit {
             owner: owner.to_string(),
             repo: repo.to_string(),
@@ -185,18 +210,12 @@ impl ForgeCore {
             reason: request.reason.trim().to_string(),
             head_sha: pr.head.sha.clone(),
             base_sha: pr.base.sha.clone(),
-            passport_hash: request.expected_passport_hash,
+            passport_hash: request.asserted_passport_hash,
             expires_at: Utc::now().timestamp() + 600,
+            status_evidence,
             evaluation,
             protection,
         };
-        self.append_audit_as(
-            &permit.actor,
-            "pull.merge_override",
-            &permit.subject(),
-            "requested",
-            permit.audit_detail(None),
-        )?;
         let ready = MergeReadiness::Ready {
             base_ref: pr.base.ref_name.clone(),
             base_sha: pr.base.sha.clone(),
@@ -204,6 +223,14 @@ impl ForgeCore {
             head_sha: pr.head.sha.clone(),
             require_linear_history: permit.protection.required_linear_history,
         };
+        drop(state);
+        self.append_audit_as(
+            &permit.actor,
+            "pull.merge_override",
+            &permit.subject(),
+            "requested",
+            permit.audit_detail(None),
+        )?;
         Ok((ready, permit))
     }
 }

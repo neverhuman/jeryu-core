@@ -455,6 +455,11 @@ impl ForgeCore {
             }
         };
         if pr_snapshot.merged {
+            if override_permit.is_some() {
+                return Err(ForgeError::Conflict(
+                    "override target already merged".into(),
+                ));
+            }
             return Ok(MergeResult {
                 sha: match pr_snapshot.merge_commit_sha.clone() {
                     Some(sha) => sha,
@@ -477,7 +482,17 @@ impl ForgeCore {
             if Utc::now().timestamp() > permit.expires_at {
                 return Err(ForgeError::Conflict("merge override permit expired".into()));
             }
-            validate_override_evaluation(&state, &pr_snapshot, &permit.protection, &evaluation)?;
+            let evidence = validate_override_evaluation(
+                &state,
+                &pr_snapshot,
+                &permit.protection,
+                &evaluation,
+            )?;
+            if evidence != permit.status_evidence {
+                return Err(ForgeError::Conflict(
+                    "override status evidence changed".into(),
+                ));
+            }
             if pr_snapshot.head.sha != permit.head_sha
                 || pr_snapshot.base.sha != permit.base_sha
                 || evaluation != permit.evaluation

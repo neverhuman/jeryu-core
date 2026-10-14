@@ -22,6 +22,9 @@ pub struct BranchProtectionRule {
     /// Exact failed status contexts eligible for an audited decision. Empty denies all.
     #[serde(default)]
     pub merge_override_status_checks: Vec<String>,
+    /// Authenticated CI status creators trusted for those contexts. Empty denies all.
+    #[serde(default)]
+    pub merge_override_status_creators: Vec<String>,
     pub required_linear_history: bool,
     pub allow_force_pushes: bool,
     pub allow_deletions: bool,
@@ -46,6 +49,9 @@ pub struct SetBranchProtectionRequest {
     /// Exact failed status contexts eligible for an audited decision. Empty denies all.
     #[serde(default)]
     pub merge_override_status_checks: Vec<String>,
+    /// Authenticated CI status creators trusted for those contexts. Empty denies all.
+    #[serde(default)]
+    pub merge_override_status_creators: Vec<String>,
     #[serde(default)]
     pub strict: bool,
     #[serde(default)]

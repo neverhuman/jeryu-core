@@ -58,6 +58,7 @@ mod tests {
             required_approving_review_count: 1,
             allow_merge_override: false,
             merge_override_status_checks: Vec::new(),
+            merge_override_status_creators: Vec::new(),
             enforce_admins: true,
             required_linear_history: true,
             allow_force_pushes: false,

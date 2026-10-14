@@ -84,6 +84,7 @@ fn protection(core: &ForgeCore, enforce_admins: bool) {
             enforce_admins,
             allow_merge_override: true,
             merge_override_status_checks: vec!["ratchet".into()],
+            merge_override_status_creators: vec!["reviewer".into()],
             required_linear_history: false,
             allow_force_pushes: false,
             allow_deletions: false,
@@ -99,7 +100,7 @@ fn decision(actor: &str) -> MergeOverrideRequest {
         actor: actor.into(),
         reason: "Owner decision: accept the ratchet floor of 92".into(),
         expected_head_sha: "exact-head".into(),
-        expected_passport_hash: "passport:exact-gate".into(),
+        asserted_passport_hash: format!("passport:{}", "a".repeat(64)),
     }
 }
 
@@ -160,7 +161,7 @@ fn merge_override_records_exact_decision_and_blockers_durably() {
     assert_eq!(audit[1].detail["head_sha"], pr.head.sha);
     assert_eq!(
         audit[1].detail["caller_passport_hash"],
-        "passport:exact-gate"
+        decision("alice").asserted_passport_hash
     );
     assert_eq!(audit[1].detail["reason"], decision("alice").reason);
     assert_eq!(audit[1].detail["merge_sha"], "real-git-merge");
@@ -184,7 +185,7 @@ fn merge_override_requires_active_admin_reason_protection_and_exact_head() {
         let mut request = decision("alice");
         match field {
             "reason" => request.reason = " \n ".into(),
-            "passport" => request.expected_passport_hash.clear(),
+            "passport" => request.asserted_passport_hash.clear(),
             _ => request.expected_head_sha = "another-head".into(),
         }
         assert!(
@@ -195,7 +196,7 @@ fn merge_override_requires_active_admin_reason_protection_and_exact_head() {
     protection(&core, true);
     assert!(
         core.prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
-            .is_err()
+            .is_ok()
     );
     protection(&core, false);
     core.lock_account("alice").unwrap();
@@ -465,6 +466,7 @@ fn merge_override_cannot_clear_missing_reviews_unlisted_or_pending_contexts() {
                     required_approving_review_count: rule.required_approving_review_count,
                     allow_merge_override: true,
                     merge_override_status_checks: rule.merge_override_status_checks,
+                    merge_override_status_creators: rule.merge_override_status_creators,
                     ..Default::default()
                 },
             )
@@ -472,6 +474,66 @@ fn merge_override_cannot_clear_missing_reviews_unlisted_or_pending_contexts() {
         }
         assert!(
             core.prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+                .is_err(),
+            "{refusal}"
+        );
+        assert!(
+            !core
+                .get_pull_request("alice", "jeryu", pr.number)
+                .unwrap()
+                .merged
+        );
+    }
+}
+
+#[test]
+fn merge_override_requires_trusted_status_evidence_and_no_active_rerun() {
+    for refusal in ["forged", "running", "changed"] {
+        let (_dir, core) = durable_core();
+        let pr = fixture(&core);
+        let permit = core
+            .prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+            .unwrap()
+            .1;
+        if refusal == "running" {
+            core.create_check_run(
+                "alice",
+                "jeryu",
+                CreateCheckRunRequest {
+                    name: "ratchet".into(),
+                    head_sha: pr.head.sha.clone(),
+                    status: Some(CheckRunStatus::InProgress),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        } else {
+            core.create_commit_status(
+                "alice",
+                "jeryu",
+                &pr.head.sha,
+                if refusal == "forged" {
+                    "contributor"
+                } else {
+                    "reviewer"
+                },
+                CreateCommitStatusRequest {
+                    state: CommitStatusState::Failure,
+                    context: "ratchet".into(),
+                    description: Some("new status row".into()),
+                    target_url: None,
+                },
+            )
+            .unwrap();
+        }
+        if refusal != "changed" {
+            assert!(
+                core.prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+                    .is_err()
+            );
+        }
+        assert!(
+            core.finalize_merge_with_override(permit, "real-merge".into())
                 .is_err(),
             "{refusal}"
         );
