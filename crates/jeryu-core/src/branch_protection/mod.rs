@@ -56,6 +56,8 @@ mod tests {
             required_status_checks: vec!["ci/fast".to_string()],
             strict: false,
             required_approving_review_count: 1,
+            allow_merge_override: false,
+            merge_override_status_checks: Vec::new(),
             enforce_admins: true,
             required_linear_history: true,
             allow_force_pushes: false,

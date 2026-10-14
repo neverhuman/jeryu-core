@@ -35,6 +35,7 @@ mod commit_status;
 mod deployments;
 mod issues;
 mod jankurai;
+mod merge_overrides;
 mod organizations;
 #[cfg(test)]
 mod organizations_tests;
@@ -131,6 +132,8 @@ fn default_branch_protection_rule(owner: &str, repo: &str, branch: &str) -> Bran
         required_status_checks: Vec::new(),
         strict: false,
         required_approving_review_count: 0,
+        allow_merge_override: false,
+        merge_override_status_checks: Vec::new(),
         enforce_admins: false,
         required_linear_history: true,
         allow_force_pushes: false,
@@ -457,6 +460,15 @@ fn evaluate_locked(
     pr: &PullRequest,
     requested_sha: Option<&str>,
 ) -> BranchProtectionEvaluation {
+    evaluate_locked_with_actor(state, pr, requested_sha, false)
+}
+
+fn evaluate_locked_with_actor(
+    state: &State,
+    pr: &PullRequest,
+    requested_sha: Option<&str>,
+    actor_is_admin: bool,
+) -> BranchProtectionEvaluation {
     use crate::branch_protection::evaluate_branch_protection_with;
 
     let protection = state.branch_protections.get(&(
@@ -490,8 +502,9 @@ fn evaluate_locked(
     let codeowners = state.codeowners.get(&(pr.owner.clone(), pr.repo.clone()));
     let context = EvaluationContext {
         codeowners: codeowners.map(String::as_str),
-        actor_is_admin: false,
-        jankurai_proof_mandatory: audit_merge_enforced(),
+        actor_is_admin,
+        jankurai_proof_mandatory: audit_merge_enforced()
+            || (actor_is_admin && protection.is_some_and(|rule| rule.require_jankurai_proof)),
     };
     evaluate_branch_protection_with(
         pr,

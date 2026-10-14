@@ -27,6 +27,8 @@ impl ForgeCore {
             required_status_checks: request.required_status_checks,
             strict: request.strict,
             required_approving_review_count: request.required_approving_review_count,
+            allow_merge_override: request.allow_merge_override,
+            merge_override_status_checks: request.merge_override_status_checks,
             enforce_admins: request.enforce_admins,
             required_linear_history: request.required_linear_history,
             allow_force_pushes: request.allow_force_pushes,

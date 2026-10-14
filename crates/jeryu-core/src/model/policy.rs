@@ -16,6 +16,12 @@ pub struct BranchProtectionRule {
     pub strict: bool,
     pub required_approving_review_count: u64,
     pub enforce_admins: bool,
+    /// Explicit opt-in for independently recorded administrator decisions.
+    #[serde(default)]
+    pub allow_merge_override: bool,
+    /// Exact failed status contexts eligible for an audited decision. Empty denies all.
+    #[serde(default)]
+    pub merge_override_status_checks: Vec<String>,
     pub required_linear_history: bool,
     pub allow_force_pushes: bool,
     pub allow_deletions: bool,
@@ -34,6 +40,12 @@ pub struct SetBranchProtectionRequest {
     pub required_status_checks: Vec<String>,
     pub required_approving_review_count: u64,
     pub enforce_admins: bool,
+    /// Explicit opt-in for independently recorded administrator decisions.
+    #[serde(default)]
+    pub allow_merge_override: bool,
+    /// Exact failed status contexts eligible for an audited decision. Empty denies all.
+    #[serde(default)]
+    pub merge_override_status_checks: Vec<String>,
     #[serde(default)]
     pub strict: bool,
     #[serde(default)]

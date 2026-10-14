@@ -139,6 +139,8 @@ fn set_and_get_branch_protection_roundtrips() {
                 required_status_checks: vec!["ci/fast".to_string(), "ci/slow".to_string()],
                 strict: true,
                 required_approving_review_count: 2,
+                allow_merge_override: false,
+                merge_override_status_checks: Vec::new(),
                 enforce_admins: true,
                 required_linear_history: true,
                 allow_force_pushes: false,
@@ -789,6 +791,8 @@ fn enforce_admins_off_lets_admin_bypass_ref_ops() {
         "jeryu",
         "main",
         SetBranchProtectionRequest {
+            allow_merge_override: false,
+            merge_override_status_checks: Vec::new(),
             enforce_admins: false,
             allow_force_pushes: false,
             allow_deletions: false,
@@ -811,6 +815,8 @@ fn enforce_admins_on_binds_admin_to_ref_ops() {
         "jeryu",
         "main",
         SetBranchProtectionRequest {
+            allow_merge_override: false,
+            merge_override_status_checks: Vec::new(),
             enforce_admins: true,
             allow_force_pushes: false,
             allow_deletions: false,

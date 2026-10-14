@@ -1,9 +1,17 @@
 use super::*;
 
+fn durable_core() -> (tempfile::TempDir, ForgeCore) {
+    let dir = tempfile::tempdir().unwrap();
+    let core = ForgeCore::open_sqlite(dir.path().join("forge.sqlite")).unwrap();
+    (dir, core)
+}
+
 fn fixture(core: &ForgeCore) -> PullRequest {
     core.create_account("alice", "alice-password-1", UserRole::Admin)
         .unwrap();
     core.create_account("reviewer", "reviewer-password-1", UserRole::User)
+        .unwrap();
+    core.create_account("author", "author-password-1", UserRole::User)
         .unwrap();
     core.create_repository(
         "alice",
@@ -20,7 +28,7 @@ fn fixture(core: &ForgeCore) -> PullRequest {
         .create_pull_request(
             "alice",
             "jeryu",
-            "reviewer",
+            "author",
             CreatePullRequestRequest {
                 title: "Accept ratchet decision".into(),
                 body: None,
@@ -41,8 +49,8 @@ fn fixture(core: &ForgeCore) -> PullRequest {
         pr.number,
         "reviewer",
         CreateReviewRequest {
-            body: Some("Needs an owner decision".into()),
-            event: ReviewState::ChangesRequested,
+            body: Some("Independent source approval".into()),
+            event: ReviewState::Approved,
             comments: vec![],
             expected_head_sha: Some(pr.head.sha.clone()),
         },
@@ -74,6 +82,8 @@ fn protection(core: &ForgeCore, enforce_admins: bool) {
             strict: false,
             required_approving_review_count: 1,
             enforce_admins,
+            allow_merge_override: true,
+            merge_override_status_checks: vec!["ratchet".into()],
             required_linear_history: false,
             allow_force_pushes: false,
             allow_deletions: false,
@@ -110,7 +120,7 @@ fn merge_override_records_exact_decision_and_blockers_durably() {
             .any(|blocker| matches!(blocker, crate::MergeBlocker::FailedStatusCheck { .. }))
     );
     assert!(
-        before
+        !before
             .blockers
             .iter()
             .any(|blocker| matches!(blocker, crate::MergeBlocker::ChangesRequested { .. }))
@@ -148,7 +158,10 @@ fn merge_override_records_exact_decision_and_blockers_durably() {
     assert_eq!(audit[1].actor, "alice");
     assert_eq!(audit[1].action, "pull.merge_override");
     assert_eq!(audit[1].detail["head_sha"], pr.head.sha);
-    assert_eq!(audit[1].detail["passport_hash"], "passport:exact-gate");
+    assert_eq!(
+        audit[1].detail["caller_passport_hash"],
+        "passport:exact-gate"
+    );
     assert_eq!(audit[1].detail["reason"], decision("alice").reason);
     assert_eq!(audit[1].detail["merge_sha"], "real-git-merge");
     assert_eq!(
@@ -159,7 +172,7 @@ fn merge_override_records_exact_decision_and_blockers_durably() {
 
 #[test]
 fn merge_override_requires_active_admin_reason_protection_and_exact_head() {
-    let core = ForgeCore::new();
+    let (_dir, core) = durable_core();
     let pr = fixture(&core);
     for actor in ["reviewer", "unknown"] {
         assert!(
@@ -195,7 +208,7 @@ fn merge_override_requires_active_admin_reason_protection_and_exact_head() {
 #[test]
 fn merge_override_rechecks_policy_and_grants_at_finalize() {
     for mutation in ["rule", "grant", "check", "head", "draft", "closed"] {
-        let core = ForgeCore::new();
+        let (_dir, core) = durable_core();
         let pr = fixture(&core);
         core.grant_repo_access(
             "alice",
@@ -258,7 +271,7 @@ fn merge_override_rechecks_policy_and_grants_at_finalize() {
 
 #[test]
 fn merge_override_accepts_repository_admin_without_global_admin_role() {
-    let core = ForgeCore::new();
+    let (_dir, core) = durable_core();
     let pr = fixture(&core);
     core.grant_repo_access(
         "alice",
@@ -276,4 +289,197 @@ fn merge_override_accepts_repository_admin_without_global_admin_role() {
             .unwrap()
             .merged
     );
+}
+
+#[test]
+fn merge_override_preserves_review_and_proof_gates_and_requires_opt_in() {
+    for missing in ["review", "proof", "opt_in", "self_author"] {
+        let (_dir, core) = durable_core();
+        let pr = fixture(&core);
+        if missing == "review" {
+            core.create_review(
+                "alice",
+                "jeryu",
+                pr.number,
+                "reviewer",
+                CreateReviewRequest {
+                    body: Some("Unresolved defect".into()),
+                    event: ReviewState::ChangesRequested,
+                    comments: vec![],
+                    expected_head_sha: Some(pr.head.sha.clone()),
+                },
+            )
+            .unwrap();
+        } else if missing == "self_author" {
+            core.grant_repo_access("alice", "author", "alice", "jeryu", RepoAccessLevel::Admin)
+                .unwrap();
+        } else {
+            let mut state = core.state.write();
+            let rule = state
+                .branch_protections
+                .get_mut(&("alice".into(), "jeryu".into(), "main".into()))
+                .unwrap();
+            if missing == "proof" {
+                rule.require_jankurai_proof = true;
+            } else {
+                rule.allow_merge_override = false;
+            }
+        }
+        let actor = if missing == "self_author" {
+            "author"
+        } else {
+            "alice"
+        };
+        assert!(
+            core.prepare_merge_override("alice", "jeryu", pr.number, decision(actor))
+                .is_err(),
+            "{missing}"
+        );
+        assert!(
+            !core
+                .get_pull_request("alice", "jeryu", pr.number)
+                .unwrap()
+                .merged
+        );
+    }
+}
+
+#[test]
+fn merge_override_requires_a_durable_store() {
+    let core = ForgeCore::new();
+    let pr = fixture(&core);
+    let error = core
+        .prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+        .unwrap_err();
+    assert!(error.to_string().contains("durable audit storage"));
+}
+
+#[test]
+fn merge_override_completion_and_state_commit_atomically() {
+    let (dir, core) = durable_core();
+    let pr = fixture(&core);
+    let (_, permit) = core
+        .prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+        .unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite")).unwrap();
+    conn.execute_batch("CREATE TRIGGER reject_override_completion BEFORE INSERT ON forge_audit_log WHEN NEW.phase = 'completed' BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END;").unwrap();
+    assert!(
+        core.finalize_merge_with_override(permit, "real-merge".into())
+            .is_err()
+    );
+    assert!(
+        !core
+            .get_pull_request("alice", "jeryu", pr.number)
+            .unwrap()
+            .merged
+    );
+    let audit = core
+        .list_audit(&format!("alice/jeryu#{}", pr.number))
+        .unwrap();
+    assert_eq!(
+        audit
+            .iter()
+            .map(|row| row.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec!["requested", "failed"]
+    );
+    drop(core);
+    let reopened = ForgeCore::open_sqlite(dir.path().join("forge.sqlite")).unwrap();
+    assert!(
+        !reopened
+            .get_pull_request("alice", "jeryu", pr.number)
+            .unwrap()
+            .merged
+    );
+    conn.execute_batch("DROP TRIGGER reject_override_completion;")
+        .unwrap();
+    let (_, permit) = reopened
+        .prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+        .unwrap();
+    assert!(
+        reopened
+            .finalize_merge_with_override(permit, "real-merge".into())
+            .unwrap()
+            .merged
+    );
+}
+
+#[test]
+fn merge_override_refusal_records_failed_and_expired_permits_do_not_merge() {
+    let (_dir, core) = durable_core();
+    let pr = fixture(&core);
+    let (_, mut permit) = core
+        .prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+        .unwrap();
+    permit.expires_at = 0;
+    assert!(
+        core.finalize_merge_with_override(permit, "real-merge".into())
+            .is_err()
+    );
+    let rows = core
+        .list_audit(&format!("alice/jeryu#{}", pr.number))
+        .unwrap();
+    assert_eq!(rows.last().unwrap().phase, "failed");
+    assert!(
+        !core
+            .get_pull_request("alice", "jeryu", pr.number)
+            .unwrap()
+            .merged
+    );
+}
+
+#[test]
+fn merge_override_cannot_clear_missing_reviews_unlisted_or_pending_contexts() {
+    for refusal in ["unlisted", "pending", "review"] {
+        let (_dir, core) = durable_core();
+        let pr = fixture(&core);
+        if refusal == "pending" {
+            core.create_commit_status(
+                "alice",
+                "jeryu",
+                &pr.head.sha,
+                "reviewer",
+                CreateCommitStatusRequest {
+                    state: CommitStatusState::Pending,
+                    context: "ratchet".into(),
+                    description: None,
+                    target_url: None,
+                },
+            )
+            .unwrap();
+        } else {
+            let mut rule = core
+                .get_branch_protection("alice", "jeryu", "main")
+                .unwrap();
+            if refusal == "unlisted" {
+                rule.merge_override_status_checks.clear();
+            } else {
+                rule.required_approving_review_count = 2;
+            }
+            core.set_branch_protection(
+                "alice",
+                "jeryu",
+                "main",
+                SetBranchProtectionRequest {
+                    required_status_checks: rule.required_status_checks,
+                    required_approving_review_count: rule.required_approving_review_count,
+                    allow_merge_override: true,
+                    merge_override_status_checks: rule.merge_override_status_checks,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        assert!(
+            core.prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+                .is_err(),
+            "{refusal}"
+        );
+        assert!(
+            !core
+                .get_pull_request("alice", "jeryu", pr.number)
+                .unwrap()
+                .merged
+        );
+    }
 }

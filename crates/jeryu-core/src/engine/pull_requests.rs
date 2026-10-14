@@ -4,10 +4,13 @@ use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
 
+pub use super::merge_overrides::{MergeOverridePermit, MergeOverrideRequest};
+use super::merge_overrides::{validate_override, validate_override_evaluation};
 use super::{
     ForgeCore, apply_evaluation, emit_event_locked, evaluate_locked, next_record_number,
     require_name,
 };
+use crate::AuditEntry;
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
 use crate::webhooks::event_payload;
@@ -54,156 +57,7 @@ pub enum MergeReadiness {
     },
 }
 
-/// Explicit decision supplied by an authenticated API edge. The edge owns
-/// passport evaluation and must validate this hash against its current detail.
-#[derive(Debug, Clone)]
-pub struct MergeOverrideRequest {
-    pub actor: String,
-    pub reason: String,
-    pub expected_head_sha: String,
-    pub expected_passport_hash: String,
-}
-
-/// Opaque authorization bound to one PR and its core gate snapshot. Callers
-/// cannot construct a permit or alter its recorded actor, reason or blockers.
-#[derive(Debug)]
-pub struct MergeOverridePermit {
-    owner: String,
-    repo: String,
-    number: u64,
-    actor: String,
-    reason: String,
-    head_sha: String,
-    base_sha: String,
-    passport_hash: String,
-    evaluation: crate::BranchProtectionEvaluation,
-    protection: BranchProtectionRule,
-}
-
-impl MergeOverridePermit {
-    fn subject(&self) -> String {
-        format!("{}/{}#{}", self.owner, self.repo, self.number)
-    }
-
-    fn audit_detail(&self, merge_sha: Option<&str>) -> serde_json::Value {
-        json!({
-            "pr_number": self.number,
-            "reason": self.reason,
-            "head_sha": self.head_sha,
-            "passport_hash": self.passport_hash,
-            "blockers": self.evaluation.blockers,
-            "merge_sha": merge_sha,
-        })
-    }
-}
-
-fn validate_override(state: &super::State, pr: &PullRequest, actor: &str) -> Result<()> {
-    let active = state
-        .accounts
-        .get(actor)
-        .filter(|account| account.status.permits_authentication());
-    let admin = active.is_some_and(|account| account.role == UserRole::Admin)
-        || (active.is_some()
-            && state
-                .repo_grants
-                .get(&(actor.to_string(), pr.owner.clone(), pr.repo.clone()))
-                .is_some_and(|grant| grant.access.allows_admin()));
-    if !admin {
-        return Err(ForgeError::Forbidden(
-            "merge override requires an active repository administrator".to_string(),
-        ));
-    }
-    let protection = state.branch_protections.get(&(
-        pr.owner.clone(),
-        pr.repo.clone(),
-        pr.base.ref_name.clone(),
-    ));
-    if protection.is_none_or(|rule| rule.enforce_admins) {
-        return Err(ForgeError::Forbidden(
-            "merge override requires enforce_admins=false on the protected base".to_string(),
-        ));
-    }
-    if pr.draft
-        || matches!(
-            pr.state,
-            PullRequestState::Closed | PullRequestState::Merged
-        )
-        || pr.merged
-    {
-        return Err(ForgeError::Validation(
-            "merge override requires an open pull request ready for review".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 impl ForgeCore {
-    /// Prepare the first phase of an explicit owner decision. Policy blockers,
-    /// including requested changes and a failing score, remain visible in the
-    /// ordinary evaluation. Drafts, head drift and Git conflicts remain barred.
-    /// A requested audit receipt must persist before Git can be touched.
-    pub fn prepare_merge_override(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-        request: MergeOverrideRequest,
-    ) -> Result<(MergeReadiness, MergeOverridePermit)> {
-        self.ensure_repository_writable(owner, repo)?;
-        if request.reason.trim().is_empty() || request.expected_passport_hash.trim().is_empty() {
-            return Err(ForgeError::Validation(
-                "merge override requires a typed reason and exact passport hash".to_string(),
-            ));
-        }
-        let state = self.state.read();
-        let pr = state
-            .pulls
-            .get(&(owner.to_string(), repo.to_string(), number))
-            .ok_or_else(|| ForgeError::NotFound(format!("pull request {owner}/{repo}#{number}")))?;
-        validate_override(&state, pr, &request.actor)?;
-        if request.expected_head_sha != pr.head.sha {
-            return Err(ForgeError::Conflict(
-                "merge override head changed; refresh before deciding".to_string(),
-            ));
-        }
-        let protection = state
-            .branch_protections
-            .get(&(
-                owner.to_string(),
-                repo.to_string(),
-                pr.base.ref_name.clone(),
-            ))
-            .expect("validated protection")
-            .clone();
-        let permit = MergeOverridePermit {
-            owner: owner.to_string(),
-            repo: repo.to_string(),
-            number,
-            actor: request.actor,
-            reason: request.reason.trim().to_string(),
-            head_sha: pr.head.sha.clone(),
-            base_sha: pr.base.sha.clone(),
-            passport_hash: request.expected_passport_hash,
-            evaluation: evaluate_locked(&state, pr, Some(&pr.head.sha)),
-            protection,
-        };
-        self.append_audit_as(
-            &permit.actor,
-            "pull.merge_override",
-            &permit.subject(),
-            "requested",
-            permit.audit_detail(None),
-        )?;
-        let ready = MergeReadiness::Ready {
-            base_ref: pr.base.ref_name.clone(),
-            base_sha: pr.base.sha.clone(),
-            head_ref: pr.head.ref_name.clone(),
-            head_sha: pr.head.sha.clone(),
-            require_linear_history: permit.protection.required_linear_history,
-        };
-        Ok((ready, permit))
-    }
-
     pub fn create_pull_request(
         &self,
         owner: &str,
@@ -556,18 +410,30 @@ impl ForgeCore {
         permit: MergeOverridePermit,
         merge_sha: String,
     ) -> Result<MergeResult> {
-        self.finalize_merge_checked(
+        let result = self.finalize_merge_checked(
             &permit.owner,
             &permit.repo,
             permit.number,
             merge_sha,
             Some(&permit.head_sha),
             Some(&permit),
-        )
+        );
+        if let Err(error) = &result {
+            let mut detail = permit.audit_detail(None);
+            detail["error"] = serde_json::Value::String(error.to_string());
+            self.append_audit_as(
+                &permit.actor,
+                "pull.merge_override",
+                &permit.subject(),
+                "failed",
+                detail,
+            )?;
+        }
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn finalize_merge_checked(
+    pub(super) fn finalize_merge_checked(
         &self,
         owner: &str,
         repo: &str,
@@ -608,6 +474,10 @@ impl ForgeCore {
         let evaluation = evaluate_locked(&state, &pr_snapshot, requested_sha);
         if let Some(permit) = override_permit {
             validate_override(&state, &pr_snapshot, &permit.actor)?;
+            if Utc::now().timestamp() > permit.expires_at {
+                return Err(ForgeError::Conflict("merge override permit expired".into()));
+            }
+            validate_override_evaluation(&state, &pr_snapshot, &permit.protection, &evaluation)?;
             if pr_snapshot.head.sha != permit.head_sha
                 || pr_snapshot.base.sha != permit.base_sha
                 || evaluation != permit.evaluation
@@ -652,15 +522,29 @@ impl ForgeCore {
             "pull_request",
             event_payload("closed", "pull_request", json!(pr)),
         );
-        self.persist_after_mutation(&mut state, previous)?;
         if let Some(permit) = override_permit {
-            self.append_audit_as(
-                &permit.actor,
-                "pull.merge_override",
-                &permit.subject(),
-                "completed",
-                permit.audit_detail(Some(&merge_sha)),
-            )?;
+            let entry = AuditEntry {
+                id: Uuid::new_v4().to_string(),
+                occurred_at: Utc::now().to_rfc3339(),
+                actor: permit.actor.clone(),
+                action: "pull.merge_override".into(),
+                subject: permit.subject(),
+                phase: "completed".into(),
+                detail: permit.audit_detail(Some(&merge_sha)),
+            };
+            let persisted = self
+                .storage
+                .as_ref()
+                .ok_or_else(|| {
+                    ForgeError::Validation("merge override requires durable audit storage".into())
+                })
+                .and_then(|storage| storage.persist_with_audit(&state, &entry));
+            if let Err(error) = persisted {
+                *state = previous;
+                return Err(error);
+            }
+        } else {
+            self.persist_after_mutation(&mut state, previous)?;
         }
         Ok(MergeResult {
             sha: merge_sha,

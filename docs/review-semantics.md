@@ -70,3 +70,28 @@ jankurai migrate . --analyze --out target/jankurai/migration-report.json
 
 The full governed fast, check, score and security lanes remain required before
 acceptance. These commands describe the required checks; they are not receipts.
+
+## Audited merge decisions
+
+Core exposes `prepare_merge_override` and `finalize_merge_with_override` as a
+source integration primitive. Existing rules deserialize with
+`allow_merge_override=false` and an empty `merge_override_status_checks` list.
+An active repository administrator other than the PR author can prepare a
+10-minute permit only when the branch explicitly opts in, excludes admins,
+and every normal blocker is a failed commit status named in that allowlist.
+Pending/missing checks, independent approvals, standing review holds, CODEOWNERS,
+proof, signed commits, history, draft state and exact-head checks remain binding.
+No installed branch protection is changed by this source change.
+
+The permit binds head, base, actor, reason, full protection and evaluation.
+Finalization rechecks all of them and current grants. SQLite storage is required;
+merge state and the completed audit entry commit in one transaction. Refusal
+records a failed entry and persistence failure restores in-memory state. The
+`caller_passport_hash` audit field records an edge assertion, not a Core-verified
+passport: an integrating authenticated edge must independently validate that
+assertion and Git conflict/ref state, and recover a Git advance if finalization
+fails. This Core PR adds no HTTP bypass route or deployed override capability.
+
+Run `cargo test --locked --offline -p jeryu-core merge_override` for the focused
+receipt, expiry, rollback, opt-in, pending-check and review-gate regressions.
+The full Core suite remains required before this cut is consumed.

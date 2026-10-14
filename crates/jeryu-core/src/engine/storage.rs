@@ -542,6 +542,22 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Commit the merge snapshot and completed audit receipt in one transaction.
+    pub(super) fn persist_with_audit(&self, state: &State, entry: &AuditEntry) -> Result<()> {
+        let mut conn = self.connect()?;
+        conn.execute_batch("PRAGMA temp_store = MEMORY;")
+            .map_err(storage_error)?;
+        let tx = conn.transaction().map_err(storage_error)?;
+        snapshot::create_tables(&tx)?;
+        stage_state(&tx, state)?;
+        snapshot::apply(&tx)?;
+        tx.execute("INSERT INTO forge_audit_log (id, occurred_at, actor, action, subject, phase, detail_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![entry.id, entry.occurred_at, entry.actor, entry.action, entry.subject, entry.phase, json(&entry.detail)?]).map_err(storage_error)?;
+        snapshot::drop_tables(&tx)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(())
+    }
+
     /// Append one audit receipt through the store's connection.
     ///
     /// `forge_audit_log` is outside the explicitly State-owned table set. Its
