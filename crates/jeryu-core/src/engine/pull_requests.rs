@@ -316,6 +316,100 @@ impl ForgeCore {
         Ok(updated)
     }
 
+    /// Record `base_sha` as the base of open pull request `number`, whose head
+    /// is still `head_sha`. The base is otherwise the tip seen when the pull
+    /// request was opened, so after the author rebases onto a newer base its
+    /// diff, and every review of that diff, would include commits that are
+    /// already on the base.
+    ///
+    /// Core holds no git objects, so it cannot compute or check a merge base:
+    /// the caller passes the merge base of `head_sha` with the base branch,
+    /// computed from the repository (`jeryu_gitd::merge_base`). Core refuses
+    /// what it can check: a head that moved on, a pull request that is not
+    /// open, an archived repository, a value that is not a full object id,
+    /// and a base equal to the head (an empty diff). The move is announced as
+    /// an `edited` pull_request event and appended to the audit log as
+    /// `pull_request.base_recorded` by `actor`.
+    pub fn record_pull_request_base(
+        &self,
+        actor: &str,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        head_sha: &str,
+        base_sha: &str,
+    ) -> Result<PullRequest> {
+        if !(matches!(base_sha.len(), 40 | 64) && base_sha.bytes().all(|b| b.is_ascii_hexdigit())) {
+            return Err(ForgeError::Validation(
+                "base sha must be 40 or 64 hex digits".to_string(),
+            ));
+        }
+        if base_sha.eq_ignore_ascii_case(head_sha) {
+            return Err(ForgeError::Validation(
+                "base sha must not be the head: that diff is empty".to_string(),
+            ));
+        }
+        self.ensure_repo_exists(owner, repo)?;
+        self.ensure_repository_writable(owner, repo)?;
+        let (previous_base, updated) = {
+            let mut state = self.state.write();
+            let previous = state.clone();
+            let key = (owner.to_string(), repo.to_string(), number);
+            let Some(pr) = state.pulls.get(&key) else {
+                return Err(ForgeError::NotFound(format!(
+                    "pull request {owner}/{repo}#{number}"
+                )));
+            };
+            if pr.merged
+                || matches!(
+                    pr.state,
+                    PullRequestState::Closed | PullRequestState::Merged
+                )
+            {
+                return Err(ForgeError::Conflict(format!(
+                    "pull request {owner}/{repo}#{number} is not open"
+                )));
+            }
+            if pr.head.sha != head_sha {
+                return Err(ForgeError::Conflict(format!(
+                    "pull request {owner}/{repo}#{number} head changed"
+                )));
+            }
+            if pr.base.sha == base_sha {
+                return Ok(pr.clone());
+            }
+            let previous_base = pr.base.sha.clone();
+            let mut updated = pr.clone();
+            updated.base.sha = base_sha.to_string();
+            updated.updated_at = Utc::now();
+            let evaluation = evaluate_locked(&state, &updated, None);
+            apply_evaluation(&mut updated, evaluation);
+            state.pulls.insert(key, updated.clone());
+            emit_event_locked(
+                &mut state,
+                owner,
+                repo,
+                "pull_request",
+                event_payload("edited", "pull_request", json!(updated.clone())),
+            );
+            self.persist_after_mutation(&mut state, previous)?;
+            (previous_base, updated)
+        };
+        self.append_audit_as(
+            actor,
+            "pull_request.base_recorded",
+            &format!("{owner}/{repo}"),
+            "completed",
+            json!({
+                "number": number,
+                "head_sha": head_sha,
+                "from": previous_base,
+                "to": base_sha,
+            }),
+        )?;
+        Ok(updated)
+    }
+
     /// Read-only merge-gate phase: evaluate branch protection and, on success,
     /// disclose the base/head shas the caller should merge.
     ///
