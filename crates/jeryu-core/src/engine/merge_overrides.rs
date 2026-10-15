@@ -1,5 +1,7 @@
 //! Audited, explicitly enabled administrator decisions. Intrinsic gates bind every actor.
-use super::{ForgeCore, MergeReadiness, evaluate_locked};
+use super::auth::repo_access_for_locked;
+use super::{ForgeCore, evaluate_locked};
+use crate::branch_protection::effective_reviews_for_pull_request;
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
 use chrono::Utc;
@@ -43,7 +45,8 @@ impl MergeOverridePermit {
             "pr_number": self.number,
             "reason": self.reason,
             "head_sha": self.head_sha,
-            "caller_passport_hash": self.passport_hash,
+            "caller_asserted_passport_hash": self.passport_hash,
+            "passport_hash_verified": false,
             "blockers": self.evaluation.blockers,
             "status_evidence": self.status_evidence,
             "merge_sha": merge_sha,
@@ -51,17 +54,31 @@ impl MergeOverridePermit {
     }
 }
 
+/// Git refs the audited decision is bound to. Deliberately not
+/// [`super::MergeReadiness`]: that variant means the ordinary merge gate
+/// passed, which is exactly what an override has not done. An edge drives the
+/// Git phase from this value and must finalize through
+/// [`ForgeCore::finalize_merge_with_override`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeOverrideTarget {
+    /// Base branch name (e.g. `main`).
+    pub base_ref: String,
+    /// Base tip sha the decision was evaluated against.
+    pub base_sha: String,
+    /// Head branch name.
+    pub head_ref: String,
+    /// Exact head sha the decision is bound to.
+    pub head_sha: String,
+    /// Whether the base requires linear history.
+    pub require_linear_history: bool,
+}
+
 pub(super) fn validate_override(state: &super::State, pr: &PullRequest, actor: &str) -> Result<()> {
-    let active = state
-        .accounts
-        .get(actor)
-        .filter(|account| account.status.permits_authentication());
-    let admin = active.is_some_and(|account| account.role == UserRole::Admin)
-        || (active.is_some()
-            && state
-                .repo_grants
-                .get(&(actor.to_string(), pr.owner.clone(), pr.repo.clone()))
-                .is_some_and(|grant| grant.access.allows_admin()));
+    // An audited decision is a human administrator's; a team bot's acting
+    // login never takes one, even where its grants would allow repo admin.
+    let admin = crate::model::parse_team_bot_login(actor).is_none()
+        && repo_access_for_locked(state, actor, &pr.owner, &pr.repo)
+            .is_some_and(RepoAccessLevel::allows_admin);
     if !admin {
         return Err(ForgeError::Forbidden(
             "merge override requires an active repository administrator".to_string(),
@@ -72,15 +89,44 @@ pub(super) fn validate_override(state: &super::State, pr: &PullRequest, actor: &
         pr.repo.clone(),
         pr.base.ref_name.clone(),
     ));
-    if protection.is_none_or(|rule| !rule.allow_merge_override) {
+    let Some(protection) = protection.filter(|rule| rule.allow_merge_override) else {
         return Err(ForgeError::Forbidden(
             "merge override requires explicit allow_merge_override=true".to_string(),
+        ));
+    };
+    // GitHub's "Include administrators" toggle binds this decision too: with
+    // it on, the branch's rules bind every actor and no override is available.
+    if protection.enforce_admins {
+        return Err(ForgeError::Forbidden(
+            "merge override is unavailable while the branch enforces administrators".to_string(),
         ));
     }
     if actor == pr.author {
         return Err(ForgeError::Forbidden(
             "a pull request author cannot authorize its override".into(),
         ));
+    }
+    // Separation of duties: the deciding administrator may not also be the
+    // reviewer whose approval satisfies the branch's required count.
+    if protection.required_approving_review_count > 0 {
+        let reviews = state
+            .reviews
+            .get(&(pr.owner.clone(), pr.repo.clone(), pr.number))
+            .cloned()
+            .unwrap_or_default();
+        let independent = effective_reviews_for_pull_request(&reviews, pr)
+            .into_iter()
+            .filter(|review| {
+                review.state == ReviewState::Approved
+                    && !review.author.eq_ignore_ascii_case(actor)
+            })
+            .count() as u64;
+        if independent < protection.required_approving_review_count {
+            return Err(ForgeError::Forbidden(format!(
+                "merge override requires {} approving review(s) from reviewers other than the deciding administrator",
+                protection.required_approving_review_count
+            )));
+        }
     }
     if pr.draft
         || matches!(
@@ -102,6 +148,7 @@ pub(super) fn validate_override(state: &super::State, pr: &PullRequest, actor: &
 pub(super) fn validate_override_evaluation(
     state: &super::State,
     pr: &PullRequest,
+    actor: &str,
     protection: &BranchProtectionRule,
     evaluation: &crate::BranchProtectionEvaluation,
 ) -> Result<Vec<CommitStatus>> {
@@ -136,6 +183,14 @@ pub(super) fn validate_override_evaluation(
                     CommitStatusState::Failure | CommitStatusState::Error
                 )
             {
+                // Separation of duties: the deciding administrator cannot be
+                // the creator of the failing row that is the only evidence.
+                if status.creator.eq_ignore_ascii_case(actor) {
+                    return Err(ForgeError::Forbidden(
+                        "merge override evidence cannot come from the deciding administrator"
+                            .to_string(),
+                    ));
+                }
                 evidence.push(status.clone());
                 continue;
             }
@@ -151,14 +206,49 @@ impl ForgeCore {
     /// Prepare an explicitly enabled administrator decision for allowlisted failed
     /// commit status contexts. Every other normal merge blocker remains binding. The API edge
     /// still owns Git conflict checks. Durable storage is required before a
-    /// requested receipt can authorize the Git phase.
+    /// requested receipt can authorize the Git phase. Refusals are recorded as
+    /// a `failed` receipt of the `prepare` stage.
     pub fn prepare_merge_override(
         &self,
         owner: &str,
         repo: &str,
         number: u64,
         request: MergeOverrideRequest,
-    ) -> Result<(MergeReadiness, MergeOverridePermit)> {
+    ) -> Result<(MergeOverrideTarget, MergeOverridePermit)> {
+        let actor = request.actor.clone();
+        let result = self.prepare_merge_override_inner(owner, repo, number, request);
+        if let Err(error) = &result {
+            // A refusal is the probe worth detecting, so it is recorded like
+            // a finalize-time refusal. The receipt never masks the refusal:
+            // an audit-append failure leaves the original error untouched.
+            let detail = json!({
+                "pr_number": number,
+                "stage": "prepare",
+                "actor": actor,
+                "error": error.to_string(),
+            });
+            let _ = self.append_audit_as(
+                if actor.trim().is_empty() {
+                    "unknown"
+                } else {
+                    &actor
+                },
+                "pull.merge_override",
+                &format!("{owner}/{repo}#{number}"),
+                "failed",
+                detail,
+            );
+        }
+        result
+    }
+
+    fn prepare_merge_override_inner(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        request: MergeOverrideRequest,
+    ) -> Result<(MergeOverrideTarget, MergeOverridePermit)> {
         self.ensure_repository_writable(owner, repo)?;
         if self.storage.is_none() {
             return Err(ForgeError::Validation(
@@ -201,7 +291,8 @@ impl ForgeCore {
             .ok_or_else(|| ForgeError::Conflict("override protection disappeared".into()))?
             .clone();
         let evaluation = evaluate_locked(&state, pr, Some(&pr.head.sha));
-        let status_evidence = validate_override_evaluation(&state, pr, &protection, &evaluation)?;
+        let status_evidence =
+            validate_override_evaluation(&state, pr, &request.actor, &protection, &evaluation)?;
         let permit = MergeOverridePermit {
             owner: owner.to_string(),
             repo: repo.to_string(),
@@ -216,7 +307,7 @@ impl ForgeCore {
             evaluation,
             protection,
         };
-        let ready = MergeReadiness::Ready {
+        let target = MergeOverrideTarget {
             base_ref: pr.base.ref_name.clone(),
             base_sha: pr.base.sha.clone(),
             head_ref: pr.head.ref_name.clone(),
@@ -231,6 +322,6 @@ impl ForgeCore {
             "requested",
             permit.audit_detail(None),
         )?;
-        Ok((ready, permit))
+        Ok((target, permit))
     }
 }

@@ -65,7 +65,9 @@ mod tests;
 pub use audit::AuditEntry;
 pub use bot_tokens::AGENT_TOKEN_PREFIX;
 pub use provider_connections::{ProviderBroker, REFRESH_LOCK_TIMEOUT};
-pub use pull_requests::{MergeOverridePermit, MergeOverrideRequest, MergeReadiness};
+pub use pull_requests::{
+    MergeOverridePermit, MergeOverrideRequest, MergeOverrideTarget, MergeReadiness,
+};
 pub use repositories::RepositoryDeletion;
 pub use vault::VaultKey;
 

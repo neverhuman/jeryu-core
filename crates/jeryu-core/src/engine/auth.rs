@@ -902,23 +902,7 @@ impl ForgeCore {
     /// Callers that must refuse an unknown repository use the `*_checked`
     /// wrappers, which canonicalize the scope first.
     pub fn repo_access_for(&self, login: &str, owner: &str, repo: &str) -> Option<RepoAccessLevel> {
-        let state = self.state.read();
-        // A team bot's acting login is no account: it holds exactly its own
-        // grants (record 0008). No account login can have this shape.
-        if parse_team_bot_login(login).is_some() {
-            return super::team_bots::acting_repo_access(&state, login, owner, repo);
-        }
-        let account = state.accounts.get(login)?;
-        if !account.status.permits_authentication() {
-            return None;
-        }
-        if account.role == UserRole::Admin {
-            return Some(RepoAccessLevel::Admin);
-        }
-        state
-            .repo_grants
-            .get(&(login.to_string(), owner.to_string(), repo.to_string()))
-            .map(|grant| grant.access)
+        repo_access_for_locked(&self.state.read(), login, owner, repo)
     }
 
     pub fn user_can_read_repo(&self, login: &str, owner: &str, repo: &str) -> bool {
@@ -946,6 +930,32 @@ impl ForgeCore {
         self.repo_access_for(login, owner, repo)
             .is_some_and(RepoAccessLevel::allows_admin)
     }
+}
+
+/// [`ForgeCore::repo_access_for`] against an already-held state guard, so
+/// callers deciding under one lock share the single authorization model.
+pub(super) fn repo_access_for_locked(
+    state: &super::State,
+    login: &str,
+    owner: &str,
+    repo: &str,
+) -> Option<RepoAccessLevel> {
+    // A team bot's acting login is no account: it holds exactly its own
+    // grants (record 0008). No account login can have this shape.
+    if parse_team_bot_login(login).is_some() {
+        return super::team_bots::acting_repo_access(state, login, owner, repo);
+    }
+    let account = state.accounts.get(login)?;
+    if !account.status.permits_authentication() {
+        return None;
+    }
+    if account.role == UserRole::Admin {
+        return Some(RepoAccessLevel::Admin);
+    }
+    state
+        .repo_grants
+        .get(&(login.to_string(), owner.to_string(), repo.to_string()))
+        .map(|grant| grant.access)
 }
 
 pub(super) fn require_login(login: &str) -> Result<()> {

@@ -4,7 +4,7 @@ use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
 
-pub use super::merge_overrides::{MergeOverridePermit, MergeOverrideRequest};
+pub use super::merge_overrides::{MergeOverridePermit, MergeOverrideRequest, MergeOverrideTarget};
 use super::merge_overrides::{validate_override, validate_override_evaluation};
 use super::{
     ForgeCore, apply_evaluation, emit_event_locked, evaluate_locked, next_record_number,
@@ -515,13 +515,30 @@ impl ForgeCore {
         if let Err(error) = &result {
             let mut detail = permit.audit_detail(None);
             detail["error"] = serde_json::Value::String(error.to_string());
-            self.append_audit_as(
+            // The refusal reason is the diagnostic the edge needs to decide
+            // whether to recover the Git ref, so a failure to append the
+            // receipt never replaces it; the append error is recorded in a
+            // best-effort second receipt instead.
+            if let Err(audit_error) = self.append_audit_as(
                 &permit.actor,
                 "pull.merge_override",
                 &permit.subject(),
                 "failed",
                 detail,
-            )?;
+            ) {
+                let _ = self.append_audit_as(
+                    &permit.actor,
+                    "pull.merge_override",
+                    &permit.subject(),
+                    "failed",
+                    json!({
+                        "pr_number": permit.number,
+                        "stage": "finalize",
+                        "error": error.to_string(),
+                        "audit_error": audit_error.to_string(),
+                    }),
+                );
+            }
         }
         result
     }
@@ -579,6 +596,7 @@ impl ForgeCore {
             let evidence = validate_override_evaluation(
                 &state,
                 &pr_snapshot,
+                &permit.actor,
                 &permit.protection,
                 &evaluation,
             )?;

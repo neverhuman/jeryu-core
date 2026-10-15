@@ -13,6 +13,10 @@ fn fixture(core: &ForgeCore) -> PullRequest {
         .unwrap();
     core.create_account("author", "author-password-1", UserRole::User)
         .unwrap();
+    core.create_account("ci", "ci-password-1", UserRole::User)
+        .unwrap();
+    core.create_account("operator", "operator-password-1", UserRole::User)
+        .unwrap();
     core.create_repository(
         "alice",
         CreateRepositoryRequest {
@@ -60,7 +64,7 @@ fn fixture(core: &ForgeCore) -> PullRequest {
         "alice",
         "jeryu",
         &pr.head.sha,
-        "reviewer",
+        "ci",
         CreateCommitStatusRequest {
             state: CommitStatusState::Failure,
             context: "ratchet".into(),
@@ -84,7 +88,7 @@ fn protection(core: &ForgeCore, enforce_admins: bool) {
             enforce_admins,
             allow_merge_override: true,
             merge_override_status_checks: vec!["ratchet".into()],
-            merge_override_status_creators: vec!["reviewer".into()],
+            merge_override_status_creators: vec!["ci".into()],
             required_linear_history: false,
             allow_force_pushes: false,
             allow_deletions: false,
@@ -160,9 +164,10 @@ fn merge_override_records_exact_decision_and_blockers_durably() {
     assert_eq!(audit[1].action, "pull.merge_override");
     assert_eq!(audit[1].detail["head_sha"], pr.head.sha);
     assert_eq!(
-        audit[1].detail["caller_passport_hash"],
+        audit[1].detail["caller_asserted_passport_hash"],
         decision("alice").asserted_passport_hash
     );
+    assert_eq!(audit[1].detail["passport_hash_verified"], false);
     assert_eq!(audit[1].detail["reason"], decision("alice").reason);
     assert_eq!(audit[1].detail["merge_sha"], "real-git-merge");
     assert_eq!(
@@ -196,9 +201,15 @@ fn merge_override_requires_active_admin_reason_protection_and_exact_head() {
     protection(&core, true);
     assert!(
         core.prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
-            .is_ok()
+            .unwrap_err()
+            .to_string()
+            .contains("enforces administrators")
     );
     protection(&core, false);
+    assert!(
+        core.prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+            .is_ok()
+    );
     core.lock_account("alice").unwrap();
     assert!(
         core.prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
@@ -213,19 +224,19 @@ fn merge_override_rechecks_policy_and_grants_at_finalize() {
         let pr = fixture(&core);
         core.grant_repo_access(
             "alice",
-            "reviewer",
+            "operator",
             "alice",
             "jeryu",
             RepoAccessLevel::Admin,
         )
         .unwrap();
         let (_, permit) = core
-            .prepare_merge_override("alice", "jeryu", pr.number, decision("reviewer"))
+            .prepare_merge_override("alice", "jeryu", pr.number, decision("operator"))
             .unwrap();
         match mutation {
             "rule" => protection(&core, true),
             "grant" => {
-                core.revoke_repo_access("reviewer", "alice", "jeryu")
+                core.revoke_repo_access("operator", "alice", "jeryu")
                     .unwrap();
             }
             "check" => {
@@ -233,7 +244,7 @@ fn merge_override_rechecks_policy_and_grants_at_finalize() {
                     "alice",
                     "jeryu",
                     &pr.head.sha,
-                    "reviewer",
+                    "ci",
                     CreateCommitStatusRequest {
                         state: CommitStatusState::Success,
                         context: "ratchet".into(),
@@ -276,14 +287,14 @@ fn merge_override_accepts_repository_admin_without_global_admin_role() {
     let pr = fixture(&core);
     core.grant_repo_access(
         "alice",
-        "reviewer",
+        "operator",
         "alice",
         "jeryu",
         RepoAccessLevel::Admin,
     )
     .unwrap();
     let (_, permit) = core
-        .prepare_merge_override("alice", "jeryu", pr.number, decision("reviewer"))
+        .prepare_merge_override("alice", "jeryu", pr.number, decision("operator"))
         .unwrap();
     assert!(
         core.finalize_merge_with_override(permit, "real-merge".into())
@@ -384,24 +395,32 @@ fn merge_override_completion_and_state_commit_atomically() {
             .collect::<Vec<_>>(),
         vec!["requested", "failed"]
     );
-    drop(core);
-    let reopened = ForgeCore::open_sqlite(dir.path().join("forge.sqlite")).unwrap();
-    assert!(
-        !reopened
-            .get_pull_request("alice", "jeryu", pr.number)
-            .unwrap()
-            .merged
-    );
+    // The same live core must recover: `persist_with_audit` drops its staging
+    // tables inside the failed transaction, so a retry on this very connection
+    // is the case a fresh handle would never exercise.
     conn.execute_batch("DROP TRIGGER reject_override_completion;")
         .unwrap();
-    let (_, permit) = reopened
+    let (_, permit) = core
         .prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
         .unwrap();
     assert!(
-        reopened
-            .finalize_merge_with_override(permit, "real-merge".into())
+        core.finalize_merge_with_override(permit, "real-merge".into())
             .unwrap()
             .merged
+    );
+    drop(core);
+    let reopened = ForgeCore::open_sqlite(dir.path().join("forge.sqlite")).unwrap();
+    let merged = reopened.get_pull_request("alice", "jeryu", pr.number).unwrap();
+    assert!(merged.merged);
+    assert_eq!(merged.merge_commit_sha.as_deref(), Some("real-merge"));
+    assert_eq!(
+        reopened
+            .list_audit(&format!("alice/jeryu#{}", pr.number))
+            .unwrap()
+            .iter()
+            .map(|row| row.phase.clone())
+            .collect::<Vec<_>>(),
+        vec!["requested", "failed", "requested", "completed"]
     );
 }
 
@@ -439,7 +458,7 @@ fn merge_override_cannot_clear_missing_reviews_unlisted_or_pending_contexts() {
                 "alice",
                 "jeryu",
                 &pr.head.sha,
-                "reviewer",
+                "ci",
                 CreateCommitStatusRequest {
                     state: CommitStatusState::Pending,
                     context: "ratchet".into(),
@@ -515,7 +534,7 @@ fn merge_override_requires_trusted_status_evidence_and_no_active_rerun() {
                 if refusal == "forged" {
                     "contributor"
                 } else {
-                    "reviewer"
+                    "ci"
                 },
                 CreateCommitStatusRequest {
                     state: CommitStatusState::Failure,
@@ -544,4 +563,169 @@ fn merge_override_requires_trusted_status_evidence_and_no_active_rerun() {
                 .merged
         );
     }
+}
+
+#[test]
+fn merge_override_refuses_a_branch_that_enforces_administrators() {
+    let (_dir, core) = durable_core();
+    let pr = fixture(&core);
+    protection(&core, true);
+    let error = core
+        .prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+        .unwrap_err();
+    assert!(error.to_string().contains("enforces administrators"));
+    assert!(
+        !core
+            .get_pull_request("alice", "jeryu", pr.number)
+            .unwrap()
+            .merged
+    );
+}
+
+#[test]
+fn merge_override_requires_separation_from_approver_and_status_creator() {
+    for duty in ["approver", "status_creator"] {
+        let (_dir, core) = durable_core();
+        let pr = fixture(&core);
+        let actor = if duty == "approver" { "reviewer" } else { "ci" };
+        core.grant_repo_access("alice", actor, "alice", "jeryu", RepoAccessLevel::Admin)
+            .unwrap();
+        let error = core
+            .prepare_merge_override("alice", "jeryu", pr.number, decision(actor))
+            .unwrap_err();
+        let expected = if duty == "approver" {
+            "other than the deciding administrator"
+        } else {
+            "evidence cannot come from the deciding administrator"
+        };
+        assert!(error.to_string().contains(expected), "{duty}: {error}");
+        assert!(
+            !core
+                .get_pull_request("alice", "jeryu", pr.number)
+                .unwrap()
+                .merged
+        );
+    }
+}
+
+#[test]
+fn merge_override_accepts_an_administrator_who_also_approved_alongside_another_reviewer() {
+    let (_dir, core) = durable_core();
+    let pr = fixture(&core);
+    core.grant_repo_access("alice", "reviewer", "alice", "jeryu", RepoAccessLevel::Admin)
+        .unwrap();
+    // A second independent approval leaves the required count satisfied
+    // without the deciding administrator's own review.
+    core.create_review(
+        "alice",
+        "jeryu",
+        pr.number,
+        "operator",
+        CreateReviewRequest {
+            body: Some("Second independent approval".into()),
+            event: ReviewState::Approved,
+            comments: vec![],
+            expected_head_sha: Some(pr.head.sha.clone()),
+        },
+    )
+    .unwrap();
+    assert!(
+        core.prepare_merge_override("alice", "jeryu", pr.number, decision("reviewer"))
+            .is_ok()
+    );
+}
+
+#[test]
+fn merge_override_refuses_a_team_bot_acting_login() {
+    let (_dir, core) = durable_core();
+    let pr = fixture(&core);
+    // A machine identity never takes an audited administrator decision.
+    let bot = crate::model::team_bot_login("alice", "release");
+    let error = core
+        .prepare_merge_override("alice", "jeryu", pr.number, decision(&bot))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("active repository administrator")
+    );
+}
+
+#[test]
+fn merge_override_records_prepare_refusals_as_failed_receipts() {
+    let (_dir, core) = durable_core();
+    let pr = fixture(&core);
+    let subject = format!("alice/jeryu#{}", pr.number);
+    assert!(
+        core.prepare_merge_override("alice", "jeryu", pr.number, decision("reviewer"))
+            .is_err()
+    );
+    let rows = core.list_audit(&subject).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].phase, "failed");
+    assert_eq!(rows[0].actor, "reviewer");
+    assert_eq!(rows[0].action, "pull.merge_override");
+    assert_eq!(rows[0].detail["stage"], "prepare");
+    assert!(
+        rows[0].detail["error"]
+            .as_str()
+            .unwrap()
+            .contains("administrator")
+    );
+    assert!(
+        !core
+            .get_pull_request("alice", "jeryu", pr.number)
+            .unwrap()
+            .merged
+    );
+}
+
+#[test]
+fn merge_override_finalize_keeps_the_refusal_reason_when_the_receipt_cannot_be_written() {
+    let (dir, core) = durable_core();
+    let pr = fixture(&core);
+    let (_, mut permit) = core
+        .prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+        .unwrap();
+    permit.expires_at = 0;
+    let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite")).unwrap();
+    conn.execute_batch("CREATE TRIGGER reject_override_failure BEFORE INSERT ON forge_audit_log WHEN NEW.phase = 'failed' BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END;").unwrap();
+    let error = core
+        .finalize_merge_with_override(permit, "real-merge".into())
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("permit expired"),
+        "audit failure masked the refusal: {error}"
+    );
+    assert!(
+        !core
+            .get_pull_request("alice", "jeryu", pr.number)
+            .unwrap()
+            .merged
+    );
+}
+
+#[test]
+fn merge_override_target_carries_the_bound_refs_without_claiming_readiness() {
+    let (_dir, core) = durable_core();
+    let pr = fixture(&core);
+    let (target, _permit) = core
+        .prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+        .unwrap();
+    assert_eq!(
+        target,
+        MergeOverrideTarget {
+            base_ref: "main".into(),
+            base_sha: "base-head".into(),
+            head_ref: "decision".into(),
+            head_sha: "exact-head".into(),
+            require_linear_history: false,
+        }
+    );
+    // The ordinary gate still refuses this PR, so no `MergeReadiness::Ready`
+    // exists for it.
+    assert!(
+        core.evaluate_merge_readiness("alice", "jeryu", pr.number, Some(&pr.head.sha))
+            .is_err()
+    );
 }

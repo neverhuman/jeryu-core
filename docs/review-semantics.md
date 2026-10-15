@@ -79,20 +79,33 @@ source integration primitive. Existing rules deserialize with
 An active repository administrator other than the PR author can prepare a
 10-minute permit only when the branch explicitly opts in,
 and every normal blocker is a failed commit status named in that allowlist.
+Repository-admin authority comes from the one authorization model
+(`repo_access_for`), and a team bot's acting login is refused outright: an
+audited decision is a human administrator's.
+Separation of duties binds the decision: the required approving reviews must be
+satisfied without the deciding administrator's own approval, and the failing
+status row used as evidence cannot be one it created.
 The latest failing status must come from an explicitly trusted authenticated CI
 creator; its full row is bound in the permit and recorded in the receipt. An
-active check-run rerun blocks the decision. `enforce_admins` stays independent,
-so the branch can keep force-push/deletion protection enforced for admins.
+active check-run rerun blocks the decision. A branch with `enforce_admins` on
+("Include administrators") has no override at all: there its rules bind every
+actor, administrators included.
 Pending/missing checks, independent approvals, standing review holds, CODEOWNERS,
 proof, signed commits, history, draft state and exact-head checks remain binding.
 No installed branch protection is changed by this source change.
 
 The permit binds head, base, actor, reason, full protection and evaluation.
+Preparation returns a `MergeOverrideTarget`, not `MergeReadiness::Ready`: the
+ordinary gate has not passed, and the Git phase must finalize through
+`finalize_merge_with_override`.
 Finalization rechecks all of them, the exact status evidence and current grants. SQLite storage is required;
-merge state and the completed audit entry commit in one transaction. Finalization refusal
-records a failed entry and persistence failure restores in-memory state. The
+merge state and the completed audit entry commit in one transaction. Every
+refusal records a `failed` entry — preparation refusals carry `stage=prepare` —
+and persistence failure restores in-memory state. A failure to append the
+receipt never replaces the refusal reason the edge needs. The
 `asserted_passport_hash` request requires a `passport:<64 lowercase hex>` shape.
-The `caller_passport_hash` audit field records an edge assertion, not a Core-verified
+The `caller_asserted_passport_hash` audit field (recorded with
+`passport_hash_verified: false`) records an edge assertion, not a Core-verified
 passport: an integrating authenticated edge must independently validate that
 assertion and Git conflict/ref state, and recover a Git advance if finalization
 fails. This Core PR adds no HTTP bypass route or deployed override capability.

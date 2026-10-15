@@ -23,7 +23,8 @@ pub use crate::branch_protection::{
 };
 pub use crate::core::{
     AGENT_TOKEN_PREFIX, AuditEntry, ForgeCore, HeadReconcileReport, HeadReconciled,
-    MergeOverridePermit, MergeOverrideRequest, MergeReadiness, ProviderBroker,
+    MergeOverridePermit, MergeOverrideRequest, MergeOverrideTarget, MergeReadiness,
+    ProviderBroker,
     REFRESH_LOCK_TIMEOUT, RepoBranches, RepoMaterializer, RepoPushHistory, RepoRelocator,
     RepositoryDeletion, VaultKey,
 };
