@@ -143,6 +143,10 @@ fn default_branch_protection_rule(owner: &str, repo: &str, branch: &str) -> Bran
         allow_deletions: false,
         require_signed_commits: false,
         require_jankurai_proof: false,
+        // The default rule is the strict one: a verdict binds its exact head
+        // until a repository asks otherwise.
+        dismiss_stale_approvals: true,
+        require_exact_sha_approval: true,
         updated_at: Utc::now(),
     }
 }

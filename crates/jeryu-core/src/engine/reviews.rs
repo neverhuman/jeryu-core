@@ -80,7 +80,7 @@ impl ForgeCore {
         super::auth::require_login(author)?;
         let mut state = self.state.write();
         let key = (owner.to_string(), repo.to_string(), number);
-        let head_sha = match state.pulls.get(&key) {
+        let (head_sha, head_patch_ids) = match state.pulls.get(&key) {
             Some(pr) => {
                 if request.event == ReviewState::Approved && pr.author.eq_ignore_ascii_case(author)
                 {
@@ -97,7 +97,7 @@ impl ForgeCore {
                         "pull request {owner}/{repo}#{number} head changed"
                     )));
                 }
-                pr.head.sha.clone()
+                (pr.head.sha.clone(), pr.head_patch_ids.clone())
             }
             None => {
                 return Err(ForgeError::NotFound(format!(
@@ -159,6 +159,7 @@ impl ForgeCore {
             state: request.event,
             body: request.body,
             head_sha: Some(head_sha),
+            head_patch_ids,
             dismissed_review_id,
             submitted_at: Utc::now(),
         };

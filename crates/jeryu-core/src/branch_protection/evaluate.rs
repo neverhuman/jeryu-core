@@ -6,7 +6,7 @@ use crate::model::{
 };
 
 use super::codeowners::CodeOwners;
-use super::reviews::effective_reviews_for_pull_request;
+use super::reviews::{VerdictReach, effective_reviews_for_pull_request_with};
 use super::types::{
     BranchProtectionEvaluation, EvaluationContext, MergeBlocker, RefOperation, RefOperationBlocker,
     RefOperationEvaluation,
@@ -23,7 +23,11 @@ pub fn evaluate_branch_protection_with(
     context: EvaluationContext<'_>,
 ) -> BranchProtectionEvaluation {
     let mut blockers = Vec::new();
-    let effective_reviews = effective_reviews_for_pull_request(reviews, pr);
+    // Which earlier heads a verdict still speaks for is the rule's call, and
+    // the gates below (approval count, changes requested, code owners) all read
+    // the same selection.
+    let effective_reviews =
+        effective_reviews_for_pull_request_with(reviews, pr, VerdictReach::for_rule(protection));
 
     // Intrinsic gates apply regardless of any protection rule (and even to
     // admins): a drifted SHA and a draft PR are never mergeable on GitHub.

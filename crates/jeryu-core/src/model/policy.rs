@@ -30,7 +30,23 @@ pub struct BranchProtectionRule {
     pub allow_deletions: bool,
     pub require_signed_commits: bool,
     pub require_jankurai_proof: bool,
+    /// Whether a push dismisses the approvals of the previous head. When off,
+    /// an approval survives a push that leaves the diff unchanged (equal
+    /// per-commit patch ids — a pure rebase or reword); any content change
+    /// still invalidates it. Defaulted ON so a rule stored before this field
+    /// existed keeps the exact-head behaviour it was written with.
+    #[serde(default = "default_true")]
+    pub dismiss_stale_approvals: bool,
+    /// Whether a verdict counts only on the exact head it was written against,
+    /// even when `dismiss_stale_approvals` is off. Defaulted ON for the same
+    /// reason.
+    #[serde(default = "default_true")]
+    pub require_exact_sha_approval: bool,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A branch-protection PUT body. GitHub replaces the whole rule on every PUT,
@@ -38,7 +54,7 @@ pub struct BranchProtectionRule {
 /// mandatory: a body missing one is rejected (the edge answers 422) instead of
 /// quietly defaulting it and disabling protections the caller never mentioned.
 /// The optional fields below are the ones GitHub also treats as optional.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SetBranchProtectionRequest {
     pub required_status_checks: Vec<String>,
     pub required_approving_review_count: u64,
@@ -64,4 +80,33 @@ pub struct SetBranchProtectionRequest {
     pub require_signed_commits: bool,
     #[serde(default)]
     pub require_jankurai_proof: bool,
+    /// Omitted means on: a caller that does not mention it keeps the
+    /// exact-head behaviour rather than silently loosening approvals.
+    #[serde(default = "default_true")]
+    pub dismiss_stale_approvals: bool,
+    #[serde(default = "default_true")]
+    pub require_exact_sha_approval: bool,
+}
+
+/// The default request is the strict one: every protection off except the
+/// exact-head approval rules, which stay on so a default never loosens them.
+impl Default for SetBranchProtectionRequest {
+    fn default() -> Self {
+        Self {
+            required_status_checks: Vec::new(),
+            required_approving_review_count: 0,
+            enforce_admins: false,
+            allow_merge_override: false,
+            merge_override_status_checks: Vec::new(),
+            merge_override_status_creators: Vec::new(),
+            strict: false,
+            required_linear_history: false,
+            allow_force_pushes: false,
+            allow_deletions: false,
+            require_signed_commits: false,
+            require_jankurai_proof: false,
+            dismiss_stale_approvals: true,
+            require_exact_sha_approval: true,
+        }
+    }
 }

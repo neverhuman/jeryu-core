@@ -95,6 +95,14 @@ pub struct PullRequest {
     /// owner-approval enforcement.
     #[serde(default)]
     pub changed_files: Vec<String>,
+    /// Diff identity of the current head: git's per-commit patch ids for
+    /// `base..head`, oldest first, as `jeryu_gitd::patch_ids` computes them.
+    /// Core holds no git objects, so a pusher records them
+    /// (`refresh_pull_request_heads_for_ref_with_diff`). Empty means unknown —
+    /// a head whose diff identity is unknown never carries another head's
+    /// approval.
+    #[serde(default)]
+    pub head_patch_ids: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -119,6 +127,10 @@ pub struct CreatePullRequestRequest {
     pub commits: Vec<PullRequestCommit>,
     #[serde(default)]
     pub changed_files: Vec<String>,
+    /// Diff identity of the head, as `jeryu_gitd::patch_ids` computes it.
+    /// Left out means unknown.
+    #[serde(default)]
+    pub head_patch_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -163,6 +175,11 @@ pub struct Review {
     /// are audit history only; they never satisfy current-head protection.
     #[serde(default)]
     pub head_sha: Option<String>,
+    /// Diff identity of the head this verdict was written against (the pull
+    /// request's `head_patch_ids` at the time). Empty for rows written before
+    /// pushers recorded it: such a verdict binds its exact head only.
+    #[serde(default)]
+    pub head_patch_ids: Vec<String>,
     /// The explicit verdict removed by this dismissal event. Historical
     /// target-less dismissals remain unbound audit evidence.
     #[serde(default)]

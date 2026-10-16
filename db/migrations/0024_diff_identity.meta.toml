@@ -1,0 +1,28 @@
+# jankurai:migration v1
+id = "0024_diff_identity"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "new_app_old_db"
+requires = ["0023_team_bots"]
+rollback = "db/rollbacks/0024_diff_identity.sql"
+backfill = "none; a row without a recorded diff identity binds its exact head sha only, as before"
+data_classification = "internal"
+tenant_impact = "Adds the per-commit patch ids of a pull-request head and of the head a review was written against. An older writer that records none keeps the exact-head approval behaviour."
+tests = [
+  "db-migration-analyze",
+  "migration_0024_leaves_existing_rows_without_a_diff_identity",
+  "diff_identity_survives_sqlite_reopen",
+  "an_unchanged_diff_keeps_its_approval_across_a_push",
+]
+approval = "forge-api"
+backup = "VACUUM INTO copy of forge.sqlite before apply"
+restore = "restore that snapshot; no data is rewritten, so recovering forward is also safe"
+irreversible = false
+verify = "pull_requests and reviews each have head_patch_ids_json and every existing row is NULL; COUNT(*) of both tables unchanged"

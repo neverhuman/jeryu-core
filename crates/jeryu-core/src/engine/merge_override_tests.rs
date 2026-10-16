@@ -44,6 +44,7 @@ fn fixture(core: &ForgeCore) -> PullRequest {
                 draft: false,
                 commits: vec![],
                 changed_files: vec![],
+                head_patch_ids: Vec::new(),
             },
         )
         .unwrap();
@@ -94,6 +95,8 @@ fn protection(core: &ForgeCore, enforce_admins: bool) {
             allow_deletions: false,
             require_signed_commits: false,
             require_jankurai_proof: false,
+            dismiss_stale_approvals: true,
+            require_exact_sha_approval: true,
         },
     )
     .unwrap();
@@ -410,7 +413,9 @@ fn merge_override_completion_and_state_commit_atomically() {
     );
     drop(core);
     let reopened = ForgeCore::open_sqlite(dir.path().join("forge.sqlite")).unwrap();
-    let merged = reopened.get_pull_request("alice", "jeryu", pr.number).unwrap();
+    let merged = reopened
+        .get_pull_request("alice", "jeryu", pr.number)
+        .unwrap();
     assert!(merged.merged);
     assert_eq!(merged.merge_commit_sha.as_deref(), Some("real-merge"));
     assert_eq!(
@@ -612,8 +617,14 @@ fn merge_override_requires_separation_from_approver_and_status_creator() {
 fn merge_override_accepts_an_administrator_who_also_approved_alongside_another_reviewer() {
     let (_dir, core) = durable_core();
     let pr = fixture(&core);
-    core.grant_repo_access("alice", "reviewer", "alice", "jeryu", RepoAccessLevel::Admin)
-        .unwrap();
+    core.grant_repo_access(
+        "alice",
+        "reviewer",
+        "alice",
+        "jeryu",
+        RepoAccessLevel::Admin,
+    )
+    .unwrap();
     // A second independent approval leaves the required count satisfied
     // without the deciding administrator's own review.
     core.create_review(

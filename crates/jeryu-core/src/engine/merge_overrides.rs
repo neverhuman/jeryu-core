@@ -1,7 +1,7 @@
 //! Audited, explicitly enabled administrator decisions. Intrinsic gates bind every actor.
 use super::auth::repo_access_for_locked;
 use super::{ForgeCore, evaluate_locked};
-use crate::branch_protection::effective_reviews_for_pull_request;
+use crate::branch_protection::{VerdictReach, effective_reviews_for_pull_request_with};
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
 use chrono::Utc;
@@ -114,13 +114,17 @@ pub(super) fn validate_override(state: &super::State, pr: &PullRequest, actor: &
             .get(&(pr.owner.clone(), pr.repo.clone(), pr.number))
             .cloned()
             .unwrap_or_default();
-        let independent = effective_reviews_for_pull_request(&reviews, pr)
-            .into_iter()
-            .filter(|review| {
-                review.state == ReviewState::Approved
-                    && !review.author.eq_ignore_ascii_case(actor)
-            })
-            .count() as u64;
+        // The same verdicts the merge gate would count for this branch.
+        let independent = effective_reviews_for_pull_request_with(
+            &reviews,
+            pr,
+            VerdictReach::for_rule(Some(protection)),
+        )
+        .into_iter()
+        .filter(|review| {
+            review.state == ReviewState::Approved && !review.author.eq_ignore_ascii_case(actor)
+        })
+        .count() as u64;
         if independent < protection.required_approving_review_count {
             return Err(ForgeError::Forbidden(format!(
                 "merge override requires {} approving review(s) from reviewers other than the deciding administrator",

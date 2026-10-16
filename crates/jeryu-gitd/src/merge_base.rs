@@ -45,12 +45,12 @@ pub fn merge_base(
 }
 
 /// A full-length hexadecimal object id (SHA-1 or SHA-256).
-fn is_object_id(value: &str) -> bool {
+pub(crate) fn is_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Verify that `oid` is a full object id naming a commit in the repository.
-fn verify_commit(git_bin: &str, repo: &Repository, oid: &str) -> Result<()> {
+pub(crate) fn verify_commit(git_bin: &str, repo: &Repository, oid: &str) -> Result<()> {
     if !is_object_id(oid) {
         return Err(GitdError::InvalidInput(format!(
             "oid must be 40 or 64 hex digits: {oid}"

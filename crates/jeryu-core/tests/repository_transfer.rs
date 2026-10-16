@@ -120,6 +120,7 @@ fn seed_full_repo(core: &ForgeCore) -> uuid::Uuid {
                 draft: false,
                 commits: Vec::new(),
                 changed_files: vec!["src/lib.rs".to_string()],
+                head_patch_ids: Vec::new(),
             },
         )
         .unwrap();

@@ -26,6 +26,30 @@ fn normalize_source_repository(
         .unwrap_or_else(|| format!("{owner}/{repo}"))
 }
 
+/// Most commits a pull request's recorded diff identity may cover. A patch-id
+/// list is attacker-influenced in size (a pusher chooses how many commits it
+/// sends), so the stored list is bounded rather than growing with the branch.
+const MAX_HEAD_PATCH_IDS: usize = 4096;
+
+/// A recorded diff identity is a list of full object ids. Core cannot check
+/// that they are the pull request's real patch ids — it holds no git objects —
+/// but it refuses a shape no `git patch-id` ever produces.
+fn validate_patch_ids(patch_ids: Vec<String>) -> Result<Vec<String>> {
+    if patch_ids.len() > MAX_HEAD_PATCH_IDS {
+        return Err(ForgeError::Validation(format!(
+            "a diff identity covers at most {MAX_HEAD_PATCH_IDS} commits"
+        )));
+    }
+    for id in &patch_ids {
+        if !(matches!(id.len(), 40 | 64) && id.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+            return Err(ForgeError::Validation(
+                "patch ids must be 40 or 64 hex digits".to_string(),
+            ));
+        }
+    }
+    Ok(patch_ids)
+}
+
 /// Outcome of the read-only merge-gate phase ([`ForgeCore::evaluate_merge_readiness`]).
 ///
 /// This is the seam that lets `jeryu-api` run a real git merge after the gate
@@ -130,6 +154,7 @@ impl ForgeCore {
             merge_commit_sha: None,
             commits: request.commits,
             changed_files: request.changed_files,
+            head_patch_ids: validate_patch_ids(request.head_patch_ids)?,
             created_at: now,
             updated_at: now,
         };
@@ -267,6 +292,28 @@ impl ForgeCore {
         ref_name: &str,
         head_sha: &str,
     ) -> Result<Vec<PullRequest>> {
+        self.refresh_pull_request_heads_for_ref_with_diff(owner, repo, ref_name, head_sha, &[])
+    }
+
+    /// As [`ForgeCore::refresh_pull_request_heads_for_ref`], recording the new
+    /// head's diff identity: git's per-commit patch ids for the pull request's
+    /// `base..head`, oldest first, computed by the pusher
+    /// (`jeryu_gitd::patch_ids`) because Core holds no git objects.
+    ///
+    /// This is what lets a branch whose rule has `dismiss_stale_approvals` off
+    /// keep an approval across a push that changed no content: the approval was
+    /// written against this same list. An empty list means the pusher did not
+    /// compute one, and then every approval of the previous head is dismissed —
+    /// the strict behaviour, which is also what an older pusher gets.
+    pub fn refresh_pull_request_heads_for_ref_with_diff(
+        &self,
+        owner: &str,
+        repo: &str,
+        ref_name: &str,
+        head_sha: &str,
+        head_patch_ids: &[String],
+    ) -> Result<Vec<PullRequest>> {
+        let head_patch_ids = validate_patch_ids(head_patch_ids.to_vec())?;
         self.ensure_repo_exists(owner, repo)?;
         let mut state = self.state.write();
         let previous = state.clone();
@@ -295,6 +342,7 @@ impl ForgeCore {
         for key in keys {
             if let Some(pr) = state.pulls.get_mut(&key) {
                 pr.head.sha = head_sha.to_string();
+                pr.head_patch_ids = head_patch_ids.clone();
                 pr.updated_at = now;
             }
             let Some(mut pr) = state.pulls.get(&key).cloned() else {

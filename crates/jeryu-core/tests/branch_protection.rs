@@ -148,6 +148,8 @@ fn set_and_get_branch_protection_roundtrips() {
                 allow_deletions: false,
                 require_signed_commits: true,
                 require_jankurai_proof: true,
+                dismiss_stale_approvals: true,
+                require_exact_sha_approval: true,
             },
         )
         .unwrap();
@@ -442,6 +444,8 @@ fn jankurai_proof_required_blocks_until_proof_succeeds() {
         "main",
         SetBranchProtectionRequest {
             require_jankurai_proof: true,
+            dismiss_stale_approvals: true,
+            require_exact_sha_approval: true,
             ..Default::default()
         },
     )
@@ -523,6 +527,8 @@ fn multiple_unmet_rules_accumulate_distinct_blockers() {
             required_status_checks: vec!["ci/fast".to_string(), "ci/slow".to_string()],
             required_approving_review_count: 1,
             require_jankurai_proof: true,
+            dismiss_stale_approvals: true,
+            require_exact_sha_approval: true,
             ..Default::default()
         },
     )

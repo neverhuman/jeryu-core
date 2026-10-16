@@ -84,6 +84,10 @@ const ROLLBACKS: &[(&str, &str)] = &[
         "0023_team_bots.sql",
         include_str!("../../../../../db/rollbacks/0023_team_bots.sql"),
     ),
+    (
+        "0024_diff_identity.sql",
+        include_str!("../../../../../db/rollbacks/0024_diff_identity.sql"),
+    ),
 ];
 
 fn db_dir(kind: &str) -> PathBuf {
@@ -244,6 +248,13 @@ fn rollback_scripts_execute_and_roll_forward() {
                 assert!(!table_exists(&conn, "deployment_statuses"));
             }
             "0018_waitlist_signups.sql" => assert!(!table_exists(&conn, "waitlist_signups")),
+            "0024_diff_identity.sql" => {
+                // Dropping the recorded diff identities is the documented
+                // effect: every verdict binds its exact head again.
+                for table in ["pull_requests", "reviews"] {
+                    assert!(!column_exists(&conn, table, "head_patch_ids_json").expect("inspect"));
+                }
+            }
             _ => assert_eq!(
                 schema_snapshot(&conn),
                 before,

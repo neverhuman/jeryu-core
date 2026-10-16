@@ -330,6 +330,8 @@ fn sqlite_store_round_trips_core_forge_resources() {
                 allow_deletions: false,
                 require_signed_commits: true,
                 require_jankurai_proof: true,
+                dismiss_stale_approvals: true,
+                require_exact_sha_approval: true,
             },
         )
         .unwrap();
@@ -355,6 +357,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
                         parents: 1,
                     }],
                     changed_files: vec!["src/lib.rs".to_string()],
+                    head_patch_ids: Vec::new(),
                 },
             )
             .unwrap();
@@ -584,6 +587,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
                 draft: true,
                 commits: Vec::new(),
                 changed_files: Vec::new(),
+                head_patch_ids: Vec::new(),
             },
         )
         .unwrap();

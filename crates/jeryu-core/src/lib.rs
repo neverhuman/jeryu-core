@@ -19,12 +19,12 @@ mod webhooks;
 
 pub use crate::branch_protection::{
     BranchProtectionEvaluation, EvaluationContext, MergeBlocker, RefOperation, RefOperationBlocker,
-    RefOperationEvaluation, effective_reviews_for_head, effective_reviews_for_pull_request,
+    RefOperationEvaluation, VerdictReach, effective_reviews_for_head,
+    effective_reviews_for_pull_request, effective_reviews_for_pull_request_with,
 };
 pub use crate::core::{
     AGENT_TOKEN_PREFIX, AuditEntry, ForgeCore, HeadReconcileReport, HeadReconciled,
-    MergeOverridePermit, MergeOverrideRequest, MergeOverrideTarget, MergeReadiness,
-    ProviderBroker,
+    MergeOverridePermit, MergeOverrideRequest, MergeOverrideTarget, MergeReadiness, ProviderBroker,
     REFRESH_LOCK_TIMEOUT, RepoBranches, RepoMaterializer, RepoPushHistory, RepoRelocator,
     RepositoryDeletion, VaultKey,
 };

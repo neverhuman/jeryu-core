@@ -2,7 +2,33 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::{PullRequest, Review, ReviewState};
+use crate::model::{BranchProtectionRule, PullRequest, Review, ReviewState};
+
+/// Which heads a verdict can speak for.
+///
+/// `ExactHead` is the strict rule: a verdict counts on the head it was written
+/// against and nowhere else. `UnchangedDiff` also accepts a verdict written
+/// against an earlier head whose diff was the same — equal per-commit patch
+/// ids, so a pure rebase or reword keeps it while any content change drops it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictReach {
+    ExactHead,
+    UnchangedDiff,
+}
+
+impl VerdictReach {
+    /// The reach a branch-protection rule asks for. Both settings are opt-outs
+    /// of the strict rule, so a rule that asks for either strictness gets it;
+    /// no rule at all is strict.
+    pub fn for_rule(rule: Option<&BranchProtectionRule>) -> Self {
+        match rule {
+            Some(rule) if !rule.dismiss_stale_approvals && !rule.require_exact_sha_approval => {
+                Self::UnchangedDiff
+            }
+            _ => Self::ExactHead,
+        }
+    }
+}
 
 /// Return at most one effective review per reviewer for `head_sha`.
 ///
@@ -11,19 +37,24 @@ use crate::model::{PullRequest, Review, ReviewState};
 /// dismissal clears its current verdict without recovering an earlier one.
 /// Core appends reviews to this slice, and SQLite restores it in row order.
 pub fn effective_reviews_for_head<'a>(reviews: &'a [Review], head_sha: &str) -> Vec<&'a Review> {
-    reduce_reviews(reviews, head_sha, None)
+    reduce_reviews(reviews, head_sha, &[], VerdictReach::ExactHead, None)
 }
 
 fn reduce_reviews<'a>(
     reviews: &'a [Review],
     head_sha: &str,
+    head_patch_ids: &[String],
+    reach: VerdictReach,
     pr_author: Option<&str>,
 ) -> Vec<&'a Review> {
+    // A head whose diff identity is unknown (no patch ids recorded) speaks for
+    // no other head: an unknown diff is never "the same diff".
+    let carries_unchanged_diff = reach == VerdictReach::UnchangedDiff && !head_patch_ids.is_empty();
     let mut latest = BTreeMap::<&str, &Review>::new();
-    for review in reviews
-        .iter()
-        .filter(|review| review.head_sha.as_deref() == Some(head_sha))
-    {
+    for review in reviews.iter().filter(|review| {
+        review.head_sha.as_deref() == Some(head_sha)
+            || (carries_unchanged_diff && review.head_patch_ids == head_patch_ids)
+    }) {
         // An invalid inherited self approval cannot erase an earlier rejection.
         if review.state == ReviewState::Approved
             && pr_author.is_some_and(|author| review.author.eq_ignore_ascii_case(author))
@@ -59,5 +90,21 @@ pub fn effective_reviews_for_pull_request<'a>(
     reviews: &'a [Review],
     pr: &PullRequest,
 ) -> Vec<&'a Review> {
-    reduce_reviews(reviews, &pr.head.sha, Some(&pr.author))
+    effective_reviews_for_pull_request_with(reviews, pr, VerdictReach::ExactHead)
+}
+
+/// As [`effective_reviews_for_pull_request`], with the reach the repository's
+/// branch-protection rule asks for.
+pub fn effective_reviews_for_pull_request_with<'a>(
+    reviews: &'a [Review],
+    pr: &PullRequest,
+    reach: VerdictReach,
+) -> Vec<&'a Review> {
+    reduce_reviews(
+        reviews,
+        &pr.head.sha,
+        &pr.head_patch_ids,
+        reach,
+        Some(&pr.author),
+    )
 }

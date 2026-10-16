@@ -36,6 +36,8 @@ impl ForgeCore {
             allow_deletions: request.allow_deletions,
             require_signed_commits: request.require_signed_commits,
             require_jankurai_proof: request.require_jankurai_proof,
+            dismiss_stale_approvals: request.dismiss_stale_approvals,
+            require_exact_sha_approval: request.require_exact_sha_approval,
             updated_at: Utc::now(),
         };
         let mut state = self.state.write();

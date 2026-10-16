@@ -6,7 +6,10 @@ mod reviews;
 mod types;
 
 pub use evaluate::{evaluate_branch_protection_with, evaluate_ref_operation};
-pub use reviews::{effective_reviews_for_head, effective_reviews_for_pull_request};
+pub use reviews::{
+    VerdictReach, effective_reviews_for_head, effective_reviews_for_pull_request,
+    effective_reviews_for_pull_request_with,
+};
 pub use types::{
     BranchProtectionEvaluation, EvaluationContext, MergeBlocker, RefOperation, RefOperationBlocker,
     RefOperationEvaluation,
@@ -42,6 +45,7 @@ mod tests {
             merge_commit_sha: None,
             commits: Vec::new(),
             changed_files: Vec::new(),
+            head_patch_ids: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -65,6 +69,8 @@ mod tests {
             allow_deletions: false,
             require_signed_commits: false,
             require_jankurai_proof: false,
+            dismiss_stale_approvals: true,
+            require_exact_sha_approval: true,
             updated_at: Utc::now(),
         };
 

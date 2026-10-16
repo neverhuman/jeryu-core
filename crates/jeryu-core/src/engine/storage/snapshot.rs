@@ -147,12 +147,12 @@ const OWNED_TABLES: &[OwnedTable] = &[
     },
     OwnedTable {
         name: "pull_requests",
-        columns: "id,repo_id,number,issue_number,title,body,state,draft,author,head_json,base_json,mergeable,mergeable_state,merged,merged_at,merge_commit_sha,commits_json,changed_files_json,created_at,updated_at,source_repository",
+        columns: "id,repo_id,number,issue_number,title,body,state,draft,author,head_json,base_json,mergeable,mergeable_state,merged,merged_at,merge_commit_sha,commits_json,changed_files_json,created_at,updated_at,source_repository,head_patch_ids_json",
         primary_key: "id",
     },
     OwnedTable {
         name: "reviews",
-        columns: "id,repo_id,pull_number,author,state,body,submitted_at,head_sha,dismissed_review_id",
+        columns: "id,repo_id,pull_number,author,state,body,submitted_at,head_sha,dismissed_review_id,head_patch_ids_json",
         primary_key: "id",
     },
     OwnedTable {

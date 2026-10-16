@@ -58,6 +58,7 @@ const MIGRATION_0021: &str =
 const MIGRATION_0022: &str =
     include_str!("../../../../../db/migrations/0022_provider_connection_rotation.sql");
 const MIGRATION_0023: &str = include_str!("../../../../../db/migrations/0023_team_bots.sql");
+const MIGRATION_0024: &str = include_str!("../../../../../db/migrations/0024_diff_identity.sql");
 /// The 0017 constraint 0021 removes. Its presence in `sqlite_master` is the
 /// guard: 0017 re-runs `CREATE TABLE IF NOT EXISTS bots` on every open, so a
 /// fresh database gets the old shape first and 0021 rebuilds it once.
@@ -68,7 +69,20 @@ pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     apply_migration_0021(conn)?;
     apply_migration_0022(conn)?;
     apply_migration_0023(conn)?;
+    apply_migration_0024(conn)?;
     Ok(())
+}
+
+/// 0024 adds the recorded diff identity to pull requests and reviews, in one
+/// transaction — SQLite rolls back DDL too, so the pair is applied whole or
+/// not at all. Guarded by the second column it adds.
+fn apply_migration_0024(conn: &Connection) -> Result<()> {
+    if column_exists(conn, "reviews", "head_patch_ids_json")? {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction().map_err(storage_error)?;
+    tx.execute_batch(MIGRATION_0024).map_err(storage_error)?;
+    tx.commit().map_err(storage_error)
 }
 
 /// Rebuild `bots` for team bots, once: guarded by the `owner_kind` column the
@@ -601,6 +615,30 @@ mod tests {
                 .is_err(),
             "origin is closed to transfer/rename"
         );
+    }
+
+    /// 0024 adds the recorded diff identity without inventing one: a head and
+    /// a verdict written before it keep binding their exact sha.
+    #[test]
+    fn migration_0024_leaves_existing_rows_without_a_diff_identity() {
+        let conn = historical_review_connection();
+        apply_migrations(&conn).expect("apply through 0024");
+        apply_migrations(&conn).expect("reapply idempotently");
+        assert!(column_exists(&conn, "pull_requests", "head_patch_ids_json").unwrap());
+        assert!(column_exists(&conn, "reviews", "head_patch_ids_json").unwrap());
+        let unrecorded: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pull_requests WHERE head_patch_ids_json IS NOT NULL
+                 OR EXISTS (SELECT 1 FROM reviews WHERE head_patch_ids_json IS NOT NULL)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unrecorded, 0);
+        let state = super::super::load_state(&conn).unwrap();
+        let key = ("alice".to_string(), "demo".to_string(), 1);
+        assert!(state.pulls[&key].head_patch_ids.is_empty());
+        assert!(state.reviews[&key][0].head_patch_ids.is_empty());
     }
 
     #[test]

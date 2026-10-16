@@ -79,6 +79,8 @@ fn branch_protection_blocks_merge_until_review_and_status_pass() {
             allow_deletions: false,
             require_signed_commits: false,
             require_jankurai_proof: false,
+            dismiss_stale_approvals: true,
+            require_exact_sha_approval: true,
         },
     )
     .unwrap();
@@ -98,6 +100,7 @@ fn branch_protection_blocks_merge_until_review_and_status_pass() {
                 draft: false,
                 commits: Vec::new(),
                 changed_files: Vec::new(),
+                head_patch_ids: Vec::new(),
             },
         )
         .unwrap();
@@ -168,6 +171,8 @@ fn check_run_satisfies_required_context() {
             allow_deletions: false,
             require_signed_commits: false,
             require_jankurai_proof: false,
+            dismiss_stale_approvals: true,
+            require_exact_sha_approval: true,
         },
     )
     .unwrap();
@@ -187,6 +192,7 @@ fn check_run_satisfies_required_context() {
                 draft: false,
                 commits: Vec::new(),
                 changed_files: Vec::new(),
+                head_patch_ids: Vec::new(),
             },
         )
         .unwrap();

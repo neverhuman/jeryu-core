@@ -942,8 +942,8 @@ fn stage_state(conn: &Connection, state: &State) -> Result<()> {
               id, repo_id, number, issue_number, title, body, state, draft,
               author, head_json, base_json, mergeable, mergeable_state, merged,
               merged_at, merge_commit_sha, commits_json, changed_files_json,
-              created_at, updated_at, source_repository
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+              created_at, updated_at, source_repository, head_patch_ids_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
             "#,
             params![
                 pr.id.to_string(),
@@ -967,6 +967,7 @@ fn stage_state(conn: &Connection, state: &State) -> Result<()> {
                 time(pr.created_at),
                 time(pr.updated_at),
                 pr.source_repository,
+                json(&pr.head_patch_ids)?,
             ],
         )
         .map_err(storage_error)?;
@@ -979,8 +980,8 @@ fn stage_state(conn: &Connection, state: &State) -> Result<()> {
                 r#"
                 INSERT INTO temp.reviews (
                   id, repo_id, pull_number, author, state, body, submitted_at,
-                  head_sha, dismissed_review_id
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                  head_sha, dismissed_review_id, head_patch_ids_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 "#,
                 params![
                     review.id.to_string(),
@@ -992,6 +993,7 @@ fn stage_state(conn: &Connection, state: &State) -> Result<()> {
                     time(review.submitted_at),
                     review.head_sha,
                     review.dismissed_review_id.map(|id| id.to_string()),
+                    json(&review.head_patch_ids)?,
                 ],
             )
             .map_err(storage_error)?;
@@ -1940,7 +1942,8 @@ fn load_pull_requests(conn: &Connection, state: &mut State) -> Result<()> {
                    p.state, p.draft, p.author, p.head_json, p.base_json,
                    p.mergeable, p.mergeable_state, p.merged, p.merged_at,
                    p.merge_commit_sha, p.commits_json, p.changed_files_json,
-                   p.created_at, p.updated_at, p.source_repository
+                   p.created_at, p.updated_at, p.source_repository,
+                   p.head_patch_ids_json
             FROM pull_requests p
             JOIN repositories r ON r.id = p.repo_id
             "#,
@@ -1973,6 +1976,8 @@ fn load_pull_requests(conn: &Connection, state: &mut State) -> Result<()> {
             changed_files: parse_json(row.get(18).map_err(storage_error)?)?,
             created_at: parse_time(row.get(19).map_err(storage_error)?)?,
             updated_at: parse_time(row.get(20).map_err(storage_error)?)?,
+            head_patch_ids: parse_optional_json(row.get(22).map_err(storage_error)?)?
+                .unwrap_or_default(),
             source_repository: {
                 let source_repository: String = row.get(21).map_err(storage_error)?;
                 if source_repository.trim().is_empty() {
@@ -1992,7 +1997,8 @@ fn load_reviews(conn: &Connection, state: &mut State) -> Result<()> {
         .prepare(
             r#"
             SELECT r.owner, r.name, v.id, v.pull_number, v.author, v.state,
-                   v.body, v.submitted_at, v.head_sha, v.dismissed_review_id
+                   v.body, v.submitted_at, v.head_sha, v.dismissed_review_id,
+                   v.head_patch_ids_json
             FROM reviews v
             JOIN repositories r ON r.id = v.repo_id
             ORDER BY v.rowid
@@ -2013,6 +2019,8 @@ fn load_reviews(conn: &Connection, state: &mut State) -> Result<()> {
             state: from_text(row.get(5).map_err(storage_error)?)?,
             body: row.get(6).map_err(storage_error)?,
             head_sha: row.get(8).map_err(storage_error)?,
+            head_patch_ids: parse_optional_json(row.get(10).map_err(storage_error)?)?
+                .unwrap_or_default(),
             dismissed_review_id: row
                 .get::<_, Option<String>>(9)
                 .map_err(storage_error)?
