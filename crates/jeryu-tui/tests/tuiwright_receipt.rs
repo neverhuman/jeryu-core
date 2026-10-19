@@ -2,8 +2,9 @@
 //!
 //! These read `JAIN_RELEASE_CI`, `JAIN_HOST_CI_WRITABLE_ROOT`,
 //! `CARGO_TARGET_DIR`, `JERYU_CI_BUILD_CACHE_DIR` and `SOURCE_DATE_EPOCH`, so
-//! they behave differently under the release gate and the PR gate. They live apart from the pure, environment-free render
-//! assertions in `lens_snapshots.rs`.
+//! they behave differently under the release gate and the PR gate. They live
+//! apart from the pure, environment-free render assertions in
+//! `lens_snapshots.rs`.
 
 mod support;
 

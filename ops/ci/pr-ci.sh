@@ -66,7 +66,10 @@ if [ -n "${JERYU_CI_BUILD_CACHE_DIR:-}" ]; then
     exit 1
   fi
   CARGO_TARGET_DIR="$(cd "$cache_dir" && pwd -P)"
-  export CARGO_TARGET_DIR CARGO_INCREMENTAL=0
+  # Re-export the resolved spelling too, so anything comparing the two (the TUIwright receipt
+  # test keeps its receipt out of the cache that way) compares identical strings.
+  JERYU_CI_BUILD_CACHE_DIR="$CARGO_TARGET_DIR"
+  export CARGO_TARGET_DIR JERYU_CI_BUILD_CACHE_DIR CARGO_INCREMENTAL=0
   echo "[pr-ci] ordinary compilation in ${CARGO_TARGET_DIR} (the gate runner's build cache)" >&2
 fi
 

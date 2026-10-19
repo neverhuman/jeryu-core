@@ -28,7 +28,8 @@ fi
 if command -v actionlint >/dev/null 2>&1 && [[ -d .github/workflows ]]; then
   actionlint .github/workflows/*.yml
 fi
-if find . -path './.git' -prune -o -name '.env' -type f -print | grep -q .; then
+# target/ is build output (and, on the gate host, a seeded build cache), never committed source.
+if find . \( -path './.git' -o -path './target' \) -prune -o -name '.env' -type f -print | grep -q .; then
   printf 'security check failed: committed .env file found\n' >&2
   exit 1
 fi
