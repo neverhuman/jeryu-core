@@ -44,7 +44,6 @@ fn fixture(core: &ForgeCore) -> PullRequest {
                 draft: false,
                 commits: vec![],
                 changed_files: vec![],
-                head_patch_ids: Vec::new(),
             },
         )
         .unwrap();

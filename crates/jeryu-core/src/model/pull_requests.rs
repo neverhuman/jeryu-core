@@ -127,10 +127,10 @@ pub struct CreatePullRequestRequest {
     pub commits: Vec<PullRequestCommit>,
     #[serde(default)]
     pub changed_files: Vec<String>,
-    /// Diff identity of the head, as `jeryu_gitd::patch_ids` computes it.
-    /// Left out means unknown.
-    #[serde(default)]
-    pub head_patch_ids: Vec<String>,
+    // No diff identity here: a pull request opens with an unknown one. Only
+    // the forge records it, after computing it from git itself
+    // (`ForgeCore::refresh_pull_request_heads_for_ref_with_diff`), so an
+    // author can never declare the identity an approval is later compared to.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

@@ -6,8 +6,8 @@
 //! identity — a pure rebase — and for no other.
 
 use jeryu_core::{
-    CreatePullRequestRequest, CreateRepositoryRequest, CreateReviewRequest, ForgeCore, ForgeError,
-    MergeBlocker, ReviewState, SetBranchProtectionRequest,
+    CreatePullRequestRequest, CreateRepositoryRequest, CreateReviewRequest, DismissReviewRequest,
+    ForgeCore, ForgeError, MergeBlocker, ReviewState, SetBranchProtectionRequest,
 };
 use rusqlite::Connection;
 
@@ -45,21 +45,25 @@ fn seed(core: &ForgeCore, dismiss_stale_approvals: bool, require_exact_sha_appro
         },
     )
     .unwrap();
-    core.create_pull_request(
-        "alice",
-        "demo",
-        "author",
-        CreatePullRequestRequest {
-            title: "reviewed change".to_string(),
-            head: "feature".to_string(),
-            base: "main".to_string(),
-            head_sha: Some(HEAD.to_string()),
-            head_patch_ids: patch_ids(&[PATCH_ONE, PATCH_TWO]),
-            ..Default::default()
-        },
-    )
-    .unwrap()
-    .number
+    let number = core
+        .create_pull_request(
+            "alice",
+            "demo",
+            "author",
+            CreatePullRequestRequest {
+                title: "reviewed change".to_string(),
+                head: "feature".to_string(),
+                base: "main".to_string(),
+                head_sha: Some(HEAD.to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .number;
+    // A pull request opens with an unknown identity; the forge records it
+    // after computing it from git, against the pull request's own base.
+    push(core, HEAD, &[PATCH_ONE, PATCH_TWO]);
+    number
 }
 
 fn approve(core: &ForgeCore, number: u64) {
@@ -79,14 +83,27 @@ fn approve(core: &ForgeCore, number: u64) {
 }
 
 fn push(core: &ForgeCore, head_sha: &str, head_patch_ids: &[&str]) {
+    let base = recorded_base(core);
     core.refresh_pull_request_heads_for_ref_with_diff(
         "alice",
         "demo",
         "feature",
         head_sha,
+        &base,
         &patch_ids(head_patch_ids),
     )
     .unwrap();
+}
+
+/// The base the only pull request in these tests is recorded on.
+fn recorded_base(core: &ForgeCore) -> String {
+    core.list_pull_requests("alice", "demo", None)
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("a pull request")
+        .base
+        .sha
 }
 
 fn missing_review(core: &ForgeCore, number: u64) -> bool {
@@ -223,7 +240,14 @@ fn a_diff_identity_is_a_bounded_list_of_object_ids() {
         vec![PATCH_ONE.to_string(); 4097],
     ] {
         let error = core
-            .refresh_pull_request_heads_for_ref_with_diff("alice", "demo", "feature", REBASED, &bad)
+            .refresh_pull_request_heads_for_ref_with_diff(
+                "alice",
+                "demo",
+                "feature",
+                REBASED,
+                &recorded_base(&core),
+                &bad,
+            )
             .unwrap_err();
         assert!(matches!(error, ForgeError::Validation(_)), "{error:?}");
     }
@@ -265,4 +289,105 @@ fn diff_identity_survives_sqlite_reopen() {
         })
         .unwrap();
     assert_eq!(stored, format!("[\"{PATCH_ONE}\",\"{PATCH_TWO}\"]"));
+}
+
+fn approval_id(core: &ForgeCore, number: u64) -> uuid::Uuid {
+    core.list_reviews("alice", "demo", number)
+        .unwrap()
+        .into_iter()
+        .find(|review| review.state == ReviewState::Approved)
+        .expect("an approval")
+        .id
+}
+
+fn dismiss(
+    core: &ForgeCore,
+    number: u64,
+    review_id: uuid::Uuid,
+    head: &str,
+) -> Result<(), ForgeError> {
+    core.dismiss_review(
+        "alice",
+        "demo",
+        number,
+        "reviewer",
+        DismissReviewRequest {
+            review_id,
+            expected_head_sha: head.to_string(),
+            reason: "withdrawn".to_string(),
+        },
+    )
+    .map(|_| ())
+}
+
+/// The verdict that counts after a content-free rebase is the one its author
+/// can withdraw: dismissing it at the new head takes the approval away.
+#[test]
+fn a_carried_approval_can_be_dismissed_at_the_new_head() {
+    let core = ForgeCore::new();
+    let number = seed(&core, false, false);
+    approve(&core, number);
+    push(&core, REBASED, &[PATCH_ONE, PATCH_TWO]);
+    assert!(!missing_review(&core, number));
+    dismiss(&core, number, approval_id(&core, number), REBASED).unwrap();
+    assert!(
+        missing_review(&core, number),
+        "the withdrawn approval no longer counts"
+    );
+}
+
+/// A withdrawn approval stays withdrawn when a later push brings back the
+/// identity it was written against.
+#[test]
+fn a_withdrawn_approval_does_not_resurface() {
+    let core = ForgeCore::new();
+    let number = seed(&core, false, false);
+    approve(&core, number);
+    dismiss(&core, number, approval_id(&core, number), HEAD).unwrap();
+    assert!(missing_review(&core, number));
+    push(&core, REBASED, &[PATCH_ONE, CHANGED_PATCH]);
+    push(&core, HEAD, &[PATCH_ONE, PATCH_TWO]);
+    assert!(missing_review(&core, number));
+}
+
+/// An identity is a diff against one base: a pull request recorded on another
+/// base gets an unknown identity, and moving a pull request's base drops its
+/// identity, so neither carries an approval.
+#[test]
+fn an_identity_only_describes_the_base_it_was_computed_against() {
+    let core = ForgeCore::new();
+    let number = seed(&core, false, false);
+    approve(&core, number);
+    core.refresh_pull_request_heads_for_ref_with_diff(
+        "alice",
+        "demo",
+        "feature",
+        REBASED,
+        "cccccccccccccccccccccccccccccccccccccccc",
+        &patch_ids(&[PATCH_ONE, PATCH_TWO]),
+    )
+    .unwrap();
+    let pr = core.get_pull_request("alice", "demo", number).unwrap();
+    assert!(
+        pr.head_patch_ids.is_empty(),
+        "computed against another base"
+    );
+    assert!(missing_review(&core, number));
+
+    let core = ForgeCore::new();
+    let number = seed(&core, false, false);
+    core.record_pull_request_base(
+        "forge",
+        "alice",
+        "demo",
+        number,
+        HEAD,
+        "dddddddddddddddddddddddddddddddddddddddd",
+    )
+    .unwrap();
+    let pr = core.get_pull_request("alice", "demo", number).unwrap();
+    assert!(
+        pr.head_patch_ids.is_empty(),
+        "a new base drops the old identity"
+    );
 }

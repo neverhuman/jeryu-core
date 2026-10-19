@@ -128,7 +128,6 @@ fn seed_full_repo(core: &ForgeCore, owner: &str, repo: &str) -> String {
                     parents: 1,
                 }],
                 changed_files: vec!["src/lib.rs".to_string()],
-                head_patch_ids: Vec::new(),
             },
         )
         .unwrap();

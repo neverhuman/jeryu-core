@@ -32,8 +32,9 @@ pub struct BranchProtectionRule {
     pub require_jankurai_proof: bool,
     /// Whether a push dismisses the approvals of the previous head. When off,
     /// an approval survives a push that leaves the diff unchanged (equal
-    /// per-commit patch ids — a pure rebase or reword); any content change
-    /// still invalidates it. Defaulted ON so a rule stored before this field
+    /// per-commit content digests, whitespace included -- a pure rebase or
+    /// reword); any content change still invalidates it, and a range holding a
+    /// merge or an empty commit has no identity, so nothing carries over it. Defaulted ON so a rule stored before this field
     /// existed keeps the exact-head behaviour it was written with.
     #[serde(default = "default_true")]
     pub dismiss_stale_approvals: bool,

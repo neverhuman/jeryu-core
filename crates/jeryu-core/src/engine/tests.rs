@@ -100,7 +100,6 @@ fn branch_protection_blocks_merge_until_review_and_status_pass() {
                 draft: false,
                 commits: Vec::new(),
                 changed_files: Vec::new(),
-                head_patch_ids: Vec::new(),
             },
         )
         .unwrap();
@@ -192,7 +191,6 @@ fn check_run_satisfies_required_context() {
                 draft: false,
                 commits: Vec::new(),
                 changed_files: Vec::new(),
-                head_patch_ids: Vec::new(),
             },
         )
         .unwrap();

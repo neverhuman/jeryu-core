@@ -50,11 +50,34 @@ fn reduce_reviews<'a>(
     // A head whose diff identity is unknown (no patch ids recorded) speaks for
     // no other head: an unknown diff is never "the same diff".
     let carries_unchanged_diff = reach == VerdictReach::UnchangedDiff && !head_patch_ids.is_empty();
+    // A targeted dismissal withdraws its verdict for good, at every head and
+    // identity: a withdrawn approval never resurfaces because the identity
+    // came back to the one it was written against.
+    // Only a dismissal `dismiss_review` writes counts: by the verdict's own
+    // author, recorded against a head. Another reviewer's or a historical,
+    // head-less dismissal withdraws nothing.
+    let withdrawn: std::collections::BTreeSet<_> = reviews
+        .iter()
+        .filter(|review| review.state == ReviewState::Dismissed && review.head_sha.is_some())
+        .filter_map(|dismissal| {
+            let target = dismissal.dismissed_review_id?;
+            reviews
+                .iter()
+                .any(|review| review.id == target && review.author == dismissal.author)
+                .then_some(target)
+        })
+        .collect();
     let mut latest = BTreeMap::<&str, &Review>::new();
     for review in reviews.iter().filter(|review| {
         review.head_sha.as_deref() == Some(head_sha)
             || (carries_unchanged_diff && review.head_patch_ids == head_patch_ids)
     }) {
+        if withdrawn.contains(&review.id) {
+            // Still a later verdict by this reviewer: it replaces the earlier
+            // one, so the earlier one cannot come back either.
+            latest.remove(review.author.as_str());
+            continue;
+        }
         // An invalid inherited self approval cannot erase an earlier rejection.
         if review.state == ReviewState::Approved
             && pr_author.is_some_and(|author| review.author.eq_ignore_ascii_case(author))

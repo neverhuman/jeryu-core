@@ -26,14 +26,15 @@ fn normalize_source_repository(
         .unwrap_or_else(|| format!("{owner}/{repo}"))
 }
 
-/// Most commits a pull request's recorded diff identity may cover. A patch-id
+/// Most commits a pull request's recorded diff identity may cover. A digest
 /// list is attacker-influenced in size (a pusher chooses how many commits it
 /// sends), so the stored list is bounded rather than growing with the branch.
 const MAX_HEAD_PATCH_IDS: usize = 4096;
 
-/// A recorded diff identity is a list of full object ids. Core cannot check
-/// that they are the pull request's real patch ids — it holds no git objects —
-/// but it refuses a shape no `git patch-id` ever produces.
+/// A recorded diff identity is a list of hex digests. Core cannot check that
+/// they are the pull request's real per-commit digests -- it holds no git
+/// objects -- but it refuses any other shape. Only the forge records one, from
+/// `jeryu_gitd::patch_ids`; a pull request request cannot carry one.
 fn validate_patch_ids(patch_ids: Vec<String>) -> Result<Vec<String>> {
     if patch_ids.len() > MAX_HEAD_PATCH_IDS {
         return Err(ForgeError::Validation(format!(
@@ -154,7 +155,7 @@ impl ForgeCore {
             merge_commit_sha: None,
             commits: request.commits,
             changed_files: request.changed_files,
-            head_patch_ids: validate_patch_ids(request.head_patch_ids)?,
+            head_patch_ids: Vec::new(),
             created_at: now,
             updated_at: now,
         };
@@ -292,13 +293,15 @@ impl ForgeCore {
         ref_name: &str,
         head_sha: &str,
     ) -> Result<Vec<PullRequest>> {
-        self.refresh_pull_request_heads_for_ref_with_diff(owner, repo, ref_name, head_sha, &[])
+        self.refresh_pull_request_heads_for_ref_with_diff(owner, repo, ref_name, head_sha, "", &[])
     }
 
     /// As [`ForgeCore::refresh_pull_request_heads_for_ref`], recording the new
-    /// head's diff identity: git's per-commit patch ids for the pull request's
-    /// `base..head`, oldest first, computed by the pusher
-    /// (`jeryu_gitd::patch_ids`) because Core holds no git objects.
+    /// head's diff identity: one content digest per commit of `base_sha..head`,
+    /// oldest first, computed by the forge with `jeryu_gitd::patch_ids` because
+    /// Core holds no git objects. It is written only to open pull requests
+    /// recorded on `base_sha`; any other pull request from this branch gets an
+    /// unknown (empty) identity.
     ///
     /// This is what lets a branch whose rule has `dismiss_stale_approvals` off
     /// keep an approval across a push that changed no content: the approval was
@@ -311,6 +314,7 @@ impl ForgeCore {
         repo: &str,
         ref_name: &str,
         head_sha: &str,
+        base_sha: &str,
         head_patch_ids: &[String],
     ) -> Result<Vec<PullRequest>> {
         let head_patch_ids = validate_patch_ids(head_patch_ids.to_vec())?;
@@ -342,7 +346,14 @@ impl ForgeCore {
         for key in keys {
             if let Some(pr) = state.pulls.get_mut(&key) {
                 pr.head.sha = head_sha.to_string();
-                pr.head_patch_ids = head_patch_ids.clone();
+                // The identity is a diff against `base_sha`: it describes only
+                // a pull request recorded on that base. Any other pull request
+                // from this branch gets an unknown identity, never a wrong one.
+                pr.head_patch_ids = if pr.base.sha.eq_ignore_ascii_case(base_sha) {
+                    head_patch_ids.clone()
+                } else {
+                    Vec::new()
+                };
                 pr.updated_at = now;
             }
             let Some(mut pr) = state.pulls.get(&key).cloned() else {
@@ -429,6 +440,8 @@ impl ForgeCore {
             let previous_base = pr.base.sha.clone();
             let mut updated = pr.clone();
             updated.base.sha = base_sha.to_string();
+            // The recorded identity was computed against the old base.
+            updated.head_patch_ids = Vec::new();
             updated.updated_at = Utc::now();
             let evaluation = evaluate_locked(&state, &updated, None);
             apply_evaluation(&mut updated, evaluation);

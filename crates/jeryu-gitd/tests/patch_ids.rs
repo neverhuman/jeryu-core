@@ -159,7 +159,7 @@ fn a_failing_git_is_an_error_not_an_empty_diff_identity() {
     let fake = fx.work.join("broken-git");
     std::fs::write(
         &fake,
-        "#!/bin/sh\nfor arg; do [ \"$arg\" = patch-id ] && exit 128; done\nexec git \"$@\"\n",
+        "#!/bin/sh\nfor arg; do [ \"$arg\" = diff-tree ] && exit 128; done\nexec git \"$@\"\n",
     )
     .unwrap();
     let status = Command::new("chmod").arg("+x").arg(&fake).status().unwrap();
@@ -175,5 +175,73 @@ fn a_failing_git_is_an_error_not_an_empty_diff_identity() {
         ),
         "{result:?}"
     );
+    fx.cleanup();
+}
+
+/// A merge commit's resolution is no single diff, so a range holding one has
+/// no identity: an approval can never carry over a hand-edited merge.
+#[test]
+fn a_range_with_a_merge_has_no_diff_identity() {
+    if !common::git_available() {
+        return;
+    }
+    let fx = seed("jeryu-patch-ids-merge");
+    let base = fx.main_oid.clone();
+    commit(&fx.work, "feature.txt", "feature\n", "feature");
+    git(&fx.work, &["checkout", "--quiet", "-b", "side", &base]);
+    commit(&fx.work, "side.txt", "side\n", "side");
+    git(&fx.work, &["checkout", "--quiet", "-"]);
+    git(
+        &fx.work,
+        &["merge", "--quiet", "--no-edit", "--no-ff", "side"],
+    );
+    let merged = git(&fx.work, &["rev-parse", "HEAD"]);
+    fx.publish("refs/heads/feature");
+    assert!(
+        patch_ids("git", &fx.repo, &base, &merged)
+            .unwrap()
+            .is_empty()
+    );
+    fx.cleanup();
+}
+
+/// Whitespace is content: re-indenting a line changes the identity (git
+/// patch-id would call the two the same).
+#[test]
+fn a_whitespace_only_change_changes_the_diff_identity() {
+    if !common::git_available() {
+        return;
+    }
+    let fx = seed("jeryu-patch-ids-whitespace");
+    let base = fx.main_oid.clone();
+    let spaced = commit(&fx.work, "job.py", "if ok:\n    run()\n", "job");
+    fx.publish("refs/heads/feature");
+    let before = patch_ids("git", &fx.repo, &base, &spaced).unwrap();
+    git(&fx.work, &["checkout", "--quiet", "--detach", &base]);
+    let tabbed = commit(&fx.work, "job.py", "if ok:\nrun()\n", "job");
+    fx.publish("refs/heads/feature");
+    let after = patch_ids("git", &fx.repo, &base, &tabbed).unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(after.len(), 1);
+    assert_ne!(before, after);
+    fx.cleanup();
+}
+
+/// A commit with no diff has no content to compare, so the range has none.
+#[test]
+fn a_range_with_an_empty_commit_has_no_diff_identity() {
+    if !common::git_available() {
+        return;
+    }
+    let fx = seed("jeryu-patch-ids-empty-commit");
+    let base = fx.main_oid.clone();
+    commit(&fx.work, "feature.txt", "feature\n", "feature");
+    git(
+        &fx.work,
+        &["commit", "--quiet", "--allow-empty", "-m", "nothing"],
+    );
+    let head = git(&fx.work, &["rev-parse", "HEAD"]);
+    fx.publish("refs/heads/feature");
+    assert!(patch_ids("git", &fx.repo, &base, &head).unwrap().is_empty());
     fx.cleanup();
 }

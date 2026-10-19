@@ -5,7 +5,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::{ForgeCore, apply_evaluation, emit_event_locked, evaluate_locked};
-use crate::branch_protection::effective_reviews_for_head;
+use crate::branch_protection::{
+    VerdictReach, effective_reviews_for_head, effective_reviews_for_pull_request_with,
+};
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
 use crate::webhooks::event_payload;
@@ -80,7 +82,7 @@ impl ForgeCore {
         super::auth::require_login(author)?;
         let mut state = self.state.write();
         let key = (owner.to_string(), repo.to_string(), number);
-        let (head_sha, head_patch_ids) = match state.pulls.get(&key) {
+        let (head_sha, head_patch_ids, pr_now) = match state.pulls.get(&key) {
             Some(pr) => {
                 if request.event == ReviewState::Approved && pr.author.eq_ignore_ascii_case(author)
                 {
@@ -97,7 +99,7 @@ impl ForgeCore {
                         "pull request {owner}/{repo}#{number} head changed"
                     )));
                 }
-                (pr.head.sha.clone(), pr.head_patch_ids.clone())
+                (pr.head.sha.clone(), pr.head_patch_ids.clone(), pr.clone())
             }
             None => {
                 return Err(ForgeError::NotFound(format!(
@@ -126,11 +128,21 @@ impl ForgeCore {
                     "dismissal target must be an explicit review verdict".to_string(),
                 ));
             }
-            if target.head_sha.as_deref() != Some(head_sha.as_str())
-                || !effective_reviews_for_head(reviews, &head_sha)
-                    .iter()
-                    .any(|review| review.id == target_id)
-            {
+            // The verdict may be counting at this head either because it was
+            // written here or because it carries over an unchanged diff.
+            // Withdrawing either is always allowed: it can only remove an
+            // approval or a rejection, never add one.
+            let counting_here = effective_reviews_for_head(reviews, &head_sha)
+                .iter()
+                .any(|review| review.id == target_id)
+                || effective_reviews_for_pull_request_with(
+                    reviews,
+                    &pr_now,
+                    VerdictReach::UnchangedDiff,
+                )
+                .iter()
+                .any(|review| review.id == target_id);
+            if !counting_here {
                 return Err(ForgeError::Conflict(
                     "dismissal target is not the reviewer's current-head verdict".to_string(),
                 ));

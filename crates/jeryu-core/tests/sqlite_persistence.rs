@@ -357,7 +357,6 @@ fn sqlite_store_round_trips_core_forge_resources() {
                         parents: 1,
                     }],
                     changed_files: vec!["src/lib.rs".to_string()],
-                    head_patch_ids: Vec::new(),
                 },
             )
             .unwrap();
@@ -587,7 +586,6 @@ fn sqlite_store_round_trips_core_forge_resources() {
                 draft: true,
                 commits: Vec::new(),
                 changed_files: Vec::new(),
-                head_patch_ids: Vec::new(),
             },
         )
         .unwrap();
