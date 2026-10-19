@@ -1,8 +1,8 @@
 //! tuiwright receipt custody and emission tests.
 //!
 //! These read `JAIN_RELEASE_CI`, `JAIN_HOST_CI_WRITABLE_ROOT`,
-//! `CARGO_TARGET_DIR` and `SOURCE_DATE_EPOCH`, so they behave differently under
-//! the release gate. They live apart from the pure, environment-free render
+//! `CARGO_TARGET_DIR`, `JERYU_CI_BUILD_CACHE_DIR` and `SOURCE_DATE_EPOCH`, so
+//! they behave differently under the release gate and the PR gate. They live apart from the pure, environment-free render
 //! assertions in `lens_snapshots.rs`.
 
 mod support;
@@ -84,11 +84,27 @@ fn select_receipt_target_dir(
     }
 }
 
+/// The runtime `CARGO_TARGET_DIR` a receipt may use. The gate runner's build
+/// cache (`JERYU_CI_BUILD_CACHE_DIR`) holds only ordinary compilation and is
+/// shared between gates, so a receipt never goes there: when
+/// `CARGO_TARGET_DIR` names it, custody falls through to the `target/` found
+/// from `CARGO_TARGET_TMPDIR`, which is the checkout's own `target/` because
+/// the cache lives at `<checkout>/target/build-cache`.
+fn receipt_cargo_target(
+    cargo_target_dir: Option<std::ffi::OsString>,
+    build_cache_dir: Option<std::ffi::OsString>,
+) -> Option<std::ffi::OsString> {
+    cargo_target_dir.filter(|dir| build_cache_dir.as_ref() != Some(dir))
+}
+
 fn workspace_target_dir() -> Result<std::path::PathBuf, String> {
     let release_ci =
         std::env::var_os("JAIN_RELEASE_CI").as_deref() == Some(std::ffi::OsStr::new("1"));
     let writable_root = std::env::var_os("JAIN_HOST_CI_WRITABLE_ROOT");
-    let cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR");
+    let cargo_target_dir = receipt_cargo_target(
+        std::env::var_os("CARGO_TARGET_DIR"),
+        std::env::var_os("JERYU_CI_BUILD_CACHE_DIR"),
+    );
     let current_dir = std::env::current_dir()
         .map_err(|error| format!("resolve current directory for TUIwright receipt: {error}"))?;
     let selected = select_receipt_target_dir(
@@ -167,6 +183,31 @@ fn ordinary_receipt_target_prefers_runtime_cargo_target() {
     )
     .expect("select ordinary receipt target");
     assert_eq!(selected, std::path::Path::new("/checkout/build/target"));
+}
+
+#[test]
+fn ordinary_receipt_target_never_uses_the_gate_build_cache() {
+    let cache = Some(std::ffi::OsString::from("/checkout/target/build-cache"));
+    assert_eq!(receipt_cargo_target(cache.clone(), cache.clone()), None);
+    assert_eq!(
+        receipt_cargo_target(Some("build/target".into()), cache),
+        Some("build/target".into())
+    );
+    assert_eq!(
+        receipt_cargo_target(Some("build/target".into()), None),
+        Some("build/target".into())
+    );
+    // With the cache skipped, custody is the checkout target/ above the
+    // cache's compile-time tmpdir.
+    let selected = select_receipt_target_dir(
+        false,
+        None,
+        None,
+        std::path::Path::new("/checkout/target/build-cache/tmp"),
+        std::path::Path::new("/checkout"),
+    )
+    .expect("select receipt target beside the build cache");
+    assert_eq!(selected, std::path::Path::new("/checkout/target"));
 }
 
 /// Render every tab at both sweep sizes across the healthy and degraded

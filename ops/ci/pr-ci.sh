@@ -47,6 +47,19 @@ consumer_repo="$(awk -F'\"' '/^workspace =/ {print $2; exit}' agent/audit-policy
 bash "$render_real" --check --repo "$consumer_repo" \
 --repo-root "$consumer_repo=$repo_root"
 
+# Ordinary compilation -- cargo check and the workspace test build -- builds in the gate runner's
+# retained per-slot cache when the gate host offers one (JERYU_CI_BUILD_CACHE_DIR; jeryu-ci-runner
+# ops/pr-gate/README.md, "Reusing ordinary compilation without retaining proof"). Reports this
+# recipe writes (.jankurai/, target/jankurai/, target/security/, target/artifact-support/) name
+# target/ literally and stay outside the cache; the TUIwright receipt test skips the cache too, and
+# the coverage ratchet below builds outside it. The runner retains the cache only after a green gate
+# and discards it when tools, recipe or Cargo.lock change; cargo still checks every source file's
+# freshness. Unset (a laptop, another host), cargo builds into target/ as before.
+if [ -n "${JERYU_CI_BUILD_CACHE_DIR:-}" ]; then
+  export CARGO_TARGET_DIR="${JERYU_CI_BUILD_CACHE_DIR}"
+  echo "[pr-ci] ordinary compilation in ${CARGO_TARGET_DIR} (the gate runner's build cache)" >&2
+fi
+
 echo "[pr-ci] (jobs=$JOBS) standard lanes" >&2
 bash ops/ci/fast.sh
 JERYU_SPLIT_FULL_CHECK=1 bash ops/ci/check.sh
@@ -62,7 +75,14 @@ cargo nextest run --workspace --build-jobs "$JOBS" --test-threads "$JOBS"
 # report it and continue rather than block on a missing tool.
 echo "[pr-ci] coverage ratchet" >&2
 coverage_rc=0
-bash ops/ci/coverage.sh || coverage_rc=$?
+if [ -n "${JERYU_CI_BUILD_CACHE_DIR:-}" ]; then
+  # Never in the shared build cache: cargo-llvm-cov builds instrumented objects in
+  # $CARGO_TARGET_DIR/llvm-cov-target and reports over every profile it finds there, and
+  # coverage.sh writes its summary under $CARGO_TARGET_DIR. In target/ both start fresh.
+  CARGO_TARGET_DIR=target bash ops/ci/coverage.sh || coverage_rc=$?
+else
+  bash ops/ci/coverage.sh || coverage_rc=$?
+fi
 if [ "$coverage_rc" -eq 3 ]; then
   echo "[pr-ci] coverage PENDING: cargo-llvm-cov not installed" >&2
 elif [ "$coverage_rc" -ne 0 ]; then
