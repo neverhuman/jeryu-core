@@ -3,7 +3,7 @@
 //! The durable implementation lives in `jeryu-core`; this crate gives local
 //! agents and audit tools a stable domain route for typed, repairable errors.
 
-pub use jeryu_core::{AgentRepairHint, JeryuError, JeryuResult};
+pub use jeryu_core::{AgentRepairHint, ForgeError, JeryuError, JeryuResult};
 
 pub const AGENT_FRIENDLY_EXCEPTION_REQUIRED_FIELDS: &[&str] = &[
     "purpose",
@@ -33,6 +33,12 @@ pub type AgentFriendlyExceptionPattern = DomainExceptionPattern;
 /// Return the machine-readable repair hint for a domain error.
 pub fn repair_hint(error: &JeryuError) -> AgentRepairHint {
     error.agent_repair_hint()
+}
+
+/// Return the machine-readable repair hint for a store failure, or `None`
+/// for errors the store does not raise.
+pub fn store_repair_hint(error: &ForgeError) -> Option<AgentRepairHint> {
+    error.storage_repair_hint()
 }
 
 /// Return the canonical exception pattern expected by agents.
@@ -67,9 +73,9 @@ pub fn agent_friendly_exception_common_fixes() -> &'static [&'static str] {
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_FRIENDLY_EXCEPTION_REQUIRED_FIELDS, JeryuError,
+        AGENT_FRIENDLY_EXCEPTION_REQUIRED_FIELDS, ForgeError, JeryuError,
         agent_friendly_exception_common_fixes, agent_friendly_exception_docs_url,
-        agent_friendly_exception_pattern, exception_pattern, repair_hint,
+        agent_friendly_exception_pattern, exception_pattern, repair_hint, store_repair_hint,
     };
 
     #[test]
@@ -79,6 +85,15 @@ mod tests {
         assert_eq!(hint.docs_url, "docs/errors.md#policy-denied");
         assert!(hint.common_fixes.iter().any(|fix| fix.contains("receipt")));
         assert!(hint.repair_hint.contains("rerun"));
+    }
+
+    #[test]
+    fn store_failures_expose_agent_repair_hints() {
+        let locked = ForgeError::StoreCustody("store_locked: in use".to_string());
+        let hint = store_repair_hint(&locked).expect("store hint");
+        assert_eq!(hint.reason, "store_locked");
+        assert_eq!(hint.docs_url, "docs/errors.md#store-custody");
+        assert!(store_repair_hint(&ForgeError::NotFound("x".to_string())).is_none());
     }
 
     #[test]
