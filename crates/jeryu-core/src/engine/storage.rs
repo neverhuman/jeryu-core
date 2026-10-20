@@ -14,6 +14,7 @@ mod deployments;
 mod load;
 mod migrations;
 mod provider_connections;
+mod repair;
 mod snapshot;
 mod stage;
 mod team_bots;
