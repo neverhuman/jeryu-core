@@ -626,22 +626,24 @@ mod tests {
         apply_migrations(&conn).expect("reapply idempotently");
         assert!(column_exists(&conn, "pull_requests", "head_patch_ids_json").unwrap());
         assert!(column_exists(&conn, "reviews", "head_patch_ids_json").unwrap());
-        for table in ["pull_requests", "reviews"] {
-            let total: i64 = conn
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
-                .unwrap();
-            assert!(total > 0, "{table} fixture must contain rows");
-            let recorded: i64 = conn
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM {table} WHERE head_patch_ids_json IS NOT NULL"),
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(recorded, 0, "{table}");
-        }
+        let pulls: (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(head_patch_ids_json) FROM pull_requests",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let reviews: (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(head_patch_ids_json) FROM reviews",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(pulls.0 > 0, "pull_requests fixture must contain rows");
+        assert!(reviews.0 > 0, "reviews fixture must contain rows");
+        assert_eq!(pulls.1, 0, "pull_requests identities remain NULL");
+        assert_eq!(reviews.1, 0, "review identities remain NULL");
         let state = super::super::load_state(&conn).unwrap();
         let key = ("alice".to_string(), "demo".to_string(), 1);
         assert!(state.pulls[&key].head_patch_ids.is_empty());
