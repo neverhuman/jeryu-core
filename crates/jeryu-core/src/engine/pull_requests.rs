@@ -29,32 +29,45 @@ fn normalize_source_repository(
 /// Most commits a pull request's recorded diff identity may cover. A digest
 /// list is attacker-influenced in size (a pusher chooses how many commits it
 /// sends), so the stored list is bounded rather than growing with the branch.
-const MAX_HEAD_PATCH_IDS: usize = 4096;
+const MAX_HEAD_PATCH_IDS: usize = jeryu_gitd::patch_id::MAX_COMMITS;
 
-/// A recorded diff identity is a list of hex digests. Core cannot check that
-/// they are the pull request's real per-commit digests -- it holds no git
-/// objects -- but it refuses any other shape. Only the forge records one, from
-/// `jeryu_gitd::patch_ids`; a pull request request cannot carry one.
-fn validate_patch_ids(patch_ids: Vec<String>) -> Result<Vec<String>> {
+/// Bound and validate digests computed from repository objects.
+fn validate_patch_ids(patch_ids: &[String]) -> Result<()> {
     if patch_ids.len() > MAX_HEAD_PATCH_IDS {
         return Err(ForgeError::Validation(format!(
             "a diff identity covers at most {MAX_HEAD_PATCH_IDS} commits"
         )));
     }
-    for id in &patch_ids {
-        if !(matches!(id.len(), 40 | 64) && id.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+    for id in patch_ids {
+        if !jeryu_gitd::patch_id::is_review_patch_id(id) {
             return Err(ForgeError::Validation(
-                "patch ids must be 40 or 64 hex digits".to_string(),
+                "patch ids must be v2-tagged SHA-256 digests".to_string(),
             ));
         }
     }
-    Ok(patch_ids)
+    Ok(())
+}
+
+fn validate_diff_base(base_sha: &str) -> Result<()> {
+    if matches!(base_sha.len(), 40 | 64) && base_sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(ForgeError::Validation(
+            "base sha must be 40 or 64 hex digits".to_string(),
+        ))
+    }
+}
+
+struct HeadEvidence<'a> {
+    base_sha: &'a str,
+    patch_ids: &'a [String],
+    commits: Option<&'a [PullRequestCommit]>,
 }
 
 /// Outcome of the read-only merge-gate phase ([`ForgeCore::evaluate_merge_readiness`]).
 ///
 /// This is the seam that lets `jeryu-api` run a real git merge after the gate
-/// passes without `jeryu-core` ever depending on the git backend: core
+/// passes while keeping merge execution in the adapter: Core
 /// discloses the base/head shas to merge, and the handler computes the real
 /// merge sha and feeds it back through [`ForgeCore::finalize_merge`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,21 +306,21 @@ impl ForgeCore {
         ref_name: &str,
         head_sha: &str,
     ) -> Result<Vec<PullRequest>> {
-        self.refresh_pull_request_heads_for_ref_with_diff(owner, repo, ref_name, head_sha, "", &[])
+        self.refresh_pull_request_heads_with_identity(
+            owner,
+            repo,
+            ref_name,
+            head_sha,
+            HeadEvidence {
+                base_sha: "",
+                patch_ids: &[],
+                commits: None,
+            },
+        )
     }
 
-    /// As [`ForgeCore::refresh_pull_request_heads_for_ref`], recording the new
-    /// head's diff identity: one content digest per commit of `base_sha..head`,
-    /// oldest first, computed by the forge with `jeryu_gitd::patch_ids` because
-    /// Core holds no git objects. It is written only to open pull requests
-    /// recorded on `base_sha`; any other pull request from this branch gets an
-    /// unknown (empty) identity.
-    ///
-    /// This is what lets a branch whose rule has `dismiss_stale_approvals` off
-    /// keep an approval across a push that changed no content: the approval was
-    /// written against this same list. An empty list means the pusher did not
-    /// compute one, and then every approval of the previous head is dismissed —
-    /// the strict behaviour, which is also what an older pusher gets.
+    /// Refresh without trusting caller-supplied diff identities. Nonempty lists
+    /// are refused; use `refresh_pull_request_heads_from_git` to compute one.
     pub fn refresh_pull_request_heads_for_ref_with_diff(
         &self,
         owner: &str,
@@ -317,7 +330,85 @@ impl ForgeCore {
         base_sha: &str,
         head_patch_ids: &[String],
     ) -> Result<Vec<PullRequest>> {
-        let head_patch_ids = validate_patch_ids(head_patch_ids.to_vec())?;
+        validate_patch_ids(head_patch_ids)?;
+        validate_diff_base(base_sha)?;
+        if !head_patch_ids.is_empty() {
+            return Err(ForgeError::Validation(
+                "diff identities must be computed from repository objects".to_string(),
+            ));
+        }
+        self.refresh_pull_request_heads_with_identity(
+            owner,
+            repo,
+            ref_name,
+            head_sha,
+            HeadEvidence {
+                base_sha,
+                patch_ids: &[],
+                commits: None,
+            },
+        )
+    }
+
+    /// Compute the identity from git objects, then atomically refresh heads and
+    /// protection. The path must come from the forge's git store. Accept a path
+    /// rather than a gitd type so consumers can pin the two split tags separately.
+    /// Callers cannot supply digest lists or select a command to compute them.
+    pub fn refresh_pull_request_heads_from_git(
+        &self,
+        owner: &str,
+        repo: &str,
+        repository_path: &std::path::Path,
+        ref_name: &str,
+        head_sha: &str,
+        base_sha: &str,
+    ) -> Result<Vec<PullRequest>> {
+        validate_diff_base(base_sha)?;
+        let repository = jeryu_gitd::repo::Repository {
+            id: jeryu_gitd::RepoId::new(owner, repo)
+                .map_err(|error| ForgeError::Validation(error.to_string()))?,
+            path: repository_path.to_path_buf(),
+        };
+        let ids =
+            jeryu_gitd::patch_ids("git", &repository, base_sha, head_sha).map_err(|error| {
+                ForgeError::Validation(format!("cannot compute diff identity: {error}"))
+            })?;
+        validate_patch_ids(&ids)?;
+        let commits = jeryu_gitd::patch_id::review_commits("git", &repository, base_sha, head_sha)
+            .map_err(|error| ForgeError::Validation(format!("cannot refresh commits: {error}")))?
+            .into_iter()
+            .map(|(sha, parents, verified)| PullRequestCommit {
+                sha,
+                parents,
+                verified,
+            })
+            .collect::<Vec<_>>();
+        self.refresh_pull_request_heads_with_identity(
+            &repository.id.owner,
+            &repository.id.name,
+            ref_name,
+            head_sha,
+            HeadEvidence {
+                base_sha,
+                patch_ids: &ids,
+                commits: Some(&commits),
+            },
+        )
+    }
+
+    fn refresh_pull_request_heads_with_identity(
+        &self,
+        owner: &str,
+        repo: &str,
+        ref_name: &str,
+        head_sha: &str,
+        evidence: HeadEvidence<'_>,
+    ) -> Result<Vec<PullRequest>> {
+        let HeadEvidence {
+            base_sha,
+            patch_ids: head_patch_ids,
+            commits,
+        } = evidence;
         self.ensure_repo_exists(owner, repo)?;
         let mut state = self.state.write();
         let previous = state.clone();
@@ -345,12 +436,25 @@ impl ForgeCore {
         let mut updated = Vec::new();
         for key in keys {
             if let Some(pr) = state.pulls.get_mut(&key) {
+                if let Some(commits) =
+                    commits.filter(|_| pr.base.sha.eq_ignore_ascii_case(base_sha))
+                {
+                    pr.commits = commits.to_vec();
+                } else if commits.is_some() && pr.head.sha != head_sha {
+                    // A computed range for another base cannot establish
+                    // signatures or linear history for this pull request.
+                    pr.commits = vec![PullRequestCommit {
+                        sha: head_sha.to_string(),
+                        verified: false,
+                        parents: 2,
+                    }];
+                }
                 pr.head.sha = head_sha.to_string();
                 // The identity is a diff against `base_sha`: it describes only
                 // a pull request recorded on that base. Any other pull request
                 // from this branch gets an unknown identity, never a wrong one.
                 pr.head_patch_ids = if pr.base.sha.eq_ignore_ascii_case(base_sha) {
-                    head_patch_ids.clone()
+                    head_patch_ids.to_vec()
                 } else {
                     Vec::new()
                 };

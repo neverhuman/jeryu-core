@@ -626,15 +626,22 @@ mod tests {
         apply_migrations(&conn).expect("reapply idempotently");
         assert!(column_exists(&conn, "pull_requests", "head_patch_ids_json").unwrap());
         assert!(column_exists(&conn, "reviews", "head_patch_ids_json").unwrap());
-        let unrecorded: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pull_requests WHERE head_patch_ids_json IS NOT NULL
-                 OR EXISTS (SELECT 1 FROM reviews WHERE head_patch_ids_json IS NOT NULL)",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(unrecorded, 0);
+        for table in ["pull_requests", "reviews"] {
+            let total: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert!(total > 0, "{table} fixture must contain rows");
+            let recorded: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE head_patch_ids_json IS NOT NULL"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(recorded, 0, "{table}");
+        }
         let state = super::super::load_state(&conn).unwrap();
         let key = ("alice".to_string(), "demo".to_string(), 1);
         assert!(state.pulls[&key].head_patch_ids.is_empty());

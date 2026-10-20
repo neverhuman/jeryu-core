@@ -1310,6 +1310,7 @@ dependencies = [
  "chrono",
  "hex",
  "hmac",
+ "jeryu-gitd",
  "parking_lot",
  "rand_core 0.6.4",
  "ring",

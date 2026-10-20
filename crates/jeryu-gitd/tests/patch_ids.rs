@@ -76,10 +76,9 @@ fn commit(work: &Path, file: &str, body: &str, message: &str) -> String {
     git(work, &["rev-parse", "HEAD"])
 }
 
-/// A rebase onto a moved base, and a reworded message, rewrite every commit id
-/// and leave the diff identity alone. A changed line does not.
+/// A changed base or message changes the identity even when the patch stays the same.
 #[test]
-fn a_rebase_keeps_the_diff_identity_and_an_edit_changes_it() {
+fn base_changes_and_edits_change_the_diff_identity() {
     if !common::git_available() {
         return;
     }
@@ -98,17 +97,17 @@ fn a_rebase_keeps_the_diff_identity_and_an_edit_changes_it() {
     let rebased = commit(&fx.work, "more.txt", "more\n", "more");
     fx.publish("refs/heads/feature");
     assert_ne!(rebased, head);
-    assert_eq!(
+    assert_ne!(
         patch_ids("git", &fx.repo, &moved, &rebased).unwrap(),
         before,
-        "the rebase changed no content"
+        "a new base and message require review"
     );
 
     let edited = commit(&fx.work, "more.txt", "more and more\n", "more again");
     fx.publish("refs/heads/feature");
     let after = patch_ids("git", &fx.repo, &moved, &edited).unwrap();
     assert_ne!(after, before);
-    assert_eq!(after[0], before[0], "the untouched commit keeps its id");
+    assert_ne!(after[0], before[0], "the base changed");
     fx.cleanup();
 }
 
@@ -243,5 +242,113 @@ fn a_range_with_an_empty_commit_has_no_diff_identity() {
     let head = git(&fx.work, &["rev-parse", "HEAD"]);
     fx.publish("refs/heads/feature");
     assert!(patch_ids("git", &fx.repo, &base, &head).unwrap().is_empty());
+    fx.cleanup();
+}
+
+/// Repeated context must not make edits at different occurrences equivalent.
+#[test]
+fn repeated_blocks_at_different_positions_have_distinct_identities() {
+    let fx = seed("jeryu-patch-ids-positions");
+    let block = "before\ncontext\nunchanged\ntarget\nafter\ncontext\nunchanged\nseparator\n";
+    let body = block.repeat(4);
+    let base = commit(&fx.work, "list", &body, "repeated blocks");
+    let first = body.replacen("target", "edited", 1);
+    let first_head = commit(&fx.work, "list", &first, "edit");
+    fx.publish("refs/heads/feature");
+    let first_ids = patch_ids("git", &fx.repo, &base, &first_head).unwrap();
+    git(&fx.work, &["checkout", "-q", "--detach", &base]);
+    let offset = block.len();
+    let second = format!(
+        "{}{}",
+        &body[..offset],
+        body[offset..].replacen("target", "edited", 1)
+    );
+    let second_head = commit(&fx.work, "list", &second, "edit");
+    fx.publish("refs/heads/feature");
+    assert_ne!(
+        first_ids,
+        patch_ids("git", &fx.repo, &base, &second_head).unwrap()
+    );
+    fx.cleanup();
+}
+
+#[test]
+fn base_alone_and_message_alone_change_identity() {
+    let fx = seed("jeryu-patch-ids-bindings");
+    let base = fx.main_oid.clone();
+    let head = commit(&fx.work, "feature", "feature\n", "feature");
+    fx.publish("refs/heads/feature");
+    let before = patch_ids("git", &fx.repo, &base, &head).unwrap();
+    git(&fx.work, &["commit", "-q", "--amend", "-m", "reword"]);
+    let reword = git(&fx.work, &["rev-parse", "HEAD"]);
+    fx.publish("refs/heads/feature");
+    assert_ne!(before, patch_ids("git", &fx.repo, &base, &reword).unwrap());
+    git(&fx.work, &["checkout", "-q", "--detach", &base]);
+    let moved = commit(&fx.work, "other", "base moves\n", "base moves");
+    git(&fx.work, &["cherry-pick", &head]);
+    let rebased = git(&fx.work, &["rev-parse", "HEAD"]);
+    fx.publish("refs/heads/feature");
+    assert_ne!(
+        before,
+        patch_ids("git", &fx.repo, &moved, &rebased).unwrap()
+    );
+    fx.cleanup();
+}
+
+#[test]
+fn the_producer_accepts_256_commits_and_refuses_257() {
+    let fx = seed("jeryu-patch-ids-limit");
+    let base_tree = git(&fx.work, &["rev-parse", "HEAD^{tree}"]);
+    commit(&fx.work, "feature", "feature\n", "feature");
+    let feature_tree = git(&fx.work, &["rev-parse", "HEAD^{tree}"]);
+    let mut parent = fx.main_oid.clone();
+    for index in 0..257 {
+        let tree = if index % 2 == 0 {
+            &feature_tree
+        } else {
+            &base_tree
+        };
+        parent = git(
+            &fx.work,
+            &["commit-tree", tree, "-p", &parent, "-m", "change"],
+        );
+        if index == 255 {
+            git(&fx.work, &["checkout", "-q", "--detach", &parent]);
+            fx.publish("refs/heads/feature");
+            assert_eq!(
+                patch_ids("git", &fx.repo, &fx.main_oid, &parent)
+                    .unwrap()
+                    .len(),
+                256
+            );
+        }
+    }
+    git(&fx.work, &["checkout", "-q", "--detach", &parent]);
+    fx.publish("refs/heads/feature");
+    assert!(
+        patch_ids("git", &fx.repo, &fx.main_oid, &parent)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(jeryu_gitd::patch_id::review_commits("git", &fx.repo, &fx.main_oid, &parent).is_err());
+    fx.cleanup();
+}
+
+#[test]
+fn replace_refs_cannot_substitute_reviewed_objects() {
+    let fx = seed("jeryu-patch-ids-replace");
+    let reviewed = commit(&fx.work, "feature", "reviewed\n", "feature");
+    fx.publish("refs/heads/reviewed");
+    let approved = patch_ids("git", &fx.repo, &fx.main_oid, &reviewed).unwrap();
+    git(&fx.work, &["checkout", "-q", "--detach", &fx.main_oid]);
+    let changed = commit(&fx.work, "feature", "unreviewed\n", "feature");
+    fx.publish("refs/heads/feature");
+    let before = patch_ids("git", &fx.repo, &fx.main_oid, &changed).unwrap();
+    assert_ne!(approved, before);
+    git(&fx.repo.path, &["replace", &changed, &reviewed]);
+    assert_eq!(
+        before,
+        patch_ids("git", &fx.repo, &fx.main_oid, &changed).unwrap()
+    );
     fx.cleanup();
 }

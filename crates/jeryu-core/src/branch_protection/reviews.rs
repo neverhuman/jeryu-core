@@ -9,7 +9,7 @@ use crate::model::{BranchProtectionRule, PullRequest, Review, ReviewState};
 /// `ExactHead` is the strict rule: a verdict counts on the head it was written
 /// against and nowhere else. `UnchangedDiff` also accepts a verdict written
 /// against an earlier head whose diff was the same — equal per-commit patch
-/// ids, so a pure rebase or reword keeps it while any content change drops it.
+/// ids, so a rewrite with the same base, messages, and diff bytes keeps it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerdictReach {
     ExactHead,
@@ -49,7 +49,12 @@ fn reduce_reviews<'a>(
 ) -> Vec<&'a Review> {
     // A head whose diff identity is unknown (no patch ids recorded) speaks for
     // no other head: an unknown diff is never "the same diff".
-    let carries_unchanged_diff = reach == VerdictReach::UnchangedDiff && !head_patch_ids.is_empty();
+    let carries_unchanged_diff = reach == VerdictReach::UnchangedDiff
+        && !head_patch_ids.is_empty()
+        && head_patch_ids.len() <= jeryu_gitd::patch_id::MAX_COMMITS
+        && head_patch_ids
+            .iter()
+            .all(|id| jeryu_gitd::patch_id::is_review_patch_id(id));
     // A targeted dismissal withdraws its verdict for good, at every head and
     // identity: a withdrawn approval never resurfaces because the identity
     // came back to the one it was written against.

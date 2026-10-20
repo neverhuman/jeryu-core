@@ -1,393 +1,413 @@
-//! Carrying an approval across a push that changed no content.
-//!
-//! A pull request's diff identity is git's per-commit patch ids, recorded by
-//! the pusher. When the branch's rule turns both exact-head settings off, an
-//! approval written against one head counts for the next head with the same
-//! identity — a pure rebase — and for no other.
-
+//! Review identity is computed from real objects at the Core/gitd boundary.
 use jeryu_core::{
     CreatePullRequestRequest, CreateRepositoryRequest, CreateReviewRequest, DismissReviewRequest,
     ForgeCore, ForgeError, MergeBlocker, ReviewState, SetBranchProtectionRequest,
 };
-use rusqlite::Connection;
+use jeryu_gitd::{RepoId, repo::Repository};
+use std::{path::Path, process::Command};
 
-const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const REBASED: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-const PATCH_ONE: &str = "1111111111111111111111111111111111111111";
-const PATCH_TWO: &str = "2222222222222222222222222222222222222222";
-const CHANGED_PATCH: &str = "3333333333333333333333333333333333333333";
-
-fn patch_ids(ids: &[&str]) -> Vec<String> {
-    ids.iter().map(|id| id.to_string()).collect()
+struct Fixture {
+    _dir: tempfile::TempDir,
+    repository: Repository,
+    base: String,
+    head: String,
+    number: u64,
 }
 
-/// A repository whose branch rule requires one approval, with
-/// `dismiss_stale_approvals` and `require_exact_sha_approval` as given.
-fn seed(core: &ForgeCore, dismiss_stale_approvals: bool, require_exact_sha_approval: bool) -> u64 {
-    core.create_repository(
+fn git(path: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(path)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+impl Fixture {
+    fn new(core: &ForgeCore, dismiss: bool, exact: bool) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        git(path, &["init", "-q", "-b", "main"]);
+        git(path, &["config", "user.name", "Author"]);
+        git(path, &["config", "user.email", "author@example.invalid"]);
+        std::fs::write(path.join("base"), "base\n").unwrap();
+        git(path, &["add", "."]);
+        git(path, &["commit", "-q", "-m", "base"]);
+        let base = git(path, &["rev-parse", "HEAD"]);
+        std::fs::write(path.join("feature"), "feature\n").unwrap();
+        git(path, &["add", "."]);
+        git(path, &["commit", "-q", "-m", "feature"]);
+        let head = git(path, &["rev-parse", "HEAD"]);
+        core.create_repository(
+            "alice",
+            CreateRepositoryRequest {
+                name: "demo".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        core.set_branch_protection(
+            "alice",
+            "demo",
+            "main",
+            SetBranchProtectionRequest {
+                required_approving_review_count: 1,
+                dismiss_stale_approvals: dismiss,
+                require_exact_sha_approval: exact,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let number = core
+            .create_pull_request(
+                "alice",
+                "demo",
+                "author",
+                CreatePullRequestRequest {
+                    title: "change".into(),
+                    head: "feature".into(),
+                    base: "main".into(),
+                    head_sha: Some(head.clone()),
+                    base_sha: Some(base.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .number;
+        let repository = Repository {
+            id: RepoId::new("alice", "demo").unwrap(),
+            path: path.into(),
+        };
+        let fx = Self {
+            _dir: dir,
+            repository,
+            base,
+            head,
+            number,
+        };
+        fx.refresh(core, &fx.base, &fx.head);
+        fx
+    }
+
+    fn refresh(&self, core: &ForgeCore, base: &str, head: &str) {
+        core.refresh_pull_request_heads_from_git(
+            "alice",
+            "demo",
+            &self.repository.path,
+            "feature",
+            head,
+            base,
+        )
+        .unwrap();
+    }
+
+    fn review(&self, core: &ForgeCore, event: ReviewState) {
+        core.create_review(
+            "alice",
+            "demo",
+            self.number,
+            "reviewer",
+            CreateReviewRequest {
+                body: None,
+                event,
+                comments: vec![],
+                expected_head_sha: Some(self.head.clone()),
+            },
+        )
+        .unwrap();
+    }
+
+    fn rewrite(&self, message: &str) -> String {
+        git(
+            &self.repository.path,
+            &[
+                "-c",
+                "user.name=Another Author",
+                "commit",
+                "--amend",
+                "--author=Another <another@example.invalid>",
+                "-q",
+                "-m",
+                message,
+            ],
+        );
+        git(&self.repository.path, &["rev-parse", "HEAD"])
+    }
+
+    fn missing(&self, core: &ForgeCore) -> bool {
+        core.evaluate_pull_request("alice", "demo", self.number, None)
+            .unwrap()
+            .blockers
+            .iter()
+            .any(|b| matches!(b, MergeBlocker::MissingReview { .. }))
+    }
+}
+
+#[test]
+fn same_base_message_and_diff_carry_and_can_be_withdrawn() {
+    let core = ForgeCore::new();
+    let fx = Fixture::new(&core, false, false);
+    fx.review(&core, ReviewState::Approved);
+    let next = fx.rewrite("feature");
+    assert_ne!(next, fx.head);
+    fx.refresh(&core, &fx.base, &next);
+    assert!(!fx.missing(&core));
+    let pr = core.get_pull_request("alice", "demo", fx.number).unwrap();
+    assert!(pr.mergeable);
+    assert_eq!(pr.commits.len(), 1);
+    assert_eq!(pr.commits[0].sha, next);
+    assert!(!pr.commits[0].verified);
+    let review = core.list_reviews("alice", "demo", fx.number).unwrap()[0].id;
+    core.dismiss_review(
         "alice",
-        CreateRepositoryRequest {
-            name: "demo".to_string(),
-            default_branch: Some("main".to_string()),
-            ..Default::default()
+        "demo",
+        fx.number,
+        "reviewer",
+        DismissReviewRequest {
+            review_id: review,
+            expected_head_sha: next,
+            reason: "withdrawn".into(),
         },
     )
     .unwrap();
+    assert!(fx.missing(&core));
+    fx.refresh(&core, &fx.base, &fx.head);
+    assert!(fx.missing(&core));
+}
+
+#[test]
+fn either_strict_setting_requires_a_new_review() {
+    for (dismiss, exact) in [(true, true), (true, false), (false, true)] {
+        let core = ForgeCore::new();
+        let fx = Fixture::new(&core, dismiss, exact);
+        fx.review(&core, ReviewState::Approved);
+        fx.refresh(&core, &fx.base, &fx.rewrite("feature"));
+        assert!(fx.missing(&core));
+    }
+}
+
+#[test]
+fn reword_and_content_edit_require_fresh_review() {
+    for edit in [false, true] {
+        let core = ForgeCore::new();
+        let fx = Fixture::new(&core, false, false);
+        fx.review(&core, ReviewState::Approved);
+        if edit {
+            std::fs::write(fx.repository.path.join("feature"), "changed\n").unwrap();
+            git(&fx.repository.path, &["add", "."]);
+        }
+        fx.refresh(
+            &core,
+            &fx.base,
+            &fx.rewrite(if edit { "feature" } else { "reword" }),
+        );
+        assert!(fx.missing(&core));
+    }
+}
+
+#[test]
+fn changed_base_cannot_recover_an_approval() {
+    let core = ForgeCore::new();
+    let fx = Fixture::new(&core, false, false);
+    fx.review(&core, ReviewState::Approved);
+    git(
+        &fx.repository.path,
+        &["checkout", "-q", "--detach", &fx.base],
+    );
+    std::fs::write(fx.repository.path.join("other"), "new base\n").unwrap();
+    git(&fx.repository.path, &["add", "."]);
+    git(&fx.repository.path, &["commit", "-q", "-m", "base moves"]);
+    let base = git(&fx.repository.path, &["rev-parse", "HEAD"]);
+    core.record_pull_request_base("forge", "alice", "demo", fx.number, &fx.head, &base)
+        .unwrap();
+    git(&fx.repository.path, &["cherry-pick", &fx.head]);
+    let head = git(&fx.repository.path, &["rev-parse", "HEAD"]);
+    fx.refresh(&core, &base, &head);
+    assert!(fx.missing(&core));
+}
+
+#[test]
+fn supplied_identities_and_invalid_bases_are_refused_without_mutation() {
+    let core = ForgeCore::new();
+    let fx = Fixture::new(&core, false, false);
+    let digest = format!("v2:{}", "a".repeat(64));
+    for ids in [
+        vec![digest.clone()],
+        vec![digest.clone(); 256],
+        vec![digest; 257],
+    ] {
+        assert!(matches!(
+            core.refresh_pull_request_heads_for_ref_with_diff(
+                "alice", "demo", "feature", &fx.base, &fx.base, &ids
+            ),
+            Err(ForgeError::Validation(_))
+        ));
+    }
+    for base in ["base", "--all", ""] {
+        assert!(
+            core.refresh_pull_request_heads_from_git(
+                "alice",
+                "demo",
+                &fx.repository.path,
+                "feature",
+                &fx.head,
+                base
+            )
+            .is_err()
+        );
+        assert!(
+            core.refresh_pull_request_heads_for_ref_with_diff(
+                "alice",
+                "demo",
+                "feature",
+                &fx.base,
+                base,
+                &[]
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(
+        core.get_pull_request("alice", "demo", fx.number)
+            .unwrap()
+            .head
+            .sha,
+        fx.head
+    );
+}
+
+#[test]
+fn identity_and_verdict_survive_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("forge.sqlite");
+    let core = ForgeCore::open_sqlite(&db).unwrap();
+    let fx = Fixture::new(&core, false, false);
+    fx.review(&core, ReviewState::Approved);
+    fx.refresh(&core, &fx.base, &fx.rewrite("feature"));
+    drop(core);
+    let core = ForgeCore::open_sqlite(&db).unwrap();
+    assert!(!fx.missing(&core));
+    assert!(
+        !core
+            .get_pull_request("alice", "demo", fx.number)
+            .unwrap()
+            .head_patch_ids
+            .is_empty()
+    );
+}
+
+#[test]
+fn rejection_carries_and_unknown_identity_requires_fresh_review() {
+    let core = ForgeCore::new();
+    let fx = Fixture::new(&core, false, false);
+    fx.review(&core, ReviewState::ChangesRequested);
+    fx.refresh(&core, &fx.base, &fx.rewrite("feature"));
+    assert!(
+        core.evaluate_pull_request("alice", "demo", fx.number, None)
+            .unwrap()
+            .blockers
+            .iter()
+            .any(|b| matches!(b, MergeBlocker::ChangesRequested { .. }))
+    );
+    let core = ForgeCore::new();
+    let fx = Fixture::new(&core, false, false);
+    fx.review(&core, ReviewState::Approved);
+    let next = fx.rewrite("feature");
+    core.refresh_pull_request_heads_for_ref("alice", "demo", "feature", &next)
+        .unwrap();
+    assert!(fx.missing(&core));
+}
+
+#[test]
+fn refreshed_commit_metadata_enforces_signature_and_linear_history_rules() {
+    let core = ForgeCore::new();
+    let fx = Fixture::new(&core, false, false);
+    fx.review(&core, ReviewState::Approved);
     core.set_branch_protection(
         "alice",
         "demo",
         "main",
         SetBranchProtectionRequest {
             required_approving_review_count: 1,
-            dismiss_stale_approvals,
-            require_exact_sha_approval,
+            require_signed_commits: true,
+            required_linear_history: true,
+            dismiss_stale_approvals: false,
+            require_exact_sha_approval: false,
             ..Default::default()
         },
     )
     .unwrap();
-    let number = core
-        .create_pull_request(
-            "alice",
-            "demo",
-            "author",
-            CreatePullRequestRequest {
-                title: "reviewed change".to_string(),
-                head: "feature".to_string(),
-                base: "main".to_string(),
-                head_sha: Some(HEAD.to_string()),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .number;
-    // A pull request opens with an unknown identity; the forge records it
-    // after computing it from git, against the pull request's own base.
-    push(core, HEAD, &[PATCH_ONE, PATCH_TWO]);
-    number
-}
-
-fn approve(core: &ForgeCore, number: u64) {
-    core.create_review(
-        "alice",
-        "demo",
-        number,
-        "reviewer",
-        CreateReviewRequest {
-            body: Some("reviewed the diff".to_string()),
-            event: ReviewState::Approved,
-            comments: Vec::new(),
-            expected_head_sha: Some(HEAD.to_string()),
-        },
-    )
-    .unwrap();
-}
-
-fn push(core: &ForgeCore, head_sha: &str, head_patch_ids: &[&str]) {
-    let base = recorded_base(core);
-    core.refresh_pull_request_heads_for_ref_with_diff(
-        "alice",
-        "demo",
-        "feature",
-        head_sha,
-        &base,
-        &patch_ids(head_patch_ids),
-    )
-    .unwrap();
-}
-
-/// The base the only pull request in these tests is recorded on.
-fn recorded_base(core: &ForgeCore) -> String {
-    core.list_pull_requests("alice", "demo", None)
-        .unwrap()
-        .into_iter()
-        .next()
-        .expect("a pull request")
-        .base
-        .sha
-}
-
-fn missing_review(core: &ForgeCore, number: u64) -> bool {
-    core.evaluate_pull_request("alice", "demo", number, None)
-        .unwrap()
-        .blockers
-        .iter()
-        .any(|blocker| matches!(blocker, MergeBlocker::MissingReview { .. }))
-}
-
-#[test]
-fn an_unchanged_diff_keeps_its_approval_across_a_push() {
-    let core = ForgeCore::new();
-    let number = seed(&core, false, false);
-    approve(&core, number);
-    assert!(!missing_review(&core, number));
-
-    push(&core, REBASED, &[PATCH_ONE, PATCH_TWO]);
-    let pr = core.get_pull_request("alice", "demo", number).unwrap();
-    assert_eq!(pr.head.sha, REBASED);
-    assert!(
-        !missing_review(&core, number),
-        "a rebase that changed no content keeps the approval"
-    );
-    assert!(pr.mergeable);
-}
-
-#[test]
-fn any_content_change_invalidates_the_approval() {
-    for next in [
-        // An edited commit: same count, one different patch id.
-        vec![PATCH_ONE, CHANGED_PATCH],
-        // An appended commit.
-        vec![PATCH_ONE, PATCH_TWO, CHANGED_PATCH],
-        // A dropped commit.
-        vec![PATCH_ONE],
-        // Reordered commits are a different diff at every intermediate state.
-        vec![PATCH_TWO, PATCH_ONE],
-        // A pusher that recorded no diff identity.
-        vec![],
-    ] {
-        let core = ForgeCore::new();
-        let number = seed(&core, false, false);
-        approve(&core, number);
-        push(&core, REBASED, &next);
-        assert!(
-            missing_review(&core, number),
-            "{next:?} is not the approved diff"
-        );
-        assert!(
-            !core
-                .get_pull_request("alice", "demo", number)
-                .unwrap()
-                .mergeable
-        );
-    }
-}
-
-#[test]
-fn either_exact_head_setting_drops_the_approval_of_an_unchanged_diff() {
-    for (dismiss_stale_approvals, require_exact_sha_approval) in
-        [(true, true), (true, false), (false, true)]
-    {
-        let core = ForgeCore::new();
-        let number = seed(&core, dismiss_stale_approvals, require_exact_sha_approval);
-        approve(&core, number);
-        push(&core, REBASED, &[PATCH_ONE, PATCH_TWO]);
-        assert!(
-            missing_review(&core, number),
-            "dismiss_stale_approvals={dismiss_stale_approvals} \
-             require_exact_sha_approval={require_exact_sha_approval} binds the exact head"
-        );
-    }
-}
-
-/// A pusher that records no diff identity gets the strict behaviour, which is
-/// also what the call without one does.
-#[test]
-fn a_push_without_a_diff_identity_dismisses_the_approval() {
-    let core = ForgeCore::new();
-    let number = seed(&core, false, false);
-    approve(&core, number);
-    core.refresh_pull_request_heads_for_ref("alice", "demo", "feature", REBASED)
-        .unwrap();
-    assert!(
-        core.get_pull_request("alice", "demo", number)
-            .unwrap()
-            .head_patch_ids
-            .is_empty()
-    );
-    assert!(missing_review(&core, number));
-}
-
-/// A rejection is carried by the same rule, so a no-op rebase cannot wash one
-/// away either.
-#[test]
-fn an_unchanged_diff_keeps_a_changes_requested_verdict() {
-    let core = ForgeCore::new();
-    let number = seed(&core, false, false);
-    core.create_review(
-        "alice",
-        "demo",
-        number,
-        "reviewer",
-        CreateReviewRequest {
-            body: Some("needs work".to_string()),
-            event: ReviewState::ChangesRequested,
-            comments: Vec::new(),
-            expected_head_sha: Some(HEAD.to_string()),
-        },
-    )
-    .unwrap();
-    push(&core, REBASED, &[PATCH_ONE, PATCH_TWO]);
+    let next = fx.rewrite("feature");
+    fx.refresh(&core, &fx.base, &next);
     let blockers = core
-        .evaluate_pull_request("alice", "demo", number, None)
+        .evaluate_pull_request("alice", "demo", fx.number, None)
+        .unwrap()
+        .blockers;
+    assert!(blockers.iter().any(|b| matches!(b, MergeBlocker::UnsignedCommits { unsigned } if unsigned == &vec![next.clone()])));
+    assert!(
+        !fx.missing(&core),
+        "the approval still carries, but signatures are rechecked"
+    );
+
+    git(
+        &fx.repository.path,
+        &["checkout", "-q", "-b", "side", &fx.base],
+    );
+    std::fs::write(fx.repository.path.join("side"), "side\n").unwrap();
+    git(&fx.repository.path, &["add", "."]);
+    git(&fx.repository.path, &["commit", "-q", "-m", "side"]);
+    git(&fx.repository.path, &["checkout", "-q", "--detach", &next]);
+    git(
+        &fx.repository.path,
+        &["merge", "-q", "--no-ff", "-m", "merge", "side"],
+    );
+    let merged = git(&fx.repository.path, &["rev-parse", "HEAD"]);
+    fx.refresh(&core, &fx.base, &merged);
+    let blockers = core
+        .evaluate_pull_request("alice", "demo", fx.number, None)
         .unwrap()
         .blockers;
     assert!(
         blockers
             .iter()
-            .any(|blocker| matches!(blocker, MergeBlocker::ChangesRequested { .. })),
-        "{blockers:?}"
+            .any(|b| matches!(b, MergeBlocker::NonLinearHistory { sha } if sha == &merged))
     );
+    assert!(fx.missing(&core));
 }
 
 #[test]
-fn a_diff_identity_is_a_bounded_list_of_object_ids() {
-    let core = ForgeCore::new();
-    let number = seed(&core, false, false);
-    for bad in [
-        vec!["../../etc/passwd".to_string()],
-        vec![PATCH_ONE[..12].to_string()],
-        vec!["--all".to_string()],
-        vec![PATCH_ONE.to_string(); 4097],
-    ] {
-        let error = core
-            .refresh_pull_request_heads_for_ref_with_diff(
-                "alice",
-                "demo",
-                "feature",
-                REBASED,
-                &recorded_base(&core),
-                &bad,
-            )
-            .unwrap_err();
-        assert!(matches!(error, ForgeError::Validation(_)), "{error:?}");
-    }
-    let pr = core.get_pull_request("alice", "demo", number).unwrap();
-    assert_eq!(pr.head.sha, HEAD, "a refused push moves no head");
-    assert_eq!(pr.head_patch_ids, patch_ids(&[PATCH_ONE, PATCH_TWO]));
-}
-
-#[test]
-fn diff_identity_survives_sqlite_reopen() {
-    let temp = tempfile::tempdir().unwrap();
-    let db = temp.path().join("forge.sqlite");
+fn untagged_stored_identities_cannot_carry_approvals() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("forge.sqlite");
     let core = ForgeCore::open_sqlite(&db).unwrap();
-    let number = seed(&core, false, false);
-    approve(&core, number);
-    push(&core, REBASED, &[PATCH_ONE, PATCH_TWO]);
+    let fx = Fixture::new(&core, false, false);
+    fx.review(&core, ReviewState::Approved);
+    fx.refresh(&core, &fx.base, &fx.rewrite("feature"));
+    assert!(!fx.missing(&core));
     drop(core);
-
-    let core = ForgeCore::open_sqlite(&db).unwrap();
-    let pr = core.get_pull_request("alice", "demo", number).unwrap();
-    assert_eq!(pr.head_patch_ids, patch_ids(&[PATCH_ONE, PATCH_TWO]));
-    let reviews = core.list_reviews("alice", "demo", number).unwrap();
-    assert_eq!(
-        reviews[0].head_patch_ids,
-        patch_ids(&[PATCH_ONE, PATCH_TWO])
-    );
-    assert!(
-        !missing_review(&core, number),
-        "the carried approval survives a reopen"
-    );
-    let rule = core.get_branch_protection("alice", "demo", "main").unwrap();
-    assert!(!rule.dismiss_stale_approvals);
-    assert!(!rule.require_exact_sha_approval);
-
-    let conn = Connection::open(&db).unwrap();
-    let stored: String = conn
-        .query_row("SELECT head_patch_ids_json FROM pull_requests", [], |row| {
-            row.get(0)
-        })
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let untagged = serde_json::to_string(&vec!["a".repeat(64)]).unwrap();
+    conn.execute(
+        "UPDATE pull_requests SET head_patch_ids_json = ?1",
+        [&untagged],
+    )
+    .unwrap();
+    conn.execute("UPDATE reviews SET head_patch_ids_json = ?1", [&untagged])
         .unwrap();
-    assert_eq!(stored, format!("[\"{PATCH_ONE}\",\"{PATCH_TWO}\"]"));
-}
-
-fn approval_id(core: &ForgeCore, number: u64) -> uuid::Uuid {
-    core.list_reviews("alice", "demo", number)
-        .unwrap()
-        .into_iter()
-        .find(|review| review.state == ReviewState::Approved)
-        .expect("an approval")
-        .id
-}
-
-fn dismiss(
-    core: &ForgeCore,
-    number: u64,
-    review_id: uuid::Uuid,
-    head: &str,
-) -> Result<(), ForgeError> {
-    core.dismiss_review(
-        "alice",
-        "demo",
-        number,
-        "reviewer",
-        DismissReviewRequest {
-            review_id,
-            expected_head_sha: head.to_string(),
-            reason: "withdrawn".to_string(),
-        },
-    )
-    .map(|_| ())
-}
-
-/// The verdict that counts after a content-free rebase is the one its author
-/// can withdraw: dismissing it at the new head takes the approval away.
-#[test]
-fn a_carried_approval_can_be_dismissed_at_the_new_head() {
-    let core = ForgeCore::new();
-    let number = seed(&core, false, false);
-    approve(&core, number);
-    push(&core, REBASED, &[PATCH_ONE, PATCH_TWO]);
-    assert!(!missing_review(&core, number));
-    dismiss(&core, number, approval_id(&core, number), REBASED).unwrap();
+    drop(conn);
+    let core = ForgeCore::open_sqlite(&db).unwrap();
     assert!(
-        missing_review(&core, number),
-        "the withdrawn approval no longer counts"
+        fx.missing(&core),
+        "identities without base/message bindings fail closed"
     );
-}
-
-/// A withdrawn approval stays withdrawn when a later push brings back the
-/// identity it was written against.
-#[test]
-fn a_withdrawn_approval_does_not_resurface() {
-    let core = ForgeCore::new();
-    let number = seed(&core, false, false);
-    approve(&core, number);
-    dismiss(&core, number, approval_id(&core, number), HEAD).unwrap();
-    assert!(missing_review(&core, number));
-    push(&core, REBASED, &[PATCH_ONE, CHANGED_PATCH]);
-    push(&core, HEAD, &[PATCH_ONE, PATCH_TWO]);
-    assert!(missing_review(&core, number));
-}
-
-/// An identity is a diff against one base: a pull request recorded on another
-/// base gets an unknown identity, and moving a pull request's base drops its
-/// identity, so neither carries an approval.
-#[test]
-fn an_identity_only_describes_the_base_it_was_computed_against() {
-    let core = ForgeCore::new();
-    let number = seed(&core, false, false);
-    approve(&core, number);
-    core.refresh_pull_request_heads_for_ref_with_diff(
-        "alice",
-        "demo",
-        "feature",
-        REBASED,
-        "cccccccccccccccccccccccccccccccccccccccc",
-        &patch_ids(&[PATCH_ONE, PATCH_TWO]),
-    )
-    .unwrap();
-    let pr = core.get_pull_request("alice", "demo", number).unwrap();
+    fx.refresh(&core, &fx.base, &fx.head);
     assert!(
-        pr.head_patch_ids.is_empty(),
-        "computed against another base"
-    );
-    assert!(missing_review(&core, number));
-
-    let core = ForgeCore::new();
-    let number = seed(&core, false, false);
-    core.record_pull_request_base(
-        "forge",
-        "alice",
-        "demo",
-        number,
-        HEAD,
-        "dddddddddddddddddddddddddddddddddddddddd",
-    )
-    .unwrap();
-    let pr = core.get_pull_request("alice", "demo", number).unwrap();
-    assert!(
-        pr.head_patch_ids.is_empty(),
-        "a new base drops the old identity"
+        !fx.missing(&core),
+        "the original exact-head approval remains usable"
     );
 }

@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+jeryu-gitd = { path = "../jeryu-gitd" }
 argon2 = { version = "0.5", features = ["std"] }
 chrono.workspace = true
 hex.workspace = true
