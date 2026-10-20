@@ -39,6 +39,7 @@ for script in scripts/*.sh ops/ci/*.sh; do
   bash -n "$script"
 done
 bash ops/ci/coverage_selftest.sh
+bash ops/ci/test-build-cache.sh
 # Managed-agent guards (lane A): report-only until milestone M6 (--enforce).
 bash ops/ci/launch-inventory.sh --self-test
 bash ops/ci/launch-inventory.sh

@@ -55,11 +55,12 @@ bash "$render_real" --check --repo "$consumer_repo" \
 # the coverage ratchet below builds outside it. The runner retains the cache only after a green gate
 # and discards it when tools, recipe or Cargo.lock change; cargo still checks every source file's
 # freshness. Unset (a laptop, another host), cargo builds into target/ as before.
+# BEGIN BUILD CACHE GUARD
 if [ -n "${JERYU_CI_BUILD_CACHE_DIR:-}" ]; then
   # Accept only this checkout's own physical target/build-cache, owned by this user (the layout the
   # gate runner gives), never a symlink or a path elsewhere; and never reuse incremental state.
   cache_dir="$JERYU_CI_BUILD_CACHE_DIR"
-  cache_top="$(git rev-parse --show-toplevel)"
+  cache_top="$repo_root"
   if [[ -L "$cache_top/target" || -L "$cache_dir" || ! -d "$cache_dir" || ! -O "$cache_dir" \
         || "$(cd "$cache_dir" && pwd -P)" != "$(cd "$cache_top" && pwd -P)/target/build-cache" ]]; then
     echo "refusing JERYU_CI_BUILD_CACHE_DIR=$cache_dir: only this checkout's physical target/build-cache is accepted" >&2
@@ -72,6 +73,7 @@ if [ -n "${JERYU_CI_BUILD_CACHE_DIR:-}" ]; then
   export CARGO_TARGET_DIR JERYU_CI_BUILD_CACHE_DIR CARGO_INCREMENTAL=0
   echo "[pr-ci] ordinary compilation in ${CARGO_TARGET_DIR} (the gate runner's build cache)" >&2
 fi
+# END BUILD CACHE GUARD
 
 echo "[pr-ci] (jobs=$JOBS) standard lanes" >&2
 bash ops/ci/fast.sh
