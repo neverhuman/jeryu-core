@@ -78,7 +78,16 @@ pub struct RepositorySummary {
     pub language: Option<String>,
     pub health: String,
     pub open_pull_requests: u32,
+    /// Required checks only. Advisory (non-required) results are reported
+    /// apart in `advisory_checks`; the server decides which side a check is on.
     pub failing_checks: u32,
+    /// Advisory (non-required) check results, shown apart from
+    /// `failing_checks`. `None` when the server does not report them (an
+    /// older server, or a payload written before this field existed).
+    /// TS-optional so pre-existing SPA fixtures stay valid.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub advisory_checks: Option<RepositoryAdvisoryChecks>,
     pub running_jobs: u32,
     pub active_agents: u32,
     pub blocked_agents: u32,
@@ -108,6 +117,16 @@ pub struct RepositorySummary {
         type = "Array<{ action_id: string; label: string; risk: string | null; method: string | null; href: string | null }>"
     )]
     pub available_actions: Vec<AvailableAction>,
+}
+
+/// Advisory (non-required) check results for one repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RepositoryAdvisoryChecks {
+    /// Advisory checks currently failing.
+    pub failing: u32,
+    /// Advisory checks currently passing.
+    pub passing: u32,
 }
 
 /// Offsite push-mirror posture for one repository.
@@ -318,6 +337,28 @@ mod tests {
         summary.pushed_at = Some("2026-09-19T12:34:56Z".to_string());
         let wire = serde_json::to_value(&summary).unwrap();
         assert_eq!(wire["pushed_at"], "2026-09-19T12:34:56Z");
+        let back: RepositorySummary = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, summary);
+    }
+
+    #[test]
+    fn repository_summary_advisory_checks_default_and_round_trip() {
+        let mut summary: RepositorySummary =
+            serde_json::from_value(summary_json()).expect("payload without advisory_checks");
+        assert_eq!(summary.advisory_checks, None);
+        assert_eq!(
+            serde_json::to_value(&summary).unwrap()["advisory_checks"],
+            serde_json::Value::Null
+        );
+
+        summary.advisory_checks = Some(RepositoryAdvisoryChecks {
+            failing: 2,
+            passing: 5,
+        });
+        let wire = serde_json::to_value(&summary).unwrap();
+        assert_eq!(wire["advisory_checks"]["failing"], 2);
+        assert_eq!(wire["advisory_checks"]["passing"], 5);
+        assert_eq!(wire["failing_checks"], 0);
         let back: RepositorySummary = serde_json::from_value(wire).unwrap();
         assert_eq!(back, summary);
     }
