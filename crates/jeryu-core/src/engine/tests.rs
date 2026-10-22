@@ -373,3 +373,127 @@ fn jankurai_score_boundary_rejects_non_owner_access() {
     );
     assert_eq!(own[0].commit_sha, "def");
 }
+
+#[derive(Debug)]
+struct FixedBranches(Vec<&'static str>);
+
+impl RepoBranches for FixedBranches {
+    fn branch_exists(&self, _owner: &str, _name: &str, branch: &str) -> Result<bool> {
+        Ok(self.0.contains(&branch))
+    }
+}
+
+fn protection_request() -> SetBranchProtectionRequest {
+    SetBranchProtectionRequest {
+        required_status_checks: Vec::new(),
+        strict: false,
+        required_approving_review_count: 1,
+        allow_merge_override: false,
+        merge_override_status_checks: Vec::new(),
+        merge_override_status_creators: Vec::new(),
+        enforce_admins: false,
+        required_linear_history: false,
+        allow_force_pushes: false,
+        allow_deletions: false,
+        require_signed_commits: false,
+        require_jankurai_proof: false,
+        dismiss_stale_approvals: false,
+        require_exact_sha_approval: false,
+    }
+}
+
+#[test]
+fn delete_and_list_branch_protections() {
+    let core = core_with_repo();
+    core.set_branch_protection("alice", "jeryu", "release", protection_request())
+        .unwrap();
+    let branches: Vec<_> = core
+        .list_branch_protections("alice", "jeryu")
+        .unwrap()
+        .into_iter()
+        .map(|rule| rule.branch)
+        .collect();
+    assert_eq!(branches, ["main", "release"]);
+    let removed = core
+        .delete_branch_protection("alice", "jeryu", "release")
+        .unwrap();
+    assert_eq!(removed.branch, "release");
+    assert!(
+        core.get_branch_protection("alice", "jeryu", "release")
+            .is_err()
+    );
+    assert!(matches!(
+        core.delete_branch_protection("alice", "jeryu", "release"),
+        Err(ForgeError::NotFound(_))
+    ));
+    // The default branch's automatic rule would come back on reopen.
+    assert!(matches!(
+        core.delete_branch_protection("alice", "jeryu", "main"),
+        Err(ForgeError::Validation(_))
+    ));
+    assert!(core.get_branch_protection("alice", "jeryu", "main").is_ok());
+}
+
+#[test]
+fn delete_branch_protection_persists_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("forge.db");
+    {
+        let core = ForgeCore::open_sqlite(&path).unwrap();
+        core.create_user(CreateUserRequest {
+            login: "alice".to_string(),
+            name: None,
+            email: None,
+        })
+        .unwrap();
+        core.create_repository(
+            "alice",
+            CreateRepositoryRequest {
+                name: "jeryu".to_string(),
+                private: true,
+                description: None,
+                default_branch: Some("main".to_string()),
+            },
+        )
+        .unwrap();
+        core.set_branch_protection("alice", "jeryu", "release", protection_request())
+            .unwrap();
+        core.delete_branch_protection("alice", "jeryu", "release")
+            .unwrap();
+    }
+    let core = ForgeCore::open_sqlite(&path).unwrap();
+    assert!(
+        core.get_branch_protection("alice", "jeryu", "release")
+            .is_err()
+    );
+}
+
+#[test]
+fn rekey_encoded_branch_protections_moves_or_removes() {
+    let core = core_with_repo();
+    for branch in ["release%2Fv1", "gone%2fv2", "both%2Fx", "both/x", "plain"] {
+        core.set_branch_protection("alice", "jeryu", branch, protection_request())
+            .unwrap();
+    }
+    let mut keep = protection_request();
+    keep.required_approving_review_count = 3;
+    core.set_branch_protection("alice", "jeryu", "both/x", keep)
+        .unwrap();
+    let branches = FixedBranches(vec!["release/v1", "both/x", "plain"]);
+    let report = core.rekey_encoded_branch_protections(&branches).unwrap();
+    assert_eq!(report.rekeyed.len(), 1);
+    assert_eq!(report.removed.len(), 2);
+    let names: Vec<_> = core
+        .list_branch_protections("alice", "jeryu")
+        .unwrap()
+        .into_iter()
+        .map(|rule| rule.branch)
+        .collect();
+    assert_eq!(names, ["both/x", "main", "plain", "release/v1"]);
+    let kept = core
+        .get_branch_protection("alice", "jeryu", "both/x")
+        .unwrap();
+    assert_eq!(kept.required_approving_review_count, 3);
+    let again = core.rekey_encoded_branch_protections(&branches).unwrap();
+    assert_eq!(again, EncodedProtectionReport::default());
+}

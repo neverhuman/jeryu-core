@@ -23,10 +23,10 @@ pub use crate::branch_protection::{
     effective_reviews_for_pull_request, effective_reviews_for_pull_request_with,
 };
 pub use crate::core::{
-    AGENT_TOKEN_PREFIX, AuditEntry, ForgeCore, HeadReconcileReport, HeadReconciled,
-    MergeOverridePermit, MergeOverrideRequest, MergeOverrideTarget, MergeReadiness, ProviderBroker,
-    REFRESH_LOCK_TIMEOUT, RepoBranches, RepoMaterializer, RepoPushHistory, RepoRelocator,
-    RepositoryDeletion, VaultKey,
+    AGENT_TOKEN_PREFIX, AuditEntry, EncodedProtectionReport, ForgeCore, HeadReconcileReport,
+    HeadReconciled, MergeOverridePermit, MergeOverrideRequest, MergeOverrideTarget, MergeReadiness,
+    ProviderBroker, REFRESH_LOCK_TIMEOUT, RepoBranches, RepoMaterializer, RepoPushHistory,
+    RepoRelocator, RepositoryDeletion, VaultKey,
 };
 pub use crate::error::{AgentRepairHint, JeryuError, JeryuResult};
 pub use crate::errors::{ForgeError, Result};
