@@ -90,6 +90,7 @@ fn archived_repository_refuses_writes_and_unarchive_restores_them() {
         CreateCommitStatusRequest {
             state: CommitStatusState::Success,
             context: "ci".to_string(),
+            base: None,
             description: None,
             target_url: None,
         },

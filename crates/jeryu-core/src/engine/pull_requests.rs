@@ -26,6 +26,10 @@ fn normalize_source_repository(
         .unwrap_or_else(|| format!("{owner}/{repo}"))
 }
 
+/// Base sha recorded for a retarget that states no base tip. The same
+/// placeholder `create_pull_request` stores when a create omits `base_sha`.
+const DEFAULT_RETARGET_BASE_SHA: &str = "base";
+
 /// Most commits a pull request's recorded diff identity may cover. A digest
 /// list is attacker-influenced in size (a pusher chooses how many commits it
 /// sends), so the stored list is bounded rather than growing with the branch.
@@ -159,7 +163,9 @@ impl ForgeCore {
             ),
             base: GitBranchRef::new(
                 request.base,
-                request.base_sha.unwrap_or_else(|| "base".to_string()),
+                request
+                    .base_sha
+                    .unwrap_or_else(|| DEFAULT_RETARGET_BASE_SHA.to_string()),
             ),
             mergeable: false,
             mergeable_state: "unknown".to_string(),
@@ -247,6 +253,16 @@ impl ForgeCore {
         request: UpdatePullRequestRequest,
     ) -> Result<PullRequest> {
         self.ensure_repository_writable(owner, repo)?;
+        // Validated before the first mutation: this function edits the stored
+        // pull request in place, so a refusal after a field was already set
+        // would leave the in-memory record ahead of the store it is never
+        // persisted to.
+        if let Some(title) = request.title.as_deref() {
+            require_name("pull request title", title)?;
+        }
+        if let Some(base) = request.base.as_deref() {
+            require_name("base", base)?;
+        }
         let mut state = self.state.write();
         let previous = state.clone();
         let key = (owner.to_string(), repo.to_string(), number);
@@ -259,8 +275,25 @@ impl ForgeCore {
             }
         };
         if let Some(title) = request.title {
-            require_name("pull request title", &title)?;
             pr.title = title;
+        }
+        // Retarget. The base is part of what a result proves (a required status
+        // is selected per base), so moving the base drops every answer proved
+        // against the old one: the re-evaluation below runs against the new
+        // base's protection rule and its own results, with no tick of the
+        // publisher's loop in between.
+        if let Some(base) = request.base {
+            let base = base.trim().to_string();
+            if base != pr.base.ref_name {
+                pr.base = GitBranchRef::new(
+                    base,
+                    request
+                        .base_sha
+                        .unwrap_or_else(|| DEFAULT_RETARGET_BASE_SHA.to_string()),
+                );
+            } else if let Some(base_sha) = request.base_sha {
+                pr.base.sha = base_sha;
+            }
         }
         if request.body.is_some() {
             pr.body = request.body;

@@ -68,6 +68,7 @@ fn fixture(core: &ForgeCore) -> PullRequest {
         CreateCommitStatusRequest {
             state: CommitStatusState::Failure,
             context: "ratchet".into(),
+            base: None,
             description: Some("94 to 92 requires a decision".into()),
             target_url: None,
         },
@@ -250,6 +251,7 @@ fn merge_override_rechecks_policy_and_grants_at_finalize() {
                     CreateCommitStatusRequest {
                         state: CommitStatusState::Success,
                         context: "ratchet".into(),
+                        base: None,
                         description: None,
                         target_url: None,
                     },
@@ -466,6 +468,7 @@ fn merge_override_cannot_clear_missing_reviews_unlisted_or_pending_contexts() {
                 CreateCommitStatusRequest {
                     state: CommitStatusState::Pending,
                     context: "ratchet".into(),
+                    base: None,
                     description: None,
                     target_url: None,
                 },
@@ -543,6 +546,7 @@ fn merge_override_requires_trusted_status_evidence_and_no_active_rerun() {
                 CreateCommitStatusRequest {
                     state: CommitStatusState::Failure,
                     context: "ratchet".into(),
+                    base: None,
                     description: Some("new status row".into()),
                     target_url: None,
                 },
@@ -738,4 +742,33 @@ fn merge_override_target_carries_the_bound_refs_without_claiming_readiness() {
         core.evaluate_merge_readiness("alice", "jeryu", pr.number, Some(&pr.head.sha))
             .is_err()
     );
+}
+
+#[test]
+fn merge_override_evidence_ignores_a_row_proved_against_another_base() {
+    let (_dir, core) = durable_core();
+    let pr = fixture(&core);
+    // A newer failing row proved against a release line is a different proof.
+    // It must not become the evidence for a decision about main — and it comes
+    // from an untrusted creator, so prepare would refuse if it were picked.
+    core.create_commit_status(
+        "alice",
+        "jeryu",
+        &pr.head.sha,
+        "contributor",
+        CreateCommitStatusRequest {
+            state: CommitStatusState::Failure,
+            context: "ratchet".into(),
+            base: Some("release/1".into()),
+            description: Some("proved against the release line".into()),
+            target_url: None,
+        },
+    )
+    .unwrap();
+    let (_, permit) = core
+        .prepare_merge_override("alice", "jeryu", pr.number, decision("alice"))
+        .unwrap();
+    assert_eq!(permit.status_evidence.len(), 1);
+    assert_eq!(permit.status_evidence[0].creator, "ci");
+    assert_eq!(permit.status_evidence[0].base, None);
 }

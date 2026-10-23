@@ -134,6 +134,7 @@ fn branch_protection_blocks_merge_until_review_and_status_pass() {
         CreateCommitStatusRequest {
             state: CommitStatusState::Success,
             context: "ci/fast".to_string(),
+            base: None,
             description: None,
             target_url: None,
         },

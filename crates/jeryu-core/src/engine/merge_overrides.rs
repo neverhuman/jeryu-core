@@ -159,13 +159,15 @@ pub(super) fn validate_override_evaluation(
     let mut evidence = Vec::new();
     for blocker in &evaluation.blockers {
         if let crate::MergeBlocker::FailedStatusCheck { context } = blocker {
-            let status = state
+            // The same per-base selection branch protection used to raise this
+            // blocker, so the evidence is the row that actually failed for this
+            // pull request's base.
+            let rows = state
                 .statuses
                 .get(&(pr.owner.clone(), pr.repo.clone(), pr.head.sha.clone()))
                 .into_iter()
-                .flatten()
-                .filter(|status| status.context == *context)
-                .max_by_key(|status| status.updated_at);
+                .flatten();
+            let status = current_status_for_base(rows, context, &pr.base.ref_name);
             let running = state
                 .check_runs
                 .get(&(pr.owner.clone(), pr.repo.clone()))

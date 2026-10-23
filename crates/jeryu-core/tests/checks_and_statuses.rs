@@ -33,6 +33,7 @@ fn status(core: &ForgeCore, sha: &str, context: &str, state: CommitStatusState) 
         CreateCommitStatusRequest {
             state,
             context: context.to_string(),
+            base: None,
             description: None,
             target_url: None,
         },
@@ -72,6 +73,7 @@ fn commit_status_records_fields() {
             CreateCommitStatusRequest {
                 state: CommitStatusState::Success,
                 context: "continuous-integration/jeryu".to_string(),
+                base: None,
                 description: Some("All good".to_string()),
                 target_url: Some("https://ci.example.test/1".to_string()),
             },
@@ -95,6 +97,7 @@ fn empty_sha_for_status_is_rejected() {
             CreateCommitStatusRequest {
                 state: CommitStatusState::Success,
                 context: "ci".to_string(),
+                base: None,
                 description: None,
                 target_url: None,
             },

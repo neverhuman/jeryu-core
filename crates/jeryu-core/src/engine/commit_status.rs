@@ -1,6 +1,6 @@
 //! Commit statuses and combined status rollups.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::Utc;
 use serde_json::json;
@@ -21,6 +21,13 @@ impl ForgeCore {
         request: CreateCommitStatusRequest,
     ) -> Result<CommitStatus> {
         require_name("sha", sha)?;
+        // A blank base is "no base stated", not a base named "   ".
+        let base = request
+            .base
+            .as_deref()
+            .map(normalize_base_ref)
+            .filter(|base| !base.is_empty())
+            .map(str::to_string);
         self.ensure_repository_writable(owner, repo)?;
         self.ensure_user(creator);
         let now = Utc::now();
@@ -31,6 +38,7 @@ impl ForgeCore {
             sha: sha.to_string(),
             state: request.state,
             context: request.context,
+            base,
             description: request.description,
             target_url: request.target_url,
             creator: creator.to_string(),
@@ -97,6 +105,63 @@ impl ForgeCore {
         } else {
             CommitStatusState::Success
         };
+        Ok(CombinedStatus {
+            state,
+            total_count: statuses.len(),
+            statuses,
+        })
+    }
+
+    /// The combined status of a sha as it answers for a merge into `base`.
+    ///
+    /// Same rollup as [`ForgeCore::combined_status`], but each context is
+    /// resolved per base ([`current_status_for_base`]): a result proved against
+    /// another base is left out, so it neither contributes its state nor hides
+    /// a base-agnostic row. A context with no result for this base leaves the
+    /// rollup Pending, which is how one commit reads green for a release line
+    /// and pending for the default branch at the same time.
+    pub fn combined_status_for_base(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        base: &str,
+    ) -> Result<CombinedStatus> {
+        self.ensure_repo_exists(owner, repo)?;
+        require_name("base", base)?;
+        let all = match self.state.read().statuses.get(&(
+            owner.to_string(),
+            repo.to_string(),
+            sha.to_string(),
+        )) {
+            Some(statuses) => statuses.clone(),
+            None => Vec::new(),
+        };
+        let contexts: BTreeSet<&str> = all.iter().map(|status| status.context.as_str()).collect();
+        let current: Vec<&CommitStatus> = contexts
+            .into_iter()
+            .filter_map(|context| current_status_for_base(&all, context, base))
+            .collect();
+        let state = if current
+            .iter()
+            .any(|status| status.state == CommitStatusState::Error)
+        {
+            CommitStatusState::Error
+        } else if current
+            .iter()
+            .any(|status| status.state == CommitStatusState::Failure)
+        {
+            CommitStatusState::Failure
+        } else if current.is_empty()
+            || current
+                .iter()
+                .any(|status| status.state == CommitStatusState::Pending)
+        {
+            CommitStatusState::Pending
+        } else {
+            CommitStatusState::Success
+        };
+        let statuses: Vec<CommitStatus> = current.into_iter().cloned().collect();
         Ok(CombinedStatus {
             state,
             total_count: statuses.len(),

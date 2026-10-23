@@ -156,6 +156,7 @@ fn seed_full_repo(core: &ForgeCore, owner: &str, repo: &str) -> String {
         CreateCommitStatusRequest {
             state: CommitStatusState::Success,
             context: "ci/fast".to_string(),
+            base: None,
             description: None,
             target_url: None,
         },

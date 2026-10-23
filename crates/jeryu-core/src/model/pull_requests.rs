@@ -137,6 +137,13 @@ pub struct CreatePullRequestRequest {
 pub struct UpdatePullRequestRequest {
     #[serde(default)]
     pub title: Option<String>,
+    /// Retarget the pull request at another base branch.
+    #[serde(default)]
+    pub base: Option<String>,
+    /// Base tip to record with a retarget. Omitted, the placeholder the create
+    /// path uses stands in; the merge path resolves the live base tip anyway.
+    #[serde(default)]
+    pub base_sha: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
     #[serde(default)]

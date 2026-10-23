@@ -148,6 +148,7 @@ fn seed_full_repo(core: &ForgeCore) -> uuid::Uuid {
         CreateCommitStatusRequest {
             state: CommitStatusState::Success,
             context: "redline/required".to_string(),
+            base: None,
             description: None,
             target_url: None,
         },

@@ -24,6 +24,19 @@ pub struct CommitStatus {
     pub sha: String,
     pub state: CommitStatusState,
     pub context: String,
+    /// Base branch this result was proved against, when the publisher knows it.
+    ///
+    /// A gate that proves a head against its target branch produces a result
+    /// per (sha, context, base), not per (sha, context): one commit open in two
+    /// pull requests with different bases has two separate answers. Recording
+    /// the base lets branch protection for a pull request into `B` read only
+    /// the result proved against `B`.
+    ///
+    /// `None` means base-agnostic: the publisher did not say, so the row speaks
+    /// for every base. Rows stored before this field existed deserialize that
+    /// way, and a publisher that never sends a base keeps working unchanged.
+    #[serde(default)]
+    pub base: Option<String>,
     pub description: Option<String>,
     pub target_url: Option<String>,
     pub creator: String,
@@ -36,6 +49,11 @@ pub struct CreateCommitStatusRequest {
     pub state: CommitStatusState,
     #[serde(default = "default_status_context")]
     pub context: String,
+    /// Base branch the result was proved against; see [`CommitStatus::base`].
+    /// Omitted (or blank) posts a base-agnostic row, as every publisher did
+    /// before the field existed.
+    #[serde(default)]
+    pub base: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -44,6 +62,47 @@ pub struct CreateCommitStatusRequest {
 
 pub fn default_status_context() -> String {
     "default".to_string()
+}
+
+/// A base branch name without the `refs/heads/` prefix, so a publisher that
+/// sends a full ref and a pull request's short base name compare equal.
+pub fn normalize_base_ref(name: &str) -> &str {
+    let name = name.trim();
+    name.strip_prefix("refs/heads/").unwrap_or(name)
+}
+
+/// The current status for `context` that speaks for a merge into `base_ref`.
+///
+/// A row proved against that base wins over a base-agnostic row, and a row
+/// proved against another base is not visible here at all: for that base the
+/// context is simply unanswered. Among equally eligible rows the latest
+/// `updated_at` wins (ties pick the last appended, as the combined-status
+/// rollup does).
+pub fn current_status_for_base<'a, I>(
+    statuses: I,
+    context: &str,
+    base_ref: &str,
+) -> Option<&'a CommitStatus>
+where
+    I: IntoIterator<Item = &'a CommitStatus>,
+{
+    let base_ref = normalize_base_ref(base_ref);
+    let mut for_base: Option<&CommitStatus> = None;
+    let mut base_agnostic: Option<&CommitStatus> = None;
+    for status in statuses {
+        if status.context != context {
+            continue;
+        }
+        let slot = match status.base.as_deref() {
+            Some(status_base) if normalize_base_ref(status_base) == base_ref => &mut for_base,
+            Some(_) => continue,
+            None => &mut base_agnostic,
+        };
+        if slot.is_none_or(|current| status.updated_at >= current.updated_at) {
+            *slot = Some(status);
+        }
+    }
+    for_base.or(base_agnostic)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

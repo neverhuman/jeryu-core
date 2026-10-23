@@ -386,6 +386,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
             CreateCommitStatusRequest {
                 state: CommitStatusState::Success,
                 context: "ci/fast".to_string(),
+                base: None,
                 description: Some("green".to_string()),
                 target_url: Some("https://ci.invalid/build/1".to_string()),
             },

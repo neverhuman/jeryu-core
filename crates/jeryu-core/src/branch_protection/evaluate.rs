@@ -2,7 +2,7 @@
 
 use crate::model::{
     BranchProtectionRule, CheckConclusion, CheckRun, CheckRunStatus, CommitStatus,
-    CommitStatusState, PullRequest, Review, ReviewState,
+    CommitStatusState, PullRequest, Review, ReviewState, current_status_for_base,
 };
 
 use super::codeowners::CodeOwners;
@@ -62,7 +62,7 @@ pub fn evaluate_branch_protection_with(
     // The legacy per-rule `require_jankurai_proof` opt-in is kept below (inside the
     // rule block, still admin-bypassable) for repos that asked for it locally.
     if context.jankurai_proof_mandatory {
-        match required_context_state("jankurai/proof", statuses, check_runs) {
+        match required_context_state("jankurai/proof", statuses, check_runs, &pr.base.ref_name) {
             RequiredContextState::Satisfied => {}
             RequiredContextState::Missing | RequiredContextState::Failed => {
                 blockers.push(MergeBlocker::JankuraiProofRequired);
@@ -95,7 +95,7 @@ pub fn evaluate_branch_protection_with(
     }
 
     for required_context in &rule.required_status_checks {
-        match required_context_state(required_context, statuses, check_runs) {
+        match required_context_state(required_context, statuses, check_runs, &pr.base.ref_name) {
             RequiredContextState::Satisfied => {}
             RequiredContextState::Missing => blockers.push(MergeBlocker::MissingStatusCheck {
                 context: required_context.clone(),
@@ -109,7 +109,7 @@ pub fn evaluate_branch_protection_with(
     // Already enforced intrinsically above when mandatory; only the per-rule
     // opt-in path needs handling here (avoids a duplicate JankuraiProofRequired).
     if rule.require_jankurai_proof && !context.jankurai_proof_mandatory {
-        match required_context_state("jankurai/proof", statuses, check_runs) {
+        match required_context_state("jankurai/proof", statuses, check_runs, &pr.base.ref_name) {
             RequiredContextState::Satisfied => {}
             RequiredContextState::Missing | RequiredContextState::Failed => {
                 blockers.push(MergeBlocker::JankuraiProofRequired);
@@ -212,15 +212,19 @@ enum RequiredContextState {
     Failed,
 }
 
+/// Resolves one required context for a merge into `base_ref`.
+///
+/// Commit statuses are selected per base ([`current_status_for_base`]): a
+/// result proved against another base does not answer here, so one commit can
+/// be green for one base and unanswered (pending) for another at the same time.
+/// Check runs are not base-bound and answer for every base.
 fn required_context_state(
     context: &str,
     statuses: &[CommitStatus],
     check_runs: &[CheckRun],
+    base_ref: &str,
 ) -> RequiredContextState {
-    let status_match = statuses
-        .iter()
-        .filter(|status| status.context == context)
-        .max_by_key(|status| status.updated_at);
+    let status_match = current_status_for_base(statuses, context, base_ref);
 
     if let Some(status) = status_match {
         return if status.state == CommitStatusState::Success {

@@ -102,6 +102,7 @@ fn pass_status(core: &ForgeCore, sha: &str, context: &str) {
         CreateCommitStatusRequest {
             state: CommitStatusState::Success,
             context: context.to_string(),
+            base: None,
             description: None,
             target_url: None,
         },

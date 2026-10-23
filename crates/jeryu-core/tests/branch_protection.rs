@@ -338,6 +338,7 @@ fn failing_status_check_produces_failed_blocker() {
         CreateCommitStatusRequest {
             state: CommitStatusState::Failure,
             context: "ci/fast".to_string(),
+            base: None,
             description: None,
             target_url: None,
         },
@@ -373,6 +374,7 @@ fn latest_status_for_a_context_wins() {
         CreateCommitStatusRequest {
             state: CommitStatusState::Failure,
             context: "ci/fast".to_string(),
+            base: None,
             description: None,
             target_url: None,
         },
@@ -386,6 +388,7 @@ fn latest_status_for_a_context_wins() {
         CreateCommitStatusRequest {
             state: CommitStatusState::Success,
             context: "ci/fast".to_string(),
+            base: None,
             description: None,
             target_url: None,
         },
@@ -418,6 +421,7 @@ fn status_on_other_sha_does_not_satisfy_check() {
         CreateCommitStatusRequest {
             state: CommitStatusState::Success,
             context: "ci/fast".to_string(),
+            base: None,
             description: None,
             target_url: None,
         },

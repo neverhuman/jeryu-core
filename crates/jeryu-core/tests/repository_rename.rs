@@ -90,6 +90,7 @@ fn seed(core: &ForgeCore) -> jeryu_core::Repository {
         CreateCommitStatusRequest {
             state: CommitStatusState::Success,
             context: "ci/test".to_string(),
+            base: None,
             description: None,
             target_url: None,
         },
