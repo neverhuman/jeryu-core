@@ -11,6 +11,7 @@ use super::{
     require_name,
 };
 use crate::AuditEntry;
+use crate::branch_protection::{VerdictReach, effective_reviews_for_pull_request_with};
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
 use crate::webhooks::event_payload;
@@ -95,6 +96,25 @@ pub enum MergeReadiness {
     },
 }
 
+/// The base a two-phase merge was evaluated and performed against: the
+/// `base_ref` and `base_sha` of [`MergeReadiness::Ready`], handed back to
+/// [`ForgeCore::finalize_merge`]. Finalizing refuses when the pull request's
+/// base has moved since (a retarget or a recorded base), so a merge into one
+/// branch is never authorized by another branch's protection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeBase {
+    pub base_ref: String,
+    pub base_sha: String,
+}
+
+/// What one finalize call binds: the merge sha it records, the head it was
+/// asked for, and the base it was evaluated against.
+pub(super) struct FinalizeBinding<'a> {
+    merge_sha: String,
+    requested_sha: Option<&'a str>,
+    base: &'a MergeBase,
+}
+
 impl ForgeCore {
     pub fn create_pull_request(
         &self,
@@ -105,7 +125,8 @@ impl ForgeCore {
     ) -> Result<PullRequest> {
         require_name("pull request title", &request.title)?;
         require_name("head", &request.head)?;
-        require_name("base", &request.base)?;
+        // Validated as stored: `refs/heads/` alone normalizes to nothing.
+        require_name("base", normalize_base_ref(&request.base))?;
         self.ensure_repository_writable(owner, repo)?;
         self.ensure_user(author);
         let mut state = self.state.write();
@@ -495,12 +516,16 @@ impl ForgeCore {
     /// is not open, or whose head moved on from `head_sha`; a base that is
     /// blank, is the pull request's own head branch, or does not exist in git
     /// (`branches`); a `base_sha` that is not a full object id or equals the
-    /// head; an empty commit range. The caller's range for the new base
-    /// replaces `commits` and `changed_files`, and the diff identity
-    /// (`head_patch_ids`) is cleared because it was computed against the old
-    /// base. The merge gate is re-evaluated at once, so results proved against
-    /// the old base stop counting immediately. Announced as an `edited`
-    /// pull_request event and audited as `pull_request.retargeted` by `actor`.
+    /// head; an empty commit range or changed-path list; and any approval that
+    /// still counts (`Conflict`): an approval judged the diff against the old
+    /// base, so its author dismisses it first and reviews the new diff. The
+    /// caller's range for the new base replaces `commits` and `changed_files`,
+    /// and the diff identity (`head_patch_ids`) is cleared because it was
+    /// computed against the old base. The merge gate is re-evaluated at once,
+    /// so results proved against the old base stop counting immediately, and
+    /// an in-flight two-phase merge fails to finalize ([`MergeBase`]).
+    /// Announced as an `edited` pull_request event and audited as
+    /// `pull_request.retargeted` by `actor` in the same store transaction.
     pub fn retarget_pull_request(
         &self,
         actor: &str,
@@ -518,9 +543,15 @@ impl ForgeCore {
                 "base sha must not be the head: that diff is empty".to_string(),
             ));
         }
-        if request.commits.is_empty() {
+        if request.commits.is_empty() || request.changed_files.is_empty() {
             return Err(ForgeError::Validation(
-                "a retarget must carry the commit range for its new base".to_string(),
+                "a retarget must carry the commit range and changed paths for its new base"
+                    .to_string(),
+            ));
+        }
+        if actor.trim().is_empty() {
+            return Err(ForgeError::Validation(
+                "audit actor cannot be empty".to_string(),
             ));
         }
         self.ensure_repository_writable(owner, repo)?;
@@ -529,7 +560,7 @@ impl ForgeCore {
                 "base branch {base} does not exist in {owner}/{repo}"
             )));
         }
-        let (previous_base, updated) = {
+        let updated = {
             let mut state = self.state.write();
             let previous = state.clone();
             let key = (owner.to_string(), repo.to_string(), number);
@@ -560,6 +591,20 @@ impl ForgeCore {
                     "{base} is the head branch of pull request {owner}/{repo}#{number}"
                 )));
             }
+            // An approval is a verdict on the diff against the base it was
+            // given for; it must not authorize a merge into another branch.
+            // Only its author can withdraw a verdict (`dismiss_review`), so a
+            // retarget is refused while one counts rather than carrying it.
+            // Rejections may carry: they can only block.
+            let reviews = state.reviews.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+            if effective_reviews_for_pull_request_with(reviews, pr, VerdictReach::UnchangedDiff)
+                .iter()
+                .any(|review| review.state == ReviewState::Approved)
+            {
+                return Err(ForgeError::Conflict(format!(
+                    "pull request {owner}/{repo}#{number} has approvals given against its current base; they must be dismissed before a retarget"
+                )));
+            }
             let previous_base = pr.base.clone();
             let mut updated = pr.clone();
             updated.base = GitBranchRef::new(base, request.base_sha);
@@ -578,23 +623,32 @@ impl ForgeCore {
                 "pull_request",
                 event_payload("edited", "pull_request", json!(updated.clone())),
             );
-            self.persist_after_mutation(&mut state, previous)?;
-            (previous_base, updated)
+            // The audit row is written in the same transaction as the move, so
+            // a retarget never stands without its receipt.
+            let entry = AuditEntry {
+                id: Uuid::new_v4().to_string(),
+                occurred_at: Utc::now().to_rfc3339(),
+                actor: actor.to_string(),
+                action: "pull_request.retargeted".into(),
+                subject: format!("{owner}/{repo}"),
+                phase: "completed".into(),
+                detail: json!({
+                    "number": number,
+                    "head_sha": updated.head.sha,
+                    "from_base": previous_base.ref_name,
+                    "from_base_sha": previous_base.sha,
+                    "to_base": updated.base.ref_name,
+                    "to_base_sha": updated.base.sha,
+                }),
+            };
+            if let Some(storage) = &self.storage
+                && let Err(error) = storage.persist_with_audit(&state, &entry)
+            {
+                *state = previous;
+                return Err(error);
+            }
+            updated
         };
-        self.append_audit_as(
-            actor,
-            "pull_request.retargeted",
-            &format!("{owner}/{repo}"),
-            "completed",
-            json!({
-                "number": number,
-                "head_sha": updated.head.sha,
-                "from_base": previous_base.ref_name,
-                "from_base_sha": previous_base.sha,
-                "to_base": updated.base.ref_name,
-                "to_base_sha": updated.base.sha,
-            }),
-        )?;
         Ok(updated)
     }
 
@@ -775,8 +829,14 @@ impl ForgeCore {
         number: u64,
         merge_sha: String,
         requested_sha: Option<&str>,
+        base: &MergeBase,
     ) -> Result<MergeResult> {
-        self.finalize_merge_checked(owner, repo, number, merge_sha, requested_sha, None)
+        let binding = FinalizeBinding {
+            merge_sha,
+            requested_sha,
+            base,
+        };
+        self.finalize_merge_checked(owner, repo, number, binding, None)
     }
 
     /// Finalize a real Git merge authorized by an exact-state override permit.
@@ -788,12 +848,22 @@ impl ForgeCore {
         permit: MergeOverridePermit,
         merge_sha: String,
     ) -> Result<MergeResult> {
+        // The permit binds the base twice over: its sha here, and its ref
+        // through the protection rule (whose `branch` is the base it guards).
+        let base = MergeBase {
+            base_ref: permit.protection.branch.clone(),
+            base_sha: permit.base_sha.clone(),
+        };
+        let binding = FinalizeBinding {
+            merge_sha,
+            requested_sha: Some(&permit.head_sha),
+            base: &base,
+        };
         let result = self.finalize_merge_checked(
             &permit.owner,
             &permit.repo,
             permit.number,
-            merge_sha,
-            Some(&permit.head_sha),
+            binding,
             Some(&permit),
         );
         if let Err(error) = &result {
@@ -833,10 +903,14 @@ impl ForgeCore {
         owner: &str,
         repo: &str,
         number: u64,
-        merge_sha: String,
-        requested_sha: Option<&str>,
+        binding: FinalizeBinding<'_>,
         override_permit: Option<&MergeOverridePermit>,
     ) -> Result<MergeResult> {
+        let FinalizeBinding {
+            merge_sha,
+            requested_sha,
+            base,
+        } = binding;
         self.ensure_repository_writable(owner, repo)?;
         let mut state = self.state.write();
         let previous = state.clone();
@@ -868,6 +942,14 @@ impl ForgeCore {
             return Err(ForgeError::Validation(
                 "closed pull requests cannot be merged".to_string(),
             ));
+        }
+        // The caller merged into the base it was told about at readiness; a
+        // retarget or recorded base since then means the gate below would
+        // judge a different merge than the one git performed.
+        if pr_snapshot.base.ref_name != base.base_ref || pr_snapshot.base.sha != base.base_sha {
+            return Err(ForgeError::Conflict(format!(
+                "pull request {owner}/{repo}#{number} base changed since readiness; re-evaluate"
+            )));
         }
         // Re-evaluate under the write lock to close the readiness->finalize
         // TOCTOU window.
@@ -983,9 +1065,22 @@ impl ForgeCore {
                 merged: true,
                 message: "Pull Request already merged".to_string(),
             }),
-            MergeReadiness::Ready { head_sha, .. } => {
+            MergeReadiness::Ready {
+                head_sha,
+                base_ref,
+                base_sha,
+                ..
+            } => {
                 let merge_sha = format!("merge-{head_sha}-{number}");
-                self.finalize_merge(owner, repo, number, merge_sha, request.sha.as_deref())
+                let base = MergeBase { base_ref, base_sha };
+                self.finalize_merge(
+                    owner,
+                    repo,
+                    number,
+                    merge_sha,
+                    request.sha.as_deref(),
+                    &base,
+                )
             }
         }
     }

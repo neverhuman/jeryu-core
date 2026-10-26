@@ -10,8 +10,9 @@
 
 use jeryu_core::{
     CommitStatus, CommitStatusState, CreateCommitStatusRequest, CreatePullRequestRequest,
-    CreateRepositoryRequest, CreateUserRequest, ForgeCore, ForgeError, MergeBlocker,
-    PullRequestCommit, PullRequestState, RepoBranches, Result, RetargetPullRequestRequest,
+    CreateRepositoryRequest, CreateReviewRequest, CreateUserRequest, DismissReviewRequest,
+    ForgeCore, ForgeError, MergeBase, MergeBlocker, MergeReadiness, PullRequestCommit,
+    PullRequestState, RepoBranches, Result, RetargetPullRequestRequest, ReviewState,
     SetBranchProtectionRequest, UpdatePullRequestRequest,
 };
 
@@ -412,6 +413,20 @@ fn a_retarget_refuses_what_it_cannot_trust() {
     let mut no_range = retarget_request(RELEASE);
     no_range.commits.clear();
     refused(no_range);
+    let mut no_paths = retarget_request(RELEASE);
+    no_paths.changed_files.clear();
+    refused(no_paths);
+    let err = core
+        .retarget_pull_request(
+            " ",
+            "alice",
+            "jeryu",
+            number,
+            retarget_request(RELEASE),
+            &Branches,
+        )
+        .unwrap_err();
+    assert!(matches!(err, ForgeError::Validation(_)), "{err:?}");
     refused(retarget_request("release/404"));
     refused(retarget_request("feature"));
 
@@ -587,4 +602,136 @@ fn a_posted_base_survives_a_reload_from_sqlite() {
             .state,
         CommitStatusState::Pending
     );
+}
+
+/// A full lowercase SHA-1 head, which review dismissal requires.
+const SHA1_HEAD: &str = "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ff";
+
+fn review(core: &ForgeCore, number: u64, author: &str, event: ReviewState) -> uuid::Uuid {
+    core.create_review(
+        "alice",
+        "jeryu",
+        number,
+        author,
+        CreateReviewRequest {
+            body: None,
+            event,
+            comments: Vec::new(),
+            expected_head_sha: None,
+        },
+    )
+    .unwrap()
+    .id
+}
+
+fn sha1_request(base: &str) -> RetargetPullRequestRequest {
+    let mut request = retarget_request(base);
+    request.head_sha = SHA1_HEAD.to_string();
+    request.commits[0].sha = SHA1_HEAD.to_string();
+    request
+}
+
+/// An approval judged the diff against the old base: it never carries to the
+/// new one. The retarget waits until its author withdraws it.
+#[test]
+fn a_retarget_is_refused_while_an_approval_counts() {
+    let core = core_with_protected_bases();
+    let number = open_pr(&core, SHA1_HEAD, RELEASE);
+    let approval = review(&core, number, "bob", ReviewState::Approved);
+    assert!(matches!(
+        retarget(&core, number, sha1_request("main")),
+        Err(ForgeError::Conflict(_))
+    ));
+    assert_eq!(
+        core.get_pull_request("alice", "jeryu", number)
+            .unwrap()
+            .base
+            .ref_name,
+        RELEASE
+    );
+
+    core.dismiss_review(
+        "alice",
+        "jeryu",
+        number,
+        "bob",
+        DismissReviewRequest {
+            review_id: approval,
+            reason: "re-review against main".to_string(),
+            expected_head_sha: SHA1_HEAD.to_string(),
+        },
+    )
+    .unwrap();
+    let retargeted = retarget(&core, number, sha1_request("main")).unwrap();
+    assert_eq!(retargeted.base.ref_name, "main");
+}
+
+/// A rejection can only block, so it does not stand in the way.
+#[test]
+fn a_rejection_does_not_hold_a_retarget() {
+    let core = core_with_protected_bases();
+    let number = open_pr(&core, SHA1_HEAD, RELEASE);
+    review(&core, number, "bob", ReviewState::ChangesRequested);
+    retarget(&core, number, sha1_request("main")).unwrap();
+}
+
+/// A retarget between readiness and finalize: git merged into the base it was
+/// told about, so the finalize is refused instead of being judged under the
+/// new base's rule.
+#[test]
+fn a_finalize_is_refused_when_the_base_moved_since_readiness() {
+    let core = core_with_protected_bases();
+    let number = open_pr(&core, HEAD, RELEASE);
+    post(&core, HEAD, CommitStatusState::Success, None);
+    let MergeReadiness::Ready {
+        base_ref, base_sha, ..
+    } = core
+        .evaluate_merge_readiness("alice", "jeryu", number, None)
+        .unwrap()
+    else {
+        panic!("expected Ready");
+    };
+    let evaluated = MergeBase { base_ref, base_sha };
+    retarget(&core, number, retarget_request("main")).unwrap();
+    let err = core
+        .finalize_merge(
+            "alice",
+            "jeryu",
+            number,
+            "merged".to_string(),
+            None,
+            &evaluated,
+        )
+        .unwrap_err();
+    assert!(matches!(err, ForgeError::Conflict(_)), "{err:?}");
+    assert!(
+        !core
+            .get_pull_request("alice", "jeryu", number)
+            .unwrap()
+            .merged
+    );
+}
+
+#[test]
+fn a_create_whose_base_normalizes_to_nothing_is_refused() {
+    let core = core_with_protected_bases();
+    for base in ["refs/heads/", "  refs/heads/  "] {
+        let err = core
+            .create_pull_request(
+                "alice",
+                "jeryu",
+                "alice",
+                CreatePullRequestRequest {
+                    title: "empty base".to_string(),
+                    head: "feature".to_string(),
+                    base: base.to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, ForgeError::Validation(_)),
+            "{base:?}: {err:?}"
+        );
+    }
 }

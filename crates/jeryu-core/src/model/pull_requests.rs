@@ -168,7 +168,8 @@ pub struct RetargetPullRequestRequest {
     pub head_sha: String,
     /// Commits in `base_sha..head_sha`; at least one.
     pub commits: Vec<PullRequestCommit>,
-    /// Paths changed in `base_sha..head_sha`.
+    /// Paths changed in `base_sha..head_sha`; at least one, so the new
+    /// base's CODEOWNERS rule always has paths to judge.
     #[serde(default)]
     pub changed_files: Vec<String>,
 }
