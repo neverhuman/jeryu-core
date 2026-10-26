@@ -10,13 +10,47 @@
 
 use jeryu_core::{
     CommitStatus, CommitStatusState, CreateCommitStatusRequest, CreatePullRequestRequest,
-    CreateRepositoryRequest, CreateUserRequest, ForgeCore, MergeBlocker,
+    CreateRepositoryRequest, CreateUserRequest, ForgeCore, ForgeError, MergeBlocker,
+    PullRequestCommit, PullRequestState, RepoBranches, Result, RetargetPullRequestRequest,
     SetBranchProtectionRequest, UpdatePullRequestRequest,
 };
 
 const REQUIRED: &str = "jeryu/required";
 const RELEASE: &str = "release/1";
 const HEAD: &str = "c0ffee";
+const MERGE_BASE: &str = "ba5eba5eba5eba5eba5eba5eba5eba5eba5eba5e";
+
+/// Git storage where `main`, the release line and `feature` exist.
+#[derive(Debug)]
+struct Branches;
+
+impl RepoBranches for Branches {
+    fn branch_exists(&self, _owner: &str, _name: &str, branch: &str) -> Result<bool> {
+        Ok(matches!(branch, "main" | RELEASE | "feature"))
+    }
+}
+
+fn retarget_request(base: &str) -> RetargetPullRequestRequest {
+    RetargetPullRequestRequest {
+        base: base.to_string(),
+        base_sha: MERGE_BASE.to_string(),
+        head_sha: HEAD.to_string(),
+        commits: vec![PullRequestCommit {
+            sha: HEAD.to_string(),
+            verified: true,
+            parents: 1,
+        }],
+        changed_files: vec!["src/lib.rs".to_string()],
+    }
+}
+
+fn retarget(
+    core: &ForgeCore,
+    number: u64,
+    request: RetargetPullRequestRequest,
+) -> Result<jeryu_core::PullRequest> {
+    core.retarget_pull_request("alice", "alice", "jeryu", number, request, &Branches)
+}
 
 fn core_with_protected_bases() -> ForgeCore {
     let core = ForgeCore::new();
@@ -205,20 +239,33 @@ fn a_full_ref_base_matches_the_pull_requests_short_base_name() {
 }
 
 #[test]
-fn a_result_proved_against_the_base_outranks_a_base_agnostic_one() {
+fn a_later_base_agnostic_failure_replaces_an_earlier_pass_proved_against_the_base() {
+    let core = core_with_protected_bases();
+    let into_main = open_pr(&core, HEAD, "main");
+    post(&core, HEAD, CommitStatusState::Success, Some("main"));
+    assert!(blockers(&core, into_main).is_empty());
+    // A stale pinned pass must not shadow a newer authoritative failure.
+    post(&core, HEAD, CommitStatusState::Failure, None);
+    assert!(failed_required(&blockers(&core, into_main)));
+    assert_eq!(
+        core.combined_status_for_base("alice", "jeryu", HEAD, "main")
+            .unwrap()
+            .state,
+        CommitStatusState::Failure
+    );
+}
+
+#[test]
+fn the_latest_answering_result_wins_whichever_kind_it_is() {
     let core = core_with_protected_bases();
     let into_main = open_pr(&core, HEAD, "main");
     let into_release = open_pr(&core, HEAD, RELEASE);
-
-    // The base-agnostic row is posted last, so recency alone would make main
-    // green; the row proved against main is the one that answers for main.
-    post(&core, HEAD, CommitStatusState::Failure, Some("main"));
-    post(&core, HEAD, CommitStatusState::Success, None);
-
-    assert!(failed_required(&blockers(&core, into_main)));
+    post(&core, HEAD, CommitStatusState::Failure, None);
+    post(&core, HEAD, CommitStatusState::Success, Some("main"));
+    assert!(blockers(&core, into_main).is_empty());
     assert!(
-        blockers(&core, into_release).is_empty(),
-        "the release line has no row of its own and falls back to the base-agnostic pass"
+        failed_required(&blockers(&core, into_release)),
+        "the release line has no row of its own; the base-agnostic failure answers"
     );
 }
 
@@ -232,6 +279,36 @@ fn the_latest_result_for_a_base_wins_over_its_earlier_ones() {
 }
 
 #[test]
+fn the_per_base_rollup_reports_its_history_like_the_per_sha_rollup() {
+    let core = core_with_protected_bases();
+    post(&core, HEAD, CommitStatusState::Failure, Some("main"));
+    post(&core, HEAD, CommitStatusState::Success, Some("main"));
+    post(&core, HEAD, CommitStatusState::Success, Some(RELEASE));
+    post(&core, HEAD, CommitStatusState::Pending, None);
+    let main = core
+        .combined_status_for_base("alice", "jeryu", HEAD, "main")
+        .unwrap();
+    assert_eq!(
+        main.total_count, 3,
+        "both main rows and the base-agnostic one"
+    );
+    assert_eq!(main.statuses.len(), 3);
+    assert_eq!(main.state, CommitStatusState::Pending);
+    // A blank base asks for the base-agnostic rows alone.
+    let agnostic = core
+        .combined_status_for_base("alice", "jeryu", HEAD, "  ")
+        .unwrap();
+    assert_eq!(agnostic.total_count, 1);
+    assert_eq!(agnostic.statuses[0].base, None);
+    assert_eq!(
+        core.combined_status("alice", "jeryu", HEAD)
+            .unwrap()
+            .total_count,
+        4
+    );
+}
+
+#[test]
 fn retargeting_a_pull_request_drops_the_old_bases_result_immediately() {
     let core = core_with_protected_bases();
     let number = open_pr(&core, HEAD, RELEASE);
@@ -240,20 +317,10 @@ fn retargeting_a_pull_request_drops_the_old_bases_result_immediately() {
 
     // No further status is posted, and no publisher tick happens in between:
     // the retarget alone invalidates the release-line proof.
-    let retargeted = core
-        .update_pull_request(
-            "alice",
-            "jeryu",
-            number,
-            UpdatePullRequestRequest {
-                base: Some("main".to_string()),
-                base_sha: Some("ba5e".to_string()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    let retargeted = retarget(&core, number, retarget_request("main")).unwrap();
     assert_eq!(retargeted.base.ref_name, "main");
-    assert_eq!(retargeted.base.sha, "ba5e");
+    assert_eq!(retargeted.base.sha, MERGE_BASE);
+    assert!(retargeted.head_patch_ids.is_empty());
     assert!(!retargeted.mergeable);
     assert!(missing_required(&blockers(&core, number)));
 
@@ -273,56 +340,113 @@ fn retargeting_back_restores_the_base_it_was_proved_against() {
     post(&core, HEAD, CommitStatusState::Success, Some(RELEASE));
     assert!(missing_required(&blockers(&core, number)));
 
-    let retargeted = core
-        .update_pull_request(
-            "alice",
-            "jeryu",
-            number,
-            UpdatePullRequestRequest {
-                base: Some(RELEASE.to_string()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    let retargeted = retarget(&core, number, retarget_request("refs/heads/release/1")).unwrap();
+    assert_eq!(
+        retargeted.base.ref_name, RELEASE,
+        "stored without refs/heads/"
+    );
     assert!(retargeted.mergeable);
     assert!(blockers(&core, number).is_empty());
 }
 
+/// The commit range and changed paths come with the move, so the new base's
+/// signed-commit rule reads the new range, never the old one.
 #[test]
-fn a_retarget_without_a_base_sha_records_the_create_paths_placeholder() {
+fn a_retarget_replaces_the_base_relative_range() {
     let core = core_with_protected_bases();
-    let number = open_pr(&core, HEAD, "main");
-    let created = core.get_pull_request("alice", "jeryu", number).unwrap();
-    let retargeted = core
-        .update_pull_request(
-            "alice",
-            "jeryu",
-            number,
-            UpdatePullRequestRequest {
-                base: Some(RELEASE.to_string()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    assert_eq!(retargeted.base.sha, created.base.sha);
+    core.set_branch_protection(
+        "alice",
+        "jeryu",
+        "main",
+        SetBranchProtectionRequest {
+            require_signed_commits: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let number = open_pr(&core, HEAD, RELEASE);
+    post(&core, HEAD, CommitStatusState::Success, None);
+    let mut request = retarget_request("main");
+    request.commits = vec![
+        PullRequestCommit {
+            sha: "0ld".to_string(),
+            verified: false,
+            parents: 1,
+        },
+        PullRequestCommit {
+            sha: HEAD.to_string(),
+            verified: true,
+            parents: 1,
+        },
+    ];
+    let retargeted = retarget(&core, number, request).unwrap();
+    assert_eq!(retargeted.commits.len(), 2);
+    assert_eq!(retargeted.changed_files, ["src/lib.rs"]);
+    assert!(blockers(&core, number).iter().any(|blocker| matches!(
+        blocker,
+        MergeBlocker::UnsignedCommits { unsigned } if unsigned == &["0ld".to_string()]
+    )));
 }
 
 #[test]
-fn an_empty_base_cannot_retarget_a_pull_request() {
+fn a_retarget_refuses_what_it_cannot_trust() {
     let core = core_with_protected_bases();
     let number = open_pr(&core, HEAD, "main");
-    let err = core
-        .update_pull_request(
-            "alice",
-            "jeryu",
-            number,
-            UpdatePullRequestRequest {
-                base: Some("  ".to_string()),
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
-    assert!(matches!(err, jeryu_core::ForgeError::Validation(_)));
+    let refused = |request: RetargetPullRequestRequest| {
+        let err = retarget(&core, number, request).unwrap_err();
+        assert!(matches!(err, ForgeError::Validation(_)), "{err:?}");
+    };
+    let mut blank = retarget_request("  ");
+    refused(blank.clone());
+    blank.base = "refs/heads/".to_string();
+    refused(blank);
+    for sha in ["ba5e", "main", "--all", ""] {
+        let mut request = retarget_request(RELEASE);
+        request.base_sha = sha.to_string();
+        refused(request);
+    }
+    let mut empty_diff = retarget_request(RELEASE);
+    empty_diff.base_sha = MERGE_BASE.to_string();
+    empty_diff.head_sha = MERGE_BASE.to_uppercase();
+    refused(empty_diff);
+    let mut no_range = retarget_request(RELEASE);
+    no_range.commits.clear();
+    refused(no_range);
+    refused(retarget_request("release/404"));
+    refused(retarget_request("feature"));
+
+    let mut moved = retarget_request(RELEASE);
+    moved.head_sha = "f00d".to_string();
+    assert!(matches!(
+        retarget(&core, number, moved),
+        Err(ForgeError::Conflict(_))
+    ));
+    assert!(matches!(
+        retarget(&core, 999, retarget_request(RELEASE)),
+        Err(ForgeError::NotFound(_))
+    ));
+    let pr = core.get_pull_request("alice", "jeryu", number).unwrap();
+    assert_eq!(pr.base.ref_name, "main");
+}
+
+#[test]
+fn a_closed_pull_requests_base_is_never_retargeted() {
+    let core = core_with_protected_bases();
+    let number = open_pr(&core, HEAD, "main");
+    core.update_pull_request(
+        "alice",
+        "jeryu",
+        number,
+        UpdatePullRequestRequest {
+            state: Some(PullRequestState::Closed),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        retarget(&core, number, retarget_request(RELEASE)),
+        Err(ForgeError::Conflict(_))
+    ));
     assert_eq!(
         core.get_pull_request("alice", "jeryu", number)
             .unwrap()
@@ -330,6 +454,53 @@ fn an_empty_base_cannot_retarget_a_pull_request() {
             .ref_name,
         "main"
     );
+}
+
+#[test]
+fn a_create_with_a_full_ref_base_is_keyed_like_its_protection_rule() {
+    let core = core_with_protected_bases();
+    let number = open_pr(&core, HEAD, "refs/heads/main");
+    let pr = core.get_pull_request("alice", "jeryu", number).unwrap();
+    assert_eq!(pr.base.ref_name, "main");
+    assert!(missing_required(&blockers(&core, number)));
+}
+
+#[test]
+fn a_retarget_is_audited_and_refused_on_an_archived_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = ForgeCore::open_sqlite(dir.path().join("forge.sqlite")).unwrap();
+    core.create_user(CreateUserRequest {
+        login: "alice".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    core.create_repository(
+        "alice",
+        CreateRepositoryRequest {
+            name: "jeryu".to_string(),
+            default_branch: Some("main".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let number = open_pr(&core, HEAD, "main");
+    retarget(&core, number, retarget_request(RELEASE)).unwrap();
+    let audit = core.list_audit("alice/jeryu").unwrap();
+    let entry = audit
+        .iter()
+        .find(|entry| entry.action == "pull_request.retargeted")
+        .expect("retarget audited");
+    assert_eq!(entry.actor, "alice");
+    assert_eq!(entry.detail["from_base"], "main");
+    assert_eq!(entry.detail["to_base"], RELEASE);
+    assert_eq!(entry.detail["to_base_sha"], MERGE_BASE);
+
+    core.set_repository_archived("alice", "alice", "jeryu", true)
+        .unwrap();
+    assert!(matches!(
+        retarget(&core, number, retarget_request("main")),
+        Err(ForgeError::RepositoryArchived(_))
+    ));
 }
 
 #[test]

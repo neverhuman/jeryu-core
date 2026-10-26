@@ -137,13 +137,6 @@ pub struct CreatePullRequestRequest {
 pub struct UpdatePullRequestRequest {
     #[serde(default)]
     pub title: Option<String>,
-    /// Retarget the pull request at another base branch.
-    #[serde(default)]
-    pub base: Option<String>,
-    /// Base tip to record with a retarget. Omitted, the placeholder the create
-    /// path uses stands in; the merge path resolves the live base tip anyway.
-    #[serde(default)]
-    pub base_sha: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
     #[serde(default)]
@@ -154,6 +147,30 @@ pub struct UpdatePullRequestRequest {
     pub commits: Option<Vec<PullRequestCommit>>,
     #[serde(default)]
     pub changed_files: Option<Vec<String>>,
+}
+
+/// A retarget of an open pull request onto another base branch
+/// ([`crate::ForgeCore::retarget_pull_request`]).
+///
+/// Everything the merge gate reads relative to the base comes with the move,
+/// computed by the caller from git for the new base: the merge base, the
+/// commit range and the changed paths. A retarget never keeps the old base's
+/// range, so signed-commit, linear-history and CODEOWNERS checks always
+/// answer for the base the pull request now targets.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RetargetPullRequestRequest {
+    /// The new base branch (a `refs/heads/` prefix is accepted and dropped).
+    pub base: String,
+    /// Merge base of the head with the new base branch: 40 or 64 hex digits.
+    pub base_sha: String,
+    /// The head the range was computed for; the retarget is refused if the
+    /// pull request's head has moved on since.
+    pub head_sha: String,
+    /// Commits in `base_sha..head_sha`; at least one.
+    pub commits: Vec<PullRequestCommit>,
+    /// Paths changed in `base_sha..head_sha`.
+    #[serde(default)]
+    pub changed_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

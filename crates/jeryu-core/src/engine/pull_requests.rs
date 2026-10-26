@@ -26,10 +26,6 @@ fn normalize_source_repository(
         .unwrap_or_else(|| format!("{owner}/{repo}"))
 }
 
-/// Base sha recorded for a retarget that states no base tip. The same
-/// placeholder `create_pull_request` stores when a create omits `base_sha`.
-const DEFAULT_RETARGET_BASE_SHA: &str = "base";
-
 /// Most commits a pull request's recorded diff identity may cover. A digest
 /// list is attacker-influenced in size (a pusher chooses how many commits it
 /// sends), so the stored list is bounded rather than growing with the branch.
@@ -161,11 +157,11 @@ impl ForgeCore {
                     .head_sha
                     .unwrap_or_else(|| format!("head-{pull_number}")),
             ),
+            // Stored without a `refs/heads/` prefix, the form branch
+            // protection and per-base statuses are keyed by.
             base: GitBranchRef::new(
-                request.base,
-                request
-                    .base_sha
-                    .unwrap_or_else(|| DEFAULT_RETARGET_BASE_SHA.to_string()),
+                normalize_base_ref(&request.base),
+                request.base_sha.unwrap_or_else(|| "base".to_string()),
             ),
             mergeable: false,
             mergeable_state: "unknown".to_string(),
@@ -260,9 +256,6 @@ impl ForgeCore {
         if let Some(title) = request.title.as_deref() {
             require_name("pull request title", title)?;
         }
-        if let Some(base) = request.base.as_deref() {
-            require_name("base", base)?;
-        }
         let mut state = self.state.write();
         let previous = state.clone();
         let key = (owner.to_string(), repo.to_string(), number);
@@ -276,24 +269,6 @@ impl ForgeCore {
         };
         if let Some(title) = request.title {
             pr.title = title;
-        }
-        // Retarget. The base is part of what a result proves (a required status
-        // is selected per base), so moving the base drops every answer proved
-        // against the old one: the re-evaluation below runs against the new
-        // base's protection rule and its own results, with no tick of the
-        // publisher's loop in between.
-        if let Some(base) = request.base {
-            let base = base.trim().to_string();
-            if base != pr.base.ref_name {
-                pr.base = GitBranchRef::new(
-                    base,
-                    request
-                        .base_sha
-                        .unwrap_or_else(|| DEFAULT_RETARGET_BASE_SHA.to_string()),
-                );
-            } else if let Some(base_sha) = request.base_sha {
-                pr.base.sha = base_sha;
-            }
         }
         if request.body.is_some() {
             pr.body = request.body;
@@ -509,6 +484,117 @@ impl ForgeCore {
             updated.push(pr);
         }
         self.persist_after_mutation(&mut state, previous)?;
+        Ok(updated)
+    }
+
+    /// Move open pull request `number` onto another base branch.
+    ///
+    /// The base decides which protection rule and which per-base results
+    /// apply, so a retarget is held to what [`Self::record_pull_request_base`]
+    /// enforces and more. Refused: an archived repository; a pull request that
+    /// is not open, or whose head moved on from `head_sha`; a base that is
+    /// blank, is the pull request's own head branch, or does not exist in git
+    /// (`branches`); a `base_sha` that is not a full object id or equals the
+    /// head; an empty commit range. The caller's range for the new base
+    /// replaces `commits` and `changed_files`, and the diff identity
+    /// (`head_patch_ids`) is cleared because it was computed against the old
+    /// base. The merge gate is re-evaluated at once, so results proved against
+    /// the old base stop counting immediately. Announced as an `edited`
+    /// pull_request event and audited as `pull_request.retargeted` by `actor`.
+    pub fn retarget_pull_request(
+        &self,
+        actor: &str,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        request: RetargetPullRequestRequest,
+        branches: &dyn super::RepoBranches,
+    ) -> Result<PullRequest> {
+        let base = normalize_base_ref(&request.base).to_string();
+        require_name("base", &base)?;
+        validate_diff_base(&request.base_sha)?;
+        if request.base_sha.eq_ignore_ascii_case(&request.head_sha) {
+            return Err(ForgeError::Validation(
+                "base sha must not be the head: that diff is empty".to_string(),
+            ));
+        }
+        if request.commits.is_empty() {
+            return Err(ForgeError::Validation(
+                "a retarget must carry the commit range for its new base".to_string(),
+            ));
+        }
+        self.ensure_repository_writable(owner, repo)?;
+        if !branches.branch_exists(owner, repo, &base)? {
+            return Err(ForgeError::Validation(format!(
+                "base branch {base} does not exist in {owner}/{repo}"
+            )));
+        }
+        let (previous_base, updated) = {
+            let mut state = self.state.write();
+            let previous = state.clone();
+            let key = (owner.to_string(), repo.to_string(), number);
+            let Some(pr) = state.pulls.get(&key) else {
+                return Err(ForgeError::NotFound(format!(
+                    "pull request {owner}/{repo}#{number}"
+                )));
+            };
+            if pr.merged
+                || matches!(
+                    pr.state,
+                    PullRequestState::Closed | PullRequestState::Merged
+                )
+            {
+                return Err(ForgeError::Conflict(format!(
+                    "pull request {owner}/{repo}#{number} is not open"
+                )));
+            }
+            if pr.head.sha != request.head_sha {
+                return Err(ForgeError::Conflict(format!(
+                    "pull request {owner}/{repo}#{number} head changed"
+                )));
+            }
+            let same_repository = pr.source_repository.is_empty()
+                || pr.source_repository == format!("{owner}/{repo}");
+            if same_repository && pr.head.ref_name == base {
+                return Err(ForgeError::Validation(format!(
+                    "{base} is the head branch of pull request {owner}/{repo}#{number}"
+                )));
+            }
+            let previous_base = pr.base.clone();
+            let mut updated = pr.clone();
+            updated.base = GitBranchRef::new(base, request.base_sha);
+            updated.commits = request.commits;
+            updated.changed_files = request.changed_files;
+            // The recorded identity was computed against the old base.
+            updated.head_patch_ids = Vec::new();
+            updated.updated_at = Utc::now();
+            let evaluation = evaluate_locked(&state, &updated, None);
+            apply_evaluation(&mut updated, evaluation);
+            state.pulls.insert(key, updated.clone());
+            emit_event_locked(
+                &mut state,
+                owner,
+                repo,
+                "pull_request",
+                event_payload("edited", "pull_request", json!(updated.clone())),
+            );
+            self.persist_after_mutation(&mut state, previous)?;
+            (previous_base, updated)
+        };
+        self.append_audit_as(
+            actor,
+            "pull_request.retargeted",
+            &format!("{owner}/{repo}"),
+            "completed",
+            json!({
+                "number": number,
+                "head_sha": updated.head.sha,
+                "from_base": previous_base.ref_name,
+                "from_base_sha": previous_base.sha,
+                "to_base": updated.base.ref_name,
+                "to_base_sha": updated.base.sha,
+            }),
+        )?;
         Ok(updated)
     }
 

@@ -71,13 +71,27 @@ pub fn normalize_base_ref(name: &str) -> &str {
     name.strip_prefix("refs/heads/").unwrap_or(name)
 }
 
+/// Whether `status` speaks for a merge into `base_ref`: it was proved against
+/// that base, or it states no base (base-agnostic). A blank `base_ref` asks
+/// for the base-agnostic rows alone.
+pub fn status_answers_for_base(status: &CommitStatus, base_ref: &str) -> bool {
+    match status.base.as_deref() {
+        Some(status_base) => {
+            let base_ref = normalize_base_ref(base_ref);
+            !base_ref.is_empty() && normalize_base_ref(status_base) == base_ref
+        }
+        None => true,
+    }
+}
+
 /// The current status for `context` that speaks for a merge into `base_ref`.
 ///
-/// A row proved against that base wins over a base-agnostic row, and a row
-/// proved against another base is not visible here at all: for that base the
-/// context is simply unanswered. Among equally eligible rows the latest
-/// `updated_at` wins (ties pick the last appended, as the combined-status
-/// rollup does).
+/// A row proved against another base is not visible here at all: for that
+/// base the context is simply unanswered. Among the rows that do answer
+/// (proved against this base, or base-agnostic) the latest `updated_at` wins,
+/// whichever kind it is, so a later result always replaces an earlier one and
+/// no stale pass of either kind can shadow a newer failure. Ties pick the last
+/// appended, as the combined-status rollup does.
 pub fn current_status_for_base<'a, I>(
     statuses: I,
     context: &str,
@@ -86,23 +100,16 @@ pub fn current_status_for_base<'a, I>(
 where
     I: IntoIterator<Item = &'a CommitStatus>,
 {
-    let base_ref = normalize_base_ref(base_ref);
-    let mut for_base: Option<&CommitStatus> = None;
-    let mut base_agnostic: Option<&CommitStatus> = None;
+    let mut current: Option<&CommitStatus> = None;
     for status in statuses {
-        if status.context != context {
+        if status.context != context || !status_answers_for_base(status, base_ref) {
             continue;
         }
-        let slot = match status.base.as_deref() {
-            Some(status_base) if normalize_base_ref(status_base) == base_ref => &mut for_base,
-            Some(_) => continue,
-            None => &mut base_agnostic,
-        };
-        if slot.is_none_or(|current| status.updated_at >= current.updated_at) {
-            *slot = Some(status);
+        if current.is_none_or(|seen| status.updated_at >= seen.updated_at) {
+            current = Some(status);
         }
     }
-    for_base.or(base_agnostic)
+    current
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

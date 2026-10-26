@@ -114,12 +114,14 @@ impl ForgeCore {
 
     /// The combined status of a sha as it answers for a merge into `base`.
     ///
-    /// Same rollup as [`ForgeCore::combined_status`], but each context is
-    /// resolved per base ([`current_status_for_base`]): a result proved against
-    /// another base is left out, so it neither contributes its state nor hides
-    /// a base-agnostic row. A context with no result for this base leaves the
-    /// rollup Pending, which is how one commit reads green for a release line
-    /// and pending for the default branch at the same time.
+    /// Same shape as [`ForgeCore::combined_status`]: `statuses` is the
+    /// append-only history and `total_count` its length, here restricted to the
+    /// rows that answer for `base` ([`status_answers_for_base`]). The `state`
+    /// rolls up the current row of each context ([`current_status_for_base`]);
+    /// a result proved against another base is left out, and with no rows the
+    /// rollup is Pending, which is how one commit reads green for a release
+    /// line and pending for the default branch at the same time. A blank
+    /// `base` asks for the base-agnostic rows alone.
     pub fn combined_status_for_base(
         &self,
         owner: &str,
@@ -128,40 +130,34 @@ impl ForgeCore {
         base: &str,
     ) -> Result<CombinedStatus> {
         self.ensure_repo_exists(owner, repo)?;
-        require_name("base", base)?;
-        let all = match self.state.read().statuses.get(&(
-            owner.to_string(),
-            repo.to_string(),
-            sha.to_string(),
-        )) {
-            Some(statuses) => statuses.clone(),
-            None => Vec::new(),
-        };
-        let contexts: BTreeSet<&str> = all.iter().map(|status| status.context.as_str()).collect();
+        let statuses: Vec<CommitStatus> = self
+            .state
+            .read()
+            .statuses
+            .get(&(owner.to_string(), repo.to_string(), sha.to_string()))
+            .into_iter()
+            .flatten()
+            .filter(|status| status_answers_for_base(status, base))
+            .cloned()
+            .collect();
+        let contexts: BTreeSet<&str> = statuses
+            .iter()
+            .map(|status| status.context.as_str())
+            .collect();
         let current: Vec<&CommitStatus> = contexts
             .into_iter()
-            .filter_map(|context| current_status_for_base(&all, context, base))
+            .filter_map(|context| current_status_for_base(&statuses, context, base))
             .collect();
-        let state = if current
-            .iter()
-            .any(|status| status.state == CommitStatusState::Error)
-        {
+        let any = |state: CommitStatusState| current.iter().any(|status| status.state == state);
+        let state = if any(CommitStatusState::Error) {
             CommitStatusState::Error
-        } else if current
-            .iter()
-            .any(|status| status.state == CommitStatusState::Failure)
-        {
+        } else if any(CommitStatusState::Failure) {
             CommitStatusState::Failure
-        } else if current.is_empty()
-            || current
-                .iter()
-                .any(|status| status.state == CommitStatusState::Pending)
-        {
+        } else if current.is_empty() || any(CommitStatusState::Pending) {
             CommitStatusState::Pending
         } else {
             CommitStatusState::Success
         };
-        let statuses: Vec<CommitStatus> = current.into_iter().cloned().collect();
         Ok(CombinedStatus {
             state,
             total_count: statuses.len(),
