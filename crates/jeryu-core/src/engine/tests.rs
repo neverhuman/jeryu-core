@@ -415,7 +415,7 @@ fn delete_and_list_branch_protections() {
         .collect();
     assert_eq!(branches, ["main", "release"]);
     let removed = core
-        .delete_branch_protection("alice", "jeryu", "release")
+        .delete_branch_protection("alice", "alice", "jeryu", "release")
         .unwrap();
     assert_eq!(removed.branch, "release");
     assert!(
@@ -423,12 +423,12 @@ fn delete_and_list_branch_protections() {
             .is_err()
     );
     assert!(matches!(
-        core.delete_branch_protection("alice", "jeryu", "release"),
+        core.delete_branch_protection("alice", "alice", "jeryu", "release"),
         Err(ForgeError::NotFound(_))
     ));
     // The default branch's automatic rule would come back on reopen.
     assert!(matches!(
-        core.delete_branch_protection("alice", "jeryu", "main"),
+        core.delete_branch_protection("alice", "alice", "jeryu", "main"),
         Err(ForgeError::Validation(_))
     ));
     assert!(core.get_branch_protection("alice", "jeryu", "main").is_ok());
@@ -458,7 +458,7 @@ fn delete_branch_protection_persists_across_reopen() {
         .unwrap();
         core.set_branch_protection("alice", "jeryu", "release", protection_request())
             .unwrap();
-        core.delete_branch_protection("alice", "jeryu", "release")
+        core.delete_branch_protection("alice", "alice", "jeryu", "release")
             .unwrap();
     }
     let core = ForgeCore::open_sqlite(&path).unwrap();
@@ -469,9 +469,11 @@ fn delete_branch_protection_persists_across_reopen() {
 }
 
 #[test]
-fn rekey_encoded_branch_protections_moves_or_removes() {
+fn rekey_encoded_branch_protections_moves_removes_or_keeps() {
     let core = core_with_repo();
-    for branch in ["release%2Fv1", "gone%2fv2", "both%2Fx", "both/x", "plain"] {
+    core.create_account("root", "correct horse battery", UserRole::Admin)
+        .unwrap();
+    for branch in ["release%2Fv1", "armed%2fv2", "both%2Fx", "both/x", "plain"] {
         core.set_branch_protection("alice", "jeryu", branch, protection_request())
             .unwrap();
     }
@@ -480,20 +482,40 @@ fn rekey_encoded_branch_protections_moves_or_removes() {
     core.set_branch_protection("alice", "jeryu", "both/x", keep)
         .unwrap();
     let branches = FixedBranches(vec!["release/v1", "both/x", "plain"]);
-    let report = core.rekey_encoded_branch_protections(&branches).unwrap();
-    assert_eq!(report.rekeyed.len(), 1);
-    assert_eq!(report.removed.len(), 2);
+    assert!(matches!(
+        core.rekey_encoded_branch_protections("alice", &branches),
+        Err(ForgeError::BranchProtection(_))
+    ));
+    let report = core
+        .rekey_encoded_branch_protections("root", &branches)
+        .unwrap();
+    let key = |b: &str| ("alice".to_string(), "jeryu".to_string(), b.to_string());
+    assert_eq!(report.rekeyed, [key("release%2Fv1")]);
+    assert_eq!(report.removed, [key("both%2Fx")]);
+    assert_eq!(
+        report.kept,
+        [(
+            key("armed%2fv2"),
+            "decoded branch does not exist".to_string()
+        )]
+    );
     let names: Vec<_> = core
         .list_branch_protections("alice", "jeryu")
         .unwrap()
         .into_iter()
         .map(|rule| rule.branch)
         .collect();
-    assert_eq!(names, ["both/x", "main", "plain", "release/v1"]);
+    assert_eq!(
+        names,
+        ["armed%2fv2", "both/x", "main", "plain", "release/v1"]
+    );
     let kept = core
         .get_branch_protection("alice", "jeryu", "both/x")
         .unwrap();
     assert_eq!(kept.required_approving_review_count, 3);
-    let again = core.rekey_encoded_branch_protections(&branches).unwrap();
-    assert_eq!(again, EncodedProtectionReport::default());
+    let again = core
+        .rekey_encoded_branch_protections("root", &branches)
+        .unwrap();
+    assert!(again.rekeyed.is_empty() && again.removed.is_empty());
+    assert_eq!(again.kept.len(), 1);
 }

@@ -212,6 +212,10 @@ fn refresh_deployment_slugs(state: &mut State) {
     }
 }
 
+/// Startup repair run by `open_sqlite`. Its sibling repair for rules keyed by
+/// a `%2F`-encoded branch name, `ForgeCore::rekey_encoded_branch_protections`,
+/// cannot run here (it needs git storage to tell real branches from junk), so
+/// it is a global-admin-only call instead.
 fn backfill_default_branch_protections(state: &mut State) -> usize {
     let repos: Vec<_> = state.repos.values().cloned().collect();
     repos

@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 
-use super::{ForgeCore, RepoBranches, evaluate_locked, require_name};
+use super::{ForgeCore, RepoBranches, State, evaluate_locked, require_name};
 use crate::branch_protection::{
     BranchProtectionEvaluation, EvaluationContext, RefOperation, RefOperationEvaluation,
     evaluate_ref_operation,
@@ -71,24 +71,44 @@ impl ForgeCore {
 
     /// Removes and persists the rule on one branch, returning it.
     ///
-    /// The caller authorizes (the HTTP route is admin only). The default
-    /// branch's rule is refused: the store re-creates it on open unless the
-    /// repository opted out, so deleting it would not stick; use
-    /// `set_default_branch_protection_opt_out` for that.
+    /// The caller authorizes (the HTTP route is admin only); `actor` is
+    /// recorded in the audit trail as `branch_protection.deleted` with the
+    /// removed rule, `failed` on a refusal and `completed` on success.
+    /// Archived repositories are refused (`RepositoryArchived`). The default
+    /// branch's rule is refused with `Validation` under the same invariant the
+    /// store enforces on open: unless the repository opted out of default
+    /// branch protection *and* none of its rules requires a status context,
+    /// the rule is mandatory (see `set_default_branch_protection_opt_out`).
+    /// The guard reads the repository under the same write lock that removes
+    /// the rule, so a concurrent opt-out change cannot slip between them.
     pub fn delete_branch_protection(
         &self,
+        actor: &str,
         owner: &str,
         repo: &str,
         branch: &str,
     ) -> Result<BranchProtectionRule> {
         let current = self.canonical_repository(owner, repo)?;
         let (owner, repo) = (current.owner.as_str(), current.name.as_str());
-        if current.default_branch == branch && !current.default_branch_protection_opt_out {
+        self.ensure_repository_writable(owner, repo)?;
+        let subject = format!("{owner}/{repo}");
+        let action = "branch_protection.deleted";
+        let mut state = self.state.write();
+        let repo_key = (owner.to_string(), repo.to_string());
+        let Some(live) = state.repos.get(&repo_key).cloned() else {
+            return Err(ForgeError::NotFound(format!("repository {owner}/{repo}")));
+        };
+        if live.archived {
+            return Err(ForgeError::RepositoryArchived(subject));
+        }
+        if live.default_branch == branch && default_rule_is_mandatory(&state, &live) {
+            drop(state);
+            let detail = serde_json::json!({ "branch": branch, "reason": "default_branch" });
+            self.append_audit_as(actor, action, &subject, "failed", detail)?;
             return Err(ForgeError::Validation(format!(
-                "{branch} is the default branch of {owner}/{repo}; opt the repository out of default branch protection instead"
+                "{branch} is the default branch of {owner}/{repo} and its protection is mandatory; opt the repository out of default branch protection first (refused while any rule requires a status context)"
             )));
         }
-        let mut state = self.state.write();
         let key = (owner.to_string(), repo.to_string(), branch.to_string());
         if !state.branch_protections.contains_key(&key) {
             return Err(ForgeError::NotFound(format!(
@@ -101,54 +121,112 @@ impl ForgeCore {
             .remove(&key)
             .expect("presence checked above");
         self.persist_after_mutation(&mut state, previous)?;
+        drop(state);
+        let detail = serde_json::json!({ "branch": branch, "rule": removed });
+        self.append_audit_as(actor, action, &subject, "completed", detail)?;
         Ok(removed)
     }
 
-    /// Repairs rules stored under a percent-encoded branch name (`%2F`).
+    /// One-shot repair of rules stored under a percent-encoded branch name
+    /// (`%2F`), run by a global admin (`BranchProtection("global admin
+    /// required")` otherwise).
     ///
-    /// A rule whose branch contains `%2F` is re-keyed to the decoded name when
-    /// that branch exists in git storage, and removed otherwise. When a rule
-    /// already exists under the decoded name it wins and the encoded one is
-    /// dropped. Idempotent: a second pass finds nothing. A git lookup error
-    /// aborts before anything is changed.
+    /// This is not a startup migration like `backfill_default_branch_protections`:
+    /// it needs git storage (`branches`) to tell real branches from junk, which
+    /// `open_sqlite` does not have, so it is an admin-actor-only operation.
+    ///
+    /// A rule is changed only when no git branch carries its encoded name:
+    /// - re-keyed to the decoded name when that branch exists and has no rule;
+    /// - removed when the decoded branch exists and already has a rule (that
+    ///   rule wins), unless the encoded rule requires status checks.
+    ///
+    /// Everything else is kept and reported in `kept` with the reason: a real
+    /// branch with a literal `%2F` name, a rule armed before its decoded branch
+    /// exists, the default branch's rule, a rule requiring status checks that
+    /// would be dropped, an archived repository, or a rule changed since the
+    /// git lookups. Git lookups run without the state lock; every decision is
+    /// re-validated under the write lock against the rule seen then. Each
+    /// change is audited as `branch_protection.encoded_rekey`. Idempotent. A git
+    /// lookup error aborts before anything is changed.
     pub fn rekey_encoded_branch_protections(
         &self,
+        actor: &str,
         branches: &dyn RepoBranches,
     ) -> Result<EncodedProtectionReport> {
+        if !self.is_global_admin(actor) {
+            return Err(ForgeError::BranchProtection(
+                "global admin required".to_string(),
+            ));
+        }
         let encoded: Vec<_> = self
             .state
             .read()
             .branch_protections
-            .keys()
-            .filter(|(_, _, branch)| has_encoded_slash(branch))
-            .cloned()
+            .iter()
+            .filter(|((_, _, branch), _)| has_encoded_slash(branch))
+            .map(|(key, rule)| (key.clone(), rule.clone()))
             .collect();
         let mut plan = Vec::new();
-        for key in encoded {
+        for (key, seen) in encoded {
             let decoded = decode_slashes(&key.2);
-            let exists = branches.branch_exists(&key.0, &key.1, &decoded)?;
-            plan.push((key, decoded, exists));
+            let encoded_exists = branches.branch_exists(&key.0, &key.1, &key.2)?;
+            let decoded_exists = branches.branch_exists(&key.0, &key.1, &decoded)?;
+            plan.push(PlannedRekey {
+                key,
+                seen,
+                decoded,
+                encoded_exists,
+                decoded_exists,
+            });
         }
+        let mut report = EncodedProtectionReport::default();
         if plan.is_empty() {
-            return Ok(EncodedProtectionReport::default());
+            return Ok(report);
         }
         let mut state = self.state.write();
         let previous = state.clone();
-        let mut report = EncodedProtectionReport::default();
-        for (key, decoded, exists) in plan {
-            let Some(mut rule) = state.branch_protections.remove(&key) else {
-                continue;
-            };
-            let target = (key.0.clone(), key.1.clone(), decoded.clone());
-            if exists && !state.branch_protections.contains_key(&target) {
-                rule.branch = decoded;
-                state.branch_protections.insert(target, rule);
-                report.rekeyed.push(key);
-            } else {
-                report.removed.push(key);
+        let mut changes = Vec::new();
+        for step in plan {
+            match decide_rekey(&state, &step) {
+                RekeyDecision::Keep(reason) => report.kept.push((step.key, reason.to_string())),
+                RekeyDecision::Remove => {
+                    state.branch_protections.remove(&step.key);
+                    changes.push((step.key.clone(), "removed", step.decoded));
+                    report.removed.push(step.key);
+                }
+                RekeyDecision::Rekey => {
+                    let mut rule = state
+                        .branch_protections
+                        .remove(&step.key)
+                        .expect("decide_rekey checked presence");
+                    rule.branch.clone_from(&step.decoded);
+                    let target = (step.key.0.clone(), step.key.1.clone(), step.decoded.clone());
+                    state.branch_protections.insert(target, rule);
+                    changes.push((step.key.clone(), "rekeyed", step.decoded));
+                    report.rekeyed.push(step.key);
+                }
             }
         }
+        if changes.is_empty() {
+            return Ok(report);
+        }
         self.persist_after_mutation(&mut state, previous)?;
+        drop(state);
+        for ((owner, repo, from), outcome, to) in changes {
+            let detail = serde_json::json!({
+                "actor": actor,
+                "from": from,
+                "to": to,
+                "outcome": outcome,
+            });
+            self.append_audit_as(
+                actor,
+                "branch_protection.encoded_rekey",
+                &format!("{owner}/{repo}"),
+                "completed",
+                detail,
+            )?;
+        }
         Ok(report)
     }
 
@@ -296,14 +374,69 @@ impl ForgeCore {
     }
 }
 
-/// What [`ForgeCore::rekey_encoded_branch_protections`] changed; each entry is
+/// What [`ForgeCore::rekey_encoded_branch_protections`] did; each entry is
 /// the old `(owner, repo, branch)` key.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EncodedProtectionReport {
     /// Rules moved to the decoded branch name.
     pub rekeyed: Vec<(String, String, String)>,
-    /// Rules dropped: no such branch, or the decoded name already had a rule.
+    /// Rules dropped because the decoded branch already had a rule.
     pub removed: Vec<(String, String, String)>,
+    /// Rules left untouched, with the reason, for an admin to review.
+    pub kept: Vec<((String, String, String), String)>,
+}
+
+struct PlannedRekey {
+    key: (String, String, String),
+    seen: BranchProtectionRule,
+    decoded: String,
+    encoded_exists: bool,
+    decoded_exists: bool,
+}
+
+enum RekeyDecision {
+    Rekey,
+    Remove,
+    Keep(&'static str),
+}
+
+/// Decides one planned re-key against the live state (write lock held).
+fn decide_rekey(state: &State, step: &PlannedRekey) -> RekeyDecision {
+    let (owner, repo, branch) = &step.key;
+    if state.branch_protections.get(&step.key) != Some(&step.seen) {
+        return RekeyDecision::Keep("rule changed since planning");
+    }
+    let Some(repository) = state.repos.get(&(owner.clone(), repo.clone())) else {
+        return RekeyDecision::Keep("repository not found");
+    };
+    if repository.archived {
+        return RekeyDecision::Keep("repository archived");
+    }
+    if &repository.default_branch == branch {
+        return RekeyDecision::Keep("default branch");
+    }
+    if step.encoded_exists {
+        return RekeyDecision::Keep("encoded name is a real branch");
+    }
+    if !step.decoded_exists {
+        return RekeyDecision::Keep("decoded branch does not exist");
+    }
+    let target = (owner.clone(), repo.clone(), step.decoded.clone());
+    if !state.branch_protections.contains_key(&target) {
+        return RekeyDecision::Rekey;
+    }
+    if !step.seen.required_status_checks.is_empty() {
+        return RekeyDecision::Keep("duplicate requires status checks");
+    }
+    RekeyDecision::Remove
+}
+
+/// The default branch's rule may be removed only when the repository opted
+/// out and no rule requires a status context: the invariant
+/// `ensure_default_branch_protection` re-establishes on open.
+fn default_rule_is_mandatory(state: &State, repo: &Repository) -> bool {
+    !repo.default_branch_protection_opt_out
+        || super::repo_requires_status_context(state, &repo.owner, &repo.name)
 }
 
 fn has_encoded_slash(branch: &str) -> bool {
