@@ -9,11 +9,12 @@
 //! counting the old base's result the moment the base moves.
 
 use jeryu_core::{
-    CommitStatus, CommitStatusState, CreateCommitStatusRequest, CreatePullRequestRequest,
-    CreateRepositoryRequest, CreateReviewRequest, CreateUserRequest, DismissReviewRequest,
-    ForgeCore, ForgeError, MergeBase, MergeBlocker, MergeReadiness, PullRequestCommit,
-    PullRequestState, RepoBranches, Result, RetargetPullRequestRequest, ReviewState,
-    SetBranchProtectionRequest, UpdatePullRequestRequest,
+    CheckConclusion, CheckRunStatus, CommitStatus, CommitStatusState, CreateCheckRunRequest,
+    CreateCommitStatusRequest, CreatePullRequestRequest, CreateRepositoryRequest,
+    CreateReviewRequest, CreateUserRequest, DismissReviewRequest, ForgeCore, ForgeError,
+    MergeBlocker, MergePullRequestRequest, MergeReadiness, PullRequestCommit, PullRequestState,
+    RepoBranches, Result, RetargetPullRequestRequest, ReviewState, SetBranchProtectionRequest,
+    UpdatePullRequestRequest,
 };
 
 const REQUIRED: &str = "jeryu/required";
@@ -683,15 +684,11 @@ fn a_finalize_is_refused_when_the_base_moved_since_readiness() {
     let core = core_with_protected_bases();
     let number = open_pr(&core, HEAD, RELEASE);
     post(&core, HEAD, CommitStatusState::Success, None);
-    let MergeReadiness::Ready {
-        base_ref, base_sha, ..
-    } = core
+    let evaluated = core
         .evaluate_merge_readiness("alice", "jeryu", number, None)
         .unwrap()
-    else {
-        panic!("expected Ready");
-    };
-    let evaluated = MergeBase { base_ref, base_sha };
+        .merge_base()
+        .expect("ready");
     retarget(&core, number, retarget_request("main")).unwrap();
     let err = core
         .finalize_merge(
@@ -734,4 +731,69 @@ fn a_create_whose_base_normalizes_to_nothing_is_refused() {
             "{base:?}: {err:?}"
         );
     }
+}
+
+/// Approve at H, move the head off H, retarget, rewind to H: the approval
+/// would count again under the new base. Any approval still standing at a
+/// head it was given at therefore holds the retarget, not only one that
+/// counts at the current head.
+#[test]
+fn an_approval_at_an_earlier_head_still_holds_a_retarget() {
+    let core = core_with_protected_bases();
+    let number = open_pr(&core, SHA1_HEAD, RELEASE);
+    review(&core, number, "bob", ReviewState::Approved);
+    let moved = "f00df00df00df00df00df00df00df00df00df00d";
+    core.refresh_pull_request_heads_for_ref("alice", "jeryu", "feature", moved)
+        .unwrap();
+    let mut request = sha1_request("main");
+    request.head_sha = moved.to_string();
+    request.commits[0].sha = moved.to_string();
+    assert!(matches!(
+        retarget(&core, number, request),
+        Err(ForgeError::Conflict(_))
+    ));
+    assert_eq!(
+        core.get_pull_request("alice", "jeryu", number)
+            .unwrap()
+            .base
+            .ref_name,
+        RELEASE
+    );
+}
+
+/// A context whose statuses are pinned to bases is answered only by a status
+/// for this base: a like-named check run, which is not base-bound, does not
+/// stand in for the missing answer.
+#[test]
+fn a_check_run_does_not_answer_for_a_base_pinned_context() {
+    let core = core_with_protected_bases();
+    let into_main = open_pr(&core, HEAD, "main");
+    post(&core, HEAD, CommitStatusState::Success, Some(RELEASE));
+    core.create_check_run(
+        "alice",
+        "jeryu",
+        CreateCheckRunRequest {
+            name: REQUIRED.to_string(),
+            head_sha: HEAD.to_string(),
+            status: Some(CheckRunStatus::Completed),
+            conclusion: Some(CheckConclusion::Success),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(missing_required(&blockers(&core, into_main)));
+}
+
+#[test]
+fn an_already_merged_readiness_discloses_no_base() {
+    let core = core_with_protected_bases();
+    let number = open_pr(&core, HEAD, "main");
+    post(&core, HEAD, CommitStatusState::Success, None);
+    core.merge_pull_request("alice", "jeryu", number, MergePullRequestRequest::default())
+        .unwrap();
+    let readiness = core
+        .evaluate_merge_readiness("alice", "jeryu", number, None)
+        .unwrap();
+    assert!(matches!(readiness, MergeReadiness::AlreadyMerged { .. }));
+    assert_eq!(readiness.merge_base(), None);
 }

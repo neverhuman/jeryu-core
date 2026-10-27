@@ -11,7 +11,7 @@ use super::{
     require_name,
 };
 use crate::AuditEntry;
-use crate::branch_protection::{VerdictReach, effective_reviews_for_pull_request_with};
+use crate::branch_protection::effective_reviews_for_head;
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
 use crate::webhooks::event_payload;
@@ -57,6 +57,23 @@ fn validate_diff_base(base_sha: &str) -> Result<()> {
             "base sha must be 40 or 64 hex digits".to_string(),
         ))
     }
+}
+
+/// Whether any approval on the pull request still stands at a head it was
+/// given at: not withdrawn by its author and not replaced by a later verdict
+/// of the same reviewer at that head. Such an approval counts again whenever
+/// the head returns there, whatever the base is then.
+fn standing_approval(reviews: &[Review]) -> bool {
+    let heads: std::collections::BTreeSet<&str> = reviews
+        .iter()
+        .filter(|review| review.state == ReviewState::Approved)
+        .filter_map(|review| review.head_sha.as_deref())
+        .collect();
+    heads.into_iter().any(|head| {
+        effective_reviews_for_head(reviews, head)
+            .iter()
+            .any(|review| review.state == ReviewState::Approved)
+    })
 }
 
 struct HeadEvidence<'a> {
@@ -105,6 +122,24 @@ pub enum MergeReadiness {
 pub struct MergeBase {
     pub base_ref: String,
     pub base_sha: String,
+}
+
+impl MergeReadiness {
+    /// The base to hand back to [`ForgeCore::finalize_merge`]: exactly what
+    /// this readiness disclosed. `None` for an already merged pull request.
+    /// Never rebuild it from a fresh read of the pull request; that would
+    /// compare the base with itself and void the check.
+    pub fn merge_base(&self) -> Option<MergeBase> {
+        match self {
+            Self::Ready {
+                base_ref, base_sha, ..
+            } => Some(MergeBase {
+                base_ref: base_ref.clone(),
+                base_sha: base_sha.clone(),
+            }),
+            Self::AlreadyMerged { .. } => None,
+        }
+    }
 }
 
 /// What one finalize call binds: the merge sha it records, the head it was
@@ -593,16 +628,15 @@ impl ForgeCore {
             }
             // An approval is a verdict on the diff against the base it was
             // given for; it must not authorize a merge into another branch.
-            // Only its author can withdraw a verdict (`dismiss_review`), so a
-            // retarget is refused while one counts rather than carrying it.
-            // Rejections may carry: they can only block.
+            // Nothing binds a verdict to a base, and a head can be rewound to
+            // the one an approval was given at, so the check is not "counts
+            // now" but "counts at any head it was given at": every approval
+            // its author has not withdrawn (`dismiss_review`) holds the
+            // retarget. Rejections may carry: they can only block.
             let reviews = state.reviews.get(&key).map(Vec::as_slice).unwrap_or(&[]);
-            if effective_reviews_for_pull_request_with(reviews, pr, VerdictReach::UnchangedDiff)
-                .iter()
-                .any(|review| review.state == ReviewState::Approved)
-            {
+            if standing_approval(reviews) {
                 return Err(ForgeError::Conflict(format!(
-                    "pull request {owner}/{repo}#{number} has approvals given against its current base; they must be dismissed before a retarget"
+                    "pull request {owner}/{repo}#{number} has approvals given against its current base; its reviewers must dismiss them before a retarget, or open a new pull request against the new base"
                 )));
             }
             let previous_base = pr.base.clone();
@@ -818,10 +852,16 @@ impl ForgeCore {
     /// git oid the caller produced), closes the backing issue, emits the
     /// `pull_request` closed webhook, and persists.
     ///
-    /// On a TOCTOU re-eval failure after a ref already moved, this returns the
-    /// error WITHOUT rolling back the ref; the divergence (git ahead of
-    /// metadata) is detectable by a reconciler comparing `merge_commit_sha`
-    /// against the live ref.
+    /// `base` must be the [`MergeReadiness::merge_base`] of the readiness the
+    /// caller merged against; a base that moved since (a retarget or a
+    /// recorded base) is refused with `Conflict`.
+    ///
+    /// On a TOCTOU re-eval failure or a moved base after a ref already moved,
+    /// this returns the error WITHOUT rolling back the ref; the divergence
+    /// (git ahead of metadata) is detectable by a reconciler comparing
+    /// `merge_commit_sha` against the live ref. A retarget racing a merge is
+    /// one more way to reach it, and is preferred over recording a merge
+    /// judged by another branch's rule.
     pub fn finalize_merge(
         &self,
         owner: &str,

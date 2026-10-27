@@ -1062,16 +1062,6 @@ fn evaluate_merge_readiness_reports_required_linear_history() {
     }
 }
 
-/// The base a finalize binds: the pull request's stored base, which is what
-/// readiness discloses.
-fn current_base(core: &ForgeCore, number: u64) -> MergeBase {
-    let pr = core.get_pull_request("alice", "jeryu", number).unwrap();
-    MergeBase {
-        base_ref: pr.base.ref_name,
-        base_sha: pr.base.sha,
-    }
-}
-
 #[test]
 fn finalize_merge_records_real_sha() {
     let core = core_with_repo();
@@ -1080,15 +1070,13 @@ fn finalize_merge_records_real_sha() {
     approve(&core, number, "bob");
 
     let real_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    let base = core
+        .evaluate_merge_readiness("alice", "jeryu", number, None)
+        .unwrap()
+        .merge_base()
+        .expect("ready");
     let result = core
-        .finalize_merge(
-            "alice",
-            "jeryu",
-            number,
-            real_sha.to_string(),
-            None,
-            &current_base(&core, number),
-        )
+        .finalize_merge("alice", "jeryu", number, real_sha.to_string(), None, &base)
         .unwrap();
     assert_eq!(result.sha, real_sha);
     assert!(result.merged);
@@ -1112,15 +1100,15 @@ fn finalize_merge_reevaluates_gate_under_lock() {
     protect_main(&core, 1, &["ci/fast"]);
     let number = open_pr(&core, "feat-sha", false);
 
+    // Readiness refuses this pull request, so there is no disclosed base;
+    // the stored one stands in so the call reaches the gate re-evaluation.
+    let pr = core.get_pull_request("alice", "jeryu", number).unwrap();
+    let base = MergeBase {
+        base_ref: pr.base.ref_name,
+        base_sha: pr.base.sha,
+    };
     let err = core
-        .finalize_merge(
-            "alice",
-            "jeryu",
-            number,
-            "realsha".to_string(),
-            None,
-            &current_base(&core, number),
-        )
+        .finalize_merge("alice", "jeryu", number, "realsha".to_string(), None, &base)
         .unwrap_err();
     assert!(matches!(err, ForgeError::BranchProtection(_)));
     assert!(

@@ -217,7 +217,8 @@ enum RequiredContextState {
 /// Commit statuses are selected per base ([`current_status_for_base`]): a
 /// result proved against another base does not answer here, so one commit can
 /// be green for one base and unanswered (pending) for another at the same time.
-/// Check runs are not base-bound and answer for every base.
+/// Check runs are not base-bound and answer for every base, except for a
+/// context whose statuses are pinned to bases: there only a status answers.
 fn required_context_state(
     context: &str,
     statuses: &[CommitStatus],
@@ -232,6 +233,16 @@ fn required_context_state(
         } else {
             RequiredContextState::Failed
         };
+    }
+
+    // A publisher that pins this context to bases has answered for other
+    // bases but not this one: the context is unanswered here, and a
+    // like-named check run (which is not base-bound) must not stand in.
+    if statuses
+        .iter()
+        .any(|status| status.context == context && status.base.is_some())
+    {
+        return RequiredContextState::Missing;
     }
 
     let check_match = check_runs
