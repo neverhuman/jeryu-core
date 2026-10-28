@@ -43,6 +43,42 @@ pub struct UserAccount {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A password recovery secret, returned once by
+/// `ForgeCore::issue_password_recovery`. The edge mails `token` to the
+/// account's verified address; core keeps only its SHA-256.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PasswordRecoveryIssued {
+    pub login: String,
+    pub token_id: String,
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for PasswordRecoveryIssued {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PasswordRecoveryIssued")
+            .field("login", &self.login)
+            .field("token_id", &self.token_id)
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// The result of a spent password recovery secret. A recovery revokes every
+/// session and API credential of the account (docs/adr/0001).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasswordRecoveryReceipt {
+    pub account: AccountSummary,
+    /// Browser sessions of the account that the recovery ended.
+    pub sessions_ended: usize,
+    /// Personal access tokens of the account that the recovery deleted. The
+    /// keys, refresh tokens and agent tokens of the account's own bots are
+    /// revoked as well.
+    pub personal_access_tokens_revoked: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AccountSummary {
     pub login: String,

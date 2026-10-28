@@ -1001,13 +1001,13 @@ fn activation_error() -> ForgeError {
     ForgeError::Validation(ACTIVATION_ERROR.to_string())
 }
 
-fn next_auth_epoch(current: u64) -> Result<u64> {
+pub(super) fn next_auth_epoch(current: u64) -> Result<u64> {
     current
         .checked_add(1)
         .ok_or_else(|| ForgeError::Storage("account auth epoch overflow".to_string()))
 }
 
-fn require_password(password: &str) -> Result<()> {
+pub(super) fn require_password(password: &str) -> Result<()> {
     if password.len() < 12 {
         return Err(ForgeError::Validation(
             "password must be at least 12 bytes".to_string(),
@@ -1022,7 +1022,7 @@ fn argon2() -> Result<Argon2<'static>> {
     Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
 }
 
-fn hash_password(password: &str) -> Result<String> {
+pub(super) fn hash_password(password: &str) -> Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let hash = argon2()?
         .hash_password(password.as_bytes(), &salt)
@@ -1067,7 +1067,7 @@ fn token_hash(token: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(super) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }

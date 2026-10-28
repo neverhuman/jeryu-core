@@ -13,6 +13,7 @@ mod codec;
 mod deployments;
 mod load;
 mod migrations;
+mod password_recovery;
 mod provider_connections;
 mod repair;
 mod snapshot;
@@ -525,6 +526,9 @@ impl SqliteStore {
         // A rotation recorded and never committed belongs to a process that is
         // gone; the provider may have consumed the secret (connection-v1 §3).
         backfilled += super::provider_connections::fence_unfinished_rotations(&mut state);
+        // Spent, expired and exhausted recovery secrets are never needed again.
+        backfilled +=
+            super::password_recovery::prune_dead_recoveries(&mut state, chrono::Utc::now());
         drop(conn);
         if backfilled > 0 {
             store.persist(&state)?;

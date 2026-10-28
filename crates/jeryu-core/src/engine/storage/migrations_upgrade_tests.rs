@@ -88,6 +88,10 @@ const ROLLBACKS: &[(&str, &str)] = &[
         "0024_diff_identity.sql",
         include_str!("../../../../../db/rollbacks/0024_diff_identity.sql"),
     ),
+    (
+        "0025_password_recovery_tokens.sql",
+        include_str!("../../../../../db/rollbacks/0025_password_recovery_tokens.sql"),
+    ),
 ];
 
 fn db_dir(kind: &str) -> PathBuf {
@@ -248,6 +252,9 @@ fn rollback_scripts_execute_and_roll_forward() {
                 assert!(!table_exists(&conn, "deployment_statuses"));
             }
             "0018_waitlist_signups.sql" => assert!(!table_exists(&conn, "waitlist_signups")),
+            "0025_password_recovery_tokens.sql" => {
+                assert!(!table_exists(&conn, "password_recovery_tokens"));
+            }
             "0024_diff_identity.sql" => {
                 // Dropping the recorded diff identities is the documented
                 // effect: every verdict binds its exact head again.

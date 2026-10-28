@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use rusqlite::{Connection, params};
 
 use super::codec::*;
-use super::{State, bot_tokens, provider_connections, repo_id, storage_error, team_bots};
+use super::{
+    State, bot_tokens, password_recovery, provider_connections, repo_id, storage_error, team_bots,
+};
 use crate::errors::Result;
 
 /// Serialize every State-owned row into connection-local staging tables.
@@ -84,6 +86,7 @@ pub(super) fn stage_state(conn: &Connection, state: &State) -> Result<()> {
     provider_connections::stage_provider_connections(conn, state)?;
     bot_tokens::stage_bot_access_tokens(conn, state)?;
     team_bots::stage_bot_repo_grants(conn, state)?;
+    password_recovery::stage_password_recovery_tokens(conn, state)?;
     for invitation in state.invitations.values() {
         conn.execute(
             r#"

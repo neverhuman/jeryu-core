@@ -234,7 +234,15 @@ fn reset_password_revokes_credentials_and_forces_change() {
         Err(ForgeError::NotFound(_))
     ));
     assert!(is_validation(&core.reset_account_password("bob", "short")));
+    let bot = core
+        .enroll_bot("bob", "helper", "Helper", BotKind::GROK, BotReach::General)
+        .unwrap();
+    let bot_token = core
+        .issue_bot_access_token("bob", bot.bot.id, Some("ci"), None)
+        .unwrap()
+        .token;
     let account = core.reset_account_password("bob", OTHER_PASSWORD).unwrap();
+    assert!(core.authenticate_bot_access_token(&bot_token).is_err());
     assert!(account.must_change_password);
     assert_eq!(account.auth_epoch, 1);
     assert!(core.authenticate_session(&session.token).is_none());

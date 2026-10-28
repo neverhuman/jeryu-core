@@ -85,6 +85,11 @@ const OWNED_TABLES: &[OwnedTable] = &[
         primary_key: "id",
     },
     OwnedTable {
+        name: "password_recovery_tokens",
+        columns: "token_id,login,secret_hash,auth_epoch,created_at,expires_at,consumed_at,attempt_count",
+        primary_key: "token_id",
+    },
+    OwnedTable {
         name: "owner_bootstrap_state",
         columns: "singleton,consumed",
         primary_key: "singleton",

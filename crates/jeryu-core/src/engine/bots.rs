@@ -239,6 +239,7 @@ pub(super) struct BotRecord {
     pub reach: BotReach,
     /// Account `auth_epoch` copied at enrollment. Password change, disable, and
     /// lock leave this stale so the old enrollment key cannot mint a session.
+    /// Self-service recovery (`recover_password`) leaves it stale too.
     /// `rotate_bot_key` copies the current epoch back onto the bot.
     pub auth_epoch: u64,
     pub credential_generation: u64,

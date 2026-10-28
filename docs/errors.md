@@ -115,6 +115,10 @@ account's password changes or it is disabled or locked; treat it as the bot
 host's long-lived secret. Do not send either as a bearer. A reused refresh
 token revokes the family; exchange the enrollment key again to recover.
 
+A password recovery from a mailed link ends the key too, like a password
+change: it revokes the account's bot keys, refresh tokens and agent tokens.
+Rotate the key to bring the bot back.
+
 ## Bot conflict
 
 The account already has that slug, or an idempotency key was replayed with a
@@ -159,3 +163,19 @@ open. With the forge stopped, run `PRAGMA journal_mode = DELETE;` on it once
 The public waitlist cannot store another new address. A repeat of an address
 already stored is not this error. Keep the existing address. Do not retry a
 new one in a loop. An operator reviews the list.
+
+## Password recovery
+
+`password recovery could not be completed` is the one answer for every refused
+recovery, so it does not tell anyone whether a login exists or is active. The
+link may be unknown, already used, replaced by a newer link, older than an
+hour, or used with a wrong secret five times. The account may also be disabled
+or locked, or its password may have changed since the link was sent. Ask for a
+new link. A password shorter than 12 bytes is refused first and does not use
+the link up.
+
+A completed recovery works like a password change: it ends every browser
+session of the account, deletes its personal access tokens, and revokes the
+keys, refresh tokens and agent tokens of its own bots. Sign in again, create
+new tokens, and rotate each bot's key. Repository grants stay. Tokens of a team
+bot belong to its organization and keep working.

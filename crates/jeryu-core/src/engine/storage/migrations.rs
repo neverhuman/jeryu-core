@@ -59,6 +59,8 @@ const MIGRATION_0022: &str =
     include_str!("../../../../../db/migrations/0022_provider_connection_rotation.sql");
 const MIGRATION_0023: &str = include_str!("../../../../../db/migrations/0023_team_bots.sql");
 const MIGRATION_0024: &str = include_str!("../../../../../db/migrations/0024_diff_identity.sql");
+const MIGRATION_0025: &str =
+    include_str!("../../../../../db/migrations/0025_password_recovery_tokens.sql");
 /// The 0017 constraint 0021 removes. Its presence in `sqlite_master` is the
 /// guard: 0017 re-runs `CREATE TABLE IF NOT EXISTS bots` on every open, so a
 /// fresh database gets the old shape first and 0021 rebuilds it once.
@@ -70,6 +72,8 @@ pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     apply_migration_0022(conn)?;
     apply_migration_0023(conn)?;
     apply_migration_0024(conn)?;
+    // 0025 is pure CREATE TABLE/INDEX IF NOT EXISTS: idempotent, no guard.
+    conn.execute_batch(MIGRATION_0025).map_err(storage_error)?;
     Ok(())
 }
 

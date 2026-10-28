@@ -3,7 +3,9 @@
 use rusqlite::{Connection, params};
 
 use super::codec::*;
-use super::{Counters, State, bot_tokens, provider_connections, storage_error, team_bots};
+use super::{
+    Counters, State, bot_tokens, password_recovery, provider_connections, storage_error, team_bots,
+};
 use crate::errors::Result;
 use crate::model::*;
 
@@ -22,6 +24,7 @@ pub(super) fn load_state(conn: &Connection) -> Result<State> {
     bot_tokens::load_bot_access_tokens(conn, &mut state)?;
     load_invitations(conn, &mut state)?;
     load_activation_challenges(conn, &mut state)?;
+    password_recovery::load_password_recovery_tokens(conn, &mut state)?;
     load_bootstrap_state(conn, &mut state)?;
     load_waitlist(conn, &mut state)?;
     load_organizations(conn, &mut state)?;

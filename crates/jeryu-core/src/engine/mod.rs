@@ -39,6 +39,9 @@ mod merge_overrides;
 mod organizations;
 #[cfg(test)]
 mod organizations_tests;
+mod password_recovery;
+#[cfg(test)]
+mod password_recovery_tests;
 mod provider_connections;
 #[cfg(test)]
 mod provider_connections_tests;
@@ -65,6 +68,7 @@ mod tests;
 pub use audit::AuditEntry;
 pub use bot_tokens::AGENT_TOKEN_PREFIX;
 pub use branch_protection::EncodedProtectionReport;
+pub use password_recovery::PASSWORD_RECOVERY_PREFIX;
 pub use provider_connections::{ProviderBroker, REFRESH_LOCK_TIMEOUT};
 pub use pull_requests::{
     MergeBase, MergeOverridePermit, MergeOverrideRequest, MergeOverrideTarget, MergeReadiness,
@@ -96,6 +100,8 @@ struct State {
     provider_connections: HashMap<String, provider_connections::ConnectionRecord>,
     invitations: HashMap<Uuid, AccountInvitation>,
     activation_challenges: HashMap<String, ActivationChallenge>,
+    /// Self-service password recovery tokens, keyed by token id.
+    password_recoveries: HashMap<String, password_recovery::PasswordRecoveryRecord>,
     bootstrap_owner_consumed: bool,
     /// Keyed by the normalized email.
     waitlist: BTreeMap<String, WaitlistSignup>,

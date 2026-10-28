@@ -108,7 +108,8 @@ hashed personal access tokens, and per-repository grants.
   Argon2id PHC password hashes only.
 - `user_accounts.must_change_password` marks bootstrap and admin-reset
   credentials as temporary until the user changes the password through the
-  typed forge API.
+  typed forge API. A self-service recovery clears it and, like every
+  recovery, revokes every credential, as a password change does.
 - `web_sessions.token_hash` and `personal_access_tokens.token_hash` are
   SHA-256 hashes of high-entropy bearer values; plaintext tokens are never
   stored.
@@ -382,6 +383,8 @@ dropped when the database opens. Activity rows have no secret
 column. `(owner, slug)` is unique. `auth_epoch` copies the account epoch at
 enrollment. Password change, disable, and lock leave it stale, revoke
 enrollment keys, drop refresh tokens, and increase `credential_generation`.
+Self-service recovery (`recover_password`) does the same as a password change
+(`docs/adr/0001`).
 The owner recovers a bot with key rotation, which copies the current epoch
 and does not leave the previous key in the five-minute grace window.
 `credential_generation` starts at 1 and also increases when a rotated refresh
@@ -558,3 +561,38 @@ Rollback/backfill:
   0023 cannot load a team bot and would delete grants and issuers on its next
   save; restore the snapshot only when none was created since, otherwise
   recover forward.
+
+## 0025 Password Recovery Tokens
+
+`password_recovery_tokens` holds the secrets of self-service password recovery.
+`issue_password_recovery` mints one for an active account and the edge mails it
+to the account's verified address. `recover_password` spends it, sets the new
+password and revokes every session and API credential of the account
+(`docs/adr/0001`).
+
+Constraint policy:
+- `token_id` is the 12-character id inside the `jrr_<id>.<secret>` value and
+  the primary key. `secret_hash` is the SHA-256 of the whole value; the value
+  itself is never stored.
+- `auth_epoch` copies the account epoch at issue. A secret whose account epoch
+  has moved since is refused.
+- A secret is live while `consumed_at` is `NULL`, `expires_at` (one hour after
+  issue) is in the future and `attempt_count` is below 5. Each wrong secret
+  presented for a live id adds one to `attempt_count`.
+- At most one secret per login is live: issuing a new one or spending one sets
+  `consumed_at` on every other live secret of that login.
+- Spent, expired and exhausted rows are deleted on every issue, every spend
+  and every open, so the table holds at most one row per active account plus
+  rows that died since the last of those. `consumed_at` is set only inside the
+  transaction that then deletes the row, so a stored row normally has it
+  `NULL`.
+- Each issue (refused or not), spend and wrong secret writes its
+  `forge_audit_log` row in the same transaction as the snapshot.
+- `login` has no foreign key, like `account_invitations.canonical_login`.
+  Accounts are never deleted, and a secret for an account that is not active
+  is refused.
+
+Rollback/backfill:
+- No backfill; the table starts empty.
+- `db/rollbacks/0025_password_recovery_tokens.sql` drops the table. That ends
+  outstanding recovery links only; people ask for a new one.

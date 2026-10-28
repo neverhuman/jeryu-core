@@ -45,7 +45,20 @@ Migration 0017 account bot notes:
 - Reach checks use the account's explicit repository grants. Forge admin is
   not a grant. A public repository still allows a read.
 - `bots.auth_epoch` must match the account epoch. Password change, disable,
-  and lock revoke bot keys and drop refresh tokens.
+  and lock revoke bot keys and drop refresh tokens. Self-service recovery
+  (`recover_password`, which spends a secret core issued with
+  `issue_password_recovery`, migration 0025) revokes the same way: it bumps
+  the epoch, ends browser sessions, deletes PATs and revokes the account's own
+  bot keys, refresh tokens and agent tokens (`docs/adr/0001`). Each recovery
+  writes `forge_audit_log` entries.
+- `password_recovery_tokens` stores only the SHA-256 of a recovery secret.
+  Verify it under the forge write lock before hashing the new password, and
+  verify it again under the lock before spending it. Do not add a plaintext
+  column. Dead rows are pruned on issue, spend and open.
+- Core answers every recovery refusal the same way and does the same durable
+  work for an unknown or inactive login. It does not rate limit. The edge must
+  answer forgot-password without waiting for the issue, and rate limit both
+  endpoints.
 - Enrollment key material is an Argon2id hash. Do not add a plaintext column.
   Verify the hash before taking the forge write lock.
 - Activity rows stay secret-free. Heartbeats update `bots.last_heartbeat` and
