@@ -87,7 +87,8 @@ pub struct SubmitReviewRequest {
     pub evidence: Option<ReviewEvidence>,
 }
 
-/// Body for a targeted self-dismissal; the review UUID is a route parameter.
+/// Body for a targeted dismissal; the review UUID is a route parameter.
+/// The verdict's author or a repository administrator may send it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DismissPullReviewRequest {
