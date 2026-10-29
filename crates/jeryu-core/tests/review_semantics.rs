@@ -249,11 +249,11 @@ fn dismissal_refusals_leave_every_review_side_effect_unchanged() {
     let target = submit(&core, number, "reviewer", ReviewState::Approved);
     let comment = submit(&core, number, "reviewer", ReviewState::Commented);
     let other_number = open_pr(&core, "another-pr", "alice");
-    core.create_account("administrator", "correct horse battery", UserRole::Admin)
+    core.create_account("non-admin", "correct horse battery", UserRole::User)
         .unwrap();
     let before = snapshot(&core, number);
     let other_before = snapshot(&core, other_number);
-    for actor in ["intruder", "administrator"] {
+    for actor in ["intruder", "non-admin"] {
         assert!(matches!(
             core.dismiss_review("alice", "demo", number, actor, dismissal(&target)),
             Err(ForgeError::Forbidden(_))
@@ -418,7 +418,7 @@ fn inherited_self_approval_never_satisfies_count_or_codeowners() {
 }
 
 #[test]
-fn historical_dismissals_do_not_infer_targets_or_cross_actor_and_head() {
+fn historical_dismissals_do_not_infer_targets_or_accept_missing_heads() {
     let core = ForgeCore::new();
     let number = seed(&core);
     for verdict in [ReviewState::Approved, ReviewState::ChangesRequested] {
@@ -441,6 +441,7 @@ fn historical_dismissals_do_not_infer_targets_or_cross_actor_and_head() {
         );
         unbound.dismissed_review_id = Some(explicit.id);
         unbound.author = "another-reviewer".to_string();
+        unbound.head_sha = None;
         let history = [explicit.clone(), unbound.clone()];
         assert_eq!(
             effective_reviews_for_head(&history, HEAD),

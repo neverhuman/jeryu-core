@@ -631,7 +631,7 @@ impl ForgeCore {
             // Nothing binds a verdict to a base, and a head can be rewound to
             // the one an approval was given at, so the check is not "counts
             // now" but "counts at any head it was given at": every approval
-            // its author has not withdrawn (`dismiss_review`) holds the
+            // not withdrawn via `dismiss_review` holds the
             // retarget. Rejections may carry: they can only block.
             let reviews = state.reviews.get(&key).map(Vec::as_slice).unwrap_or(&[]);
             if standing_approval(reviews) {

@@ -58,9 +58,9 @@ fn reduce_reviews<'a>(
     // A targeted dismissal withdraws its verdict for good, at every head and
     // identity: a withdrawn approval never resurfaces because the identity
     // came back to the one it was written against.
-    // Only a dismissal `dismiss_review` writes counts: by the verdict's own
-    // author, recorded against a head. Another reviewer's or a historical,
-    // head-less dismissal withdraws nothing.
+    // Core authorizes the actor when appending a targeted dismissal. Do not
+    // recheck authorship or current grants here: an administrator's recorded
+    // decision survives later access changes. Head-less rows withdraw nothing.
     let withdrawn: std::collections::BTreeSet<_> = reviews
         .iter()
         .filter(|review| review.state == ReviewState::Dismissed && review.head_sha.is_some())
@@ -68,7 +68,7 @@ fn reduce_reviews<'a>(
             let target = dismissal.dismissed_review_id?;
             reviews
                 .iter()
-                .any(|review| review.id == target && review.author == dismissal.author)
+                .any(|review| review.id == target)
                 .then_some(target)
         })
         .collect();

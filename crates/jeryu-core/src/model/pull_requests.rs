@@ -247,7 +247,8 @@ pub struct CreateReviewRequest {
     pub expected_head_sha: Option<String>,
 }
 
-/// Dismiss the caller's current verdict without rewriting its audit row.
+/// Dismiss a current verdict as its author or a repository administrator.
+/// The original verdict remains in the audit history.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DismissReviewRequest {
     pub review_id: Uuid,

@@ -1,4 +1,14 @@
 //! Pull request reviews and review comments.
+//!
+//! A verdict author or an active repository administrator may dismiss a current
+//! verdict. Core checks repository access under the same lock as the head and
+//! appends a targeted dismissal, preserving the verdict and its comments.
+//! The API edge must authenticate the actor (never accept an actor from the
+//! request body), enforce credential scopes and repository access, and expose
+//! `DismissReviewRequest` with a target review, exact head SHA and non-empty
+//! reason. It must return head conflicts for refresh and expose both the original
+//! verdict and dismissal actor/reason in review history. Transport routing and
+//! UI actions are supplied by the consuming API/web release.
 
 use chrono::Utc;
 use serde_json::json;
@@ -115,9 +125,13 @@ impl ForgeCore {
                 .ok_or_else(|| {
                     ForgeError::NotFound(format!("review {target_id} in {owner}/{repo}#{number}"))
                 })?;
-            if target.author != author {
+            if target.author != author
+                && !super::auth::repo_access_for_locked(&state, author, owner, repo)
+                    .is_some_and(RepoAccessLevel::allows_admin)
+            {
                 return Err(ForgeError::Forbidden(
-                    "reviewers may dismiss only their own verdicts".to_string(),
+                    "dismissing another reviewer requires repository administrator access"
+                        .to_string(),
                 ));
             }
             if !matches!(
