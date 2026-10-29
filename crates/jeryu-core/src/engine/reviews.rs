@@ -1,9 +1,9 @@
 //! Pull request reviews and review comments.
 //!
 //! A reviewer may always dismiss their own current verdict. Dismissing another
-//! reviewer's verdict is an administrator decision bound by the same rules as
-//! a merge override (`merge_overrides.rs`), checked under the same lock as the
-//! head:
+//! reviewer's verdict shares the actor and branch eligibility gates of a merge
+//! override (`merge_overrides.rs`), with different power. Dismissal eligibility
+//! is checked under the same lock as the head:
 //!
 //! - the actor is an active repository administrator (global admin role or an
 //!   explicit Admin grant), never a team bot and never the pull request author;
@@ -15,6 +15,15 @@
 //! - the core has durable storage: a `pull.review_dismissal` audit receipt is
 //!   recorded as `requested` before the row is written, `completed` after, and
 //!   `failed` for a refused attempt.
+//!
+//! A merge override cannot clear reviewer holds (`validate_override_evaluation`
+//! refuses them). Dismissal lets a single eligible administrator clear a targeted
+//! `ChangesRequested` hold. With `allow_merge_override=true` and
+//! `enforce_admins=false`, a hold stops being binding on administrators: it blocks
+//! merging until dismissed, but removal no longer requires the reviewer's consent.
+//! Required approvals and other merge blockers still apply. A separate dismissal
+//! opt-in would decouple this power from status overrides; introducing one is an
+//! owner policy decision.
 //!
 //! Core records `DismissalAuthority::RepositoryAdmin` on such a row, and branch
 //! protection honors a cross-author dismissal only with it. The original

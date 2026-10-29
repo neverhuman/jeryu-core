@@ -9,8 +9,8 @@ earlier rejection.
 `ForgeCore::dismiss_review` requires a target UUID, full lowercase SHA-1 current
 head and nonempty reason. The target's own reviewer may always dismiss their
 current explicit verdict. Dismissing another reviewer's verdict is an
-administrator decision bound by the same rules as an audited merge decision
-(below):
+administrator decision sharing the actor and branch eligibility gates of an
+audited merge override (below), with different power:
 
 - the actor is an active repository administrator (the global admin role or an
   explicit Admin grant; owning the namespace alone is not), not a team bot and
@@ -25,6 +25,20 @@ administrator decision bound by the same rules as an audited merge decision
 - the core has durable storage. A `pull.review_dismissal` audit receipt is
   recorded as `requested` before the row is written and `completed` after; a
   refused attempt on another reviewer's verdict records `failed`.
+
+A merge override cannot clear reviewer holds: `validate_override_evaluation`
+refuses `ChangesRequested` blockers. Administrator dismissal can clear a targeted
+`ChangesRequested` hold with a single eligible administrator's decision. On a
+branch with `allow_merge_override=true` and `enforce_admins=false`, a hold stops
+being binding on administrators: it still blocks merging until dismissed, but
+the reviewer's consent is no longer required to remove it. Dismissal does not
+satisfy required approvals or bypass other merge blockers.
+
+The current opt-in couples permission to override allowed failed statuses with
+permission to dismiss another reviewer's verdict. A separate dismissal opt-in
+would let branch owners permit status overrides while keeping review holds
+binding on administrators. Whether to introduce that separate control is an
+owner policy decision; the current control remains `allow_merge_override`.
 
 The operation appends a `DISMISSED` event with `dismissed_review_id` and the reason
 in `body`. For an administrator dismissal it also records
