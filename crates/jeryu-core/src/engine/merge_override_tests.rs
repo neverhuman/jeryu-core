@@ -88,6 +88,7 @@ fn protection(core: &ForgeCore, enforce_admins: bool) {
             required_approving_review_count: 1,
             enforce_admins,
             allow_merge_override: true,
+            allow_admin_review_dismissal: false,
             merge_override_status_checks: vec!["ratchet".into()],
             merge_override_status_creators: vec!["ci".into()],
             required_linear_history: false,

@@ -28,6 +28,7 @@ impl ForgeCore {
             strict: request.strict,
             required_approving_review_count: request.required_approving_review_count,
             allow_merge_override: request.allow_merge_override,
+            allow_admin_review_dismissal: request.allow_admin_review_dismissal,
             merge_override_status_checks: request.merge_override_status_checks,
             merge_override_status_creators: request.merge_override_status_creators,
             enforce_admins: request.enforce_admins,

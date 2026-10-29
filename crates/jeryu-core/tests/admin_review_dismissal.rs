@@ -12,12 +12,13 @@ const NEXT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const SUBJECT: &str = "owner/demo#1";
 const ACTION: &str = "pull.review_dismissal";
 
-/// A branch that opts in to administrator decisions and does not enforce
+/// A branch that opts in to administrator dismissal and does not enforce
 /// administrators: the only shape on which a cross-author dismissal is allowed.
+/// `allow_merge_override` stays off -- the dismissal opt-in stands alone.
 fn opted_in() -> SetBranchProtectionRequest {
     SetBranchProtectionRequest {
         required_approving_review_count: 1,
-        allow_merge_override: true,
+        allow_admin_review_dismissal: true,
         enforce_admins: false,
         ..Default::default()
     }
@@ -256,6 +257,15 @@ fn cross_author_dismissal_is_bound_by_the_branch_rule() {
             required_approving_review_count: 1,
             ..Default::default()
         }),
+        // Status-check overrides are allowed, but reviewer holds are not:
+        // `allow_merge_override` does not carry dismissal with it.
+        Some(SetBranchProtectionRequest {
+            required_approving_review_count: 1,
+            allow_merge_override: true,
+            merge_override_status_checks: vec!["ci/fast".to_string()],
+            merge_override_status_creators: vec!["ci-bot".to_string()],
+            ..Default::default()
+        }),
         // Opted in, but the branch binds administrators too.
         Some(SetBranchProtectionRequest {
             enforce_admins: true,
@@ -401,4 +411,67 @@ fn cross_author_dismissal_requires_active_admin_and_valid_current_head_request()
     core.dismiss_review("owner", "demo", 1, "reviewer", request(&target))
         .unwrap();
     assert!(!has_rejection(&core));
+}
+
+/// The opt-in is additive: a rule stored or sent without the field reads as
+/// off, so an older payload never grants dismissal.
+#[test]
+fn an_absent_dismissal_opt_in_reads_as_off() {
+    let stored: SetBranchProtectionRequest = serde_json::from_str(
+        r#"{"required_status_checks":[],"required_approving_review_count":1,
+            "enforce_admins":false,"allow_merge_override":true}"#,
+    )
+    .unwrap();
+    assert!(!stored.allow_admin_review_dismissal);
+
+    let (_temp, _db, core) = durable();
+    seed_with(&core, Some(stored));
+    let rule = core.get_branch_protection("owner", "demo", "main").unwrap();
+    assert!(!rule.allow_admin_review_dismissal);
+    let target = submit(&core, "reviewer", ReviewState::ChangesRequested);
+    assert!(matches!(
+        core.dismiss_review("owner", "demo", 1, "admin", request(&target)),
+        Err(ForgeError::Forbidden(_))
+    ));
+    assert!(has_rejection(&core));
+
+    // A rule JSON written before the field existed loads the same way.
+    let older = serde_json::json!({
+        "owner": "owner", "repo": "demo", "branch": "main",
+        "required_status_checks": [], "required_approving_review_count": 1,
+        "enforce_admins": false, "allow_merge_override": true,
+        "required_linear_history": false, "allow_force_pushes": false,
+        "allow_deletions": false, "require_signed_commits": false,
+        "require_jankurai_proof": false, "updated_at": "2026-01-01T00:00:00Z",
+    });
+    let rule: jeryu_core::BranchProtectionRule = serde_json::from_value(older).unwrap();
+    assert!(!rule.allow_admin_review_dismissal);
+    assert!(rule.allow_merge_override);
+}
+
+/// With the dismissal opt-in on and every other gate met, the administrator
+/// decision goes through even though status overrides are off.
+#[test]
+fn the_dismissal_opt_in_alone_permits_a_cross_author_dismissal() {
+    let (_temp, _db, core) = durable();
+    seed(&core);
+    let rule = core.get_branch_protection("owner", "demo", "main").unwrap();
+    assert!(rule.allow_admin_review_dismissal && !rule.allow_merge_override);
+    let target = submit(&core, "reviewer", ReviewState::ChangesRequested);
+    assert!(has_rejection(&core));
+    let dismissal = core
+        .dismiss_review("owner", "demo", 1, "admin", request(&target))
+        .unwrap();
+    assert_eq!(
+        dismissal.dismissal_authority,
+        Some(DismissalAuthority::RepositoryAdmin)
+    );
+    assert!(!has_rejection(&core));
+    assert_eq!(
+        receipts(&core),
+        vec![
+            ("admin".to_string(), "requested".to_string()),
+            ("admin".to_string(), "completed".to_string()),
+        ]
+    );
 }

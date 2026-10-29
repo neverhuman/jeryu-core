@@ -140,6 +140,7 @@ fn set_and_get_branch_protection_roundtrips() {
                 strict: true,
                 required_approving_review_count: 2,
                 allow_merge_override: false,
+                allow_admin_review_dismissal: false,
                 merge_override_status_checks: Vec::new(),
                 merge_override_status_creators: Vec::new(),
                 enforce_admins: true,

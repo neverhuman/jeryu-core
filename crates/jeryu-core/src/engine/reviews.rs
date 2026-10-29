@@ -1,14 +1,14 @@
 //! Pull request reviews and review comments.
 //!
 //! A reviewer may always dismiss their own current verdict. Dismissing another
-//! reviewer's verdict shares the actor and branch eligibility gates of a merge
-//! override (`merge_overrides.rs`), with different power. Dismissal eligibility
-//! is checked under the same lock as the head:
+//! reviewer's verdict shares the actor eligibility gates of a merge override
+//! (`merge_overrides.rs`) but has its own branch opt-in, with different power.
+//! Dismissal eligibility is checked under the same lock as the head:
 //!
 //! - the actor is an active repository administrator (global admin role or an
 //!   explicit Admin grant), never a team bot and never the pull request author;
 //! - the base branch has a protection rule that opts in with
-//!   `allow_merge_override` and does not set `enforce_admins`;
+//!   `allow_admin_review_dismissal` and does not set `enforce_admins`;
 //! - separation of duties: the actor has no standing approval on the pull
 //!   request, and after the dismissal the actor's approvals never count there
 //!   (Core refuses new ones and branch protection ignores old ones);
@@ -18,12 +18,14 @@
 //!
 //! A merge override cannot clear reviewer holds (`validate_override_evaluation`
 //! refuses them). Dismissal lets a single eligible administrator clear a targeted
-//! `ChangesRequested` hold. With `allow_merge_override=true` and
-//! `enforce_admins=false`, a hold stops being binding on administrators: it blocks
-//! merging until dismissed, but removal no longer requires the reviewer's consent.
-//! Required approvals and other merge blockers still apply. A separate dismissal
-//! opt-in would decouple this power from status overrides; introducing one is an
-//! owner policy decision.
+//! `ChangesRequested` hold. Because that is a different power, it has a separate
+//! opt-in: `allow_merge_override` governs status-check overrides only, and
+//! `allow_admin_review_dismissal` -- defaulted off, so stored rules and wire
+//! payloads that omit it read as off -- is the only switch that makes a reviewer
+//! hold dismissable. On a branch with that opt-in on and `enforce_admins=false`,
+//! a hold stops being binding on administrators: it blocks merging until
+//! dismissed, but removal no longer requires the reviewer's consent. Required
+//! approvals and other merge blockers still apply.
 //!
 //! Core records `DismissalAuthority::RepositoryAdmin` on such a row, and branch
 //! protection honors a cross-author dismissal only with it. The original
@@ -412,10 +414,11 @@ fn authorize_cross_author_dismissal(
     let protection = state
         .branch_protections
         .get(&(pr.owner.clone(), pr.repo.clone(), pr.base.ref_name.clone()))
-        .filter(|rule| rule.allow_merge_override);
+        .filter(|rule| rule.allow_admin_review_dismissal);
     let Some(protection) = protection else {
         return Err(ForgeError::Forbidden(
-            "dismissing another reviewer requires explicit allow_merge_override=true".to_string(),
+            "dismissing another reviewer requires explicit allow_admin_review_dismissal=true"
+                .to_string(),
         ));
     };
     if protection.enforce_admins {

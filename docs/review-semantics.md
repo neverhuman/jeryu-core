@@ -9,15 +9,16 @@ earlier rejection.
 `ForgeCore::dismiss_review` requires a target UUID, full lowercase SHA-1 current
 head and nonempty reason. The target's own reviewer may always dismiss their
 current explicit verdict. Dismissing another reviewer's verdict is an
-administrator decision sharing the actor and branch eligibility gates of an
-audited merge override (below), with different power:
+administrator decision sharing the actor eligibility gates of an audited merge
+override (below) but with its own branch opt-in, because its power differs:
 
 - the actor is an active repository administrator (the global admin role or an
   explicit Admin grant; owning the namespace alone is not), not a team bot and
   not the pull request author;
-- the base branch rule opts in with `allow_merge_override=true` and does not
-  set `enforce_admins`. With no rule, without the opt-in, or with
-  administrators enforced, only the verdict's own reviewer may dismiss it;
+- the base branch rule opts in with `allow_admin_review_dismissal=true` and
+  does not set `enforce_admins`. With no rule, without the opt-in, or with
+  administrators enforced, only the verdict's own reviewer may dismiss it.
+  `allow_merge_override=true` alone does not permit it;
 - separation of duties: the administrator has no standing approval on the PR,
   and after the dismissal cannot approve it. Branch protection also ignores
   any approval from an administrator who dismissed another reviewer's verdict
@@ -29,16 +30,18 @@ audited merge override (below), with different power:
 A merge override cannot clear reviewer holds: `validate_override_evaluation`
 refuses `ChangesRequested` blockers. Administrator dismissal can clear a targeted
 `ChangesRequested` hold with a single eligible administrator's decision. On a
-branch with `allow_merge_override=true` and `enforce_admins=false`, a hold stops
-being binding on administrators: it still blocks merging until dismissed, but
-the reviewer's consent is no longer required to remove it. Dismissal does not
-satisfy required approvals or bypass other merge blockers.
+branch with `allow_admin_review_dismissal=true` and `enforce_admins=false`, a
+hold stops being binding on administrators: it still blocks merging until
+dismissed, but the reviewer's consent is no longer required to remove it.
+Dismissal does not satisfy required approvals or bypass other merge blockers.
 
-The current opt-in couples permission to override allowed failed statuses with
-permission to dismiss another reviewer's verdict. A separate dismissal opt-in
-would let branch owners permit status overrides while keeping review holds
-binding on administrators. Whether to introduce that separate control is an
-owner policy decision; the current control remains `allow_merge_override`.
+Because those powers differ, they have separate opt-ins. `allow_merge_override`
+governs audited status-check overrides only; `allow_admin_review_dismissal` is
+the only control that makes a review hold dismissable by one administrator. A
+branch owner can therefore permit status overrides while keeping review holds
+binding on administrators. Both default off: `allow_admin_review_dismissal`
+deserializes as `false` for rules stored before it existed and for PUT bodies
+that omit it, so enabling status overrides never enables dismissal.
 
 The operation appends a `DISMISSED` event with `dismissed_review_id` and the reason
 in `body`. For an administrator dismissal it also records
@@ -84,7 +87,8 @@ operation. Required route regressions cover 401, 403, malformed bodies, stale
 heads, unchanged history on refusal and matching posture/history after success.
 For another reviewer's verdict they also cover: a repository administrator on
 an opted-in branch succeeds; the 403 refusals for a non-administrator, a team
-bot, the PR author, a branch without `allow_merge_override`, a branch with
+bot, the PR author, a branch without `allow_admin_review_dismissal` (including
+one with only `allow_merge_override=true`), a branch with
 `enforce_admins`, and an administrator with a standing approval; and a 403 on
 that administrator's later approval. History must show both the original
 verdict and the dismissal's actor and reason; `PullRequestReview` does not

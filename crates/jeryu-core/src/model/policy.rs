@@ -19,6 +19,13 @@ pub struct BranchProtectionRule {
     /// Explicit opt-in for independently recorded administrator decisions.
     #[serde(default)]
     pub allow_merge_override: bool,
+    /// Explicit opt-in for an administrator dismissing another reviewer's
+    /// verdict. Separate from `allow_merge_override`: a status-check override
+    /// must not also make reviewer holds dismissable. Defaulted off so rules
+    /// stored before this field existed, and wire payloads that omit it, read
+    /// as off.
+    #[serde(default)]
+    pub allow_admin_review_dismissal: bool,
     /// Exact failed status contexts eligible for an audited decision. Empty denies all.
     #[serde(default)]
     pub merge_override_status_checks: Vec<String>,
@@ -63,6 +70,11 @@ pub struct SetBranchProtectionRequest {
     /// Explicit opt-in for independently recorded administrator decisions.
     #[serde(default)]
     pub allow_merge_override: bool,
+    /// Explicit opt-in for an administrator dismissing another reviewer's
+    /// verdict. Omitted means off: a body that turns on status-check overrides
+    /// does not also make reviewer holds dismissable.
+    #[serde(default)]
+    pub allow_admin_review_dismissal: bool,
     /// Exact failed status contexts eligible for an audited decision. Empty denies all.
     #[serde(default)]
     pub merge_override_status_checks: Vec<String>,
@@ -98,6 +110,7 @@ impl Default for SetBranchProtectionRequest {
             required_approving_review_count: 0,
             enforce_admins: false,
             allow_merge_override: false,
+            allow_admin_review_dismissal: false,
             merge_override_status_checks: Vec::new(),
             merge_override_status_creators: Vec::new(),
             strict: false,

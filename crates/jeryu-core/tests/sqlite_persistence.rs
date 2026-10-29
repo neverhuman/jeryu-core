@@ -322,6 +322,7 @@ fn sqlite_store_round_trips_core_forge_resources() {
                 strict: false,
                 required_approving_review_count: 1,
                 allow_merge_override: false,
+                allow_admin_review_dismissal: false,
                 merge_override_status_checks: Vec::new(),
                 merge_override_status_creators: Vec::new(),
                 enforce_admins: true,
