@@ -15,7 +15,7 @@ Run these from the canonical repository root before creating a release receipt:
 - `bash scripts/ci-phases.sh`
 - `SIGNRAIL_ROLLBACK_TARGET=<previous-signed-release> bash ops/ci/artifact_support.sh`
 - `bash ops/ci/release.sh`
-- `bash ops/ci/proof-evidence.sh`
+- `bash ops/ci/proof_evidence.sh`
 - `cargo test -p jeryu-wsversion --jobs 40`,
   `cargo run -q -p jeryu-wsversion -- inherit-guard`, and
   `cargo run -q -p jeryu-wsversion -- decide --range origin/main..HEAD --json`

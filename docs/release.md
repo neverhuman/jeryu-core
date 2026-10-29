@@ -72,7 +72,7 @@ not trigger another version bump.
 - `bash ops/ci/release.sh`
 - `just security`
 - `just audit`
-- `bash ops/ci/proof-evidence.sh`
+- `bash ops/ci/proof_evidence.sh`
 - `cargo test -p jeryu-runnerd workcell --jobs 40` when the workcell control plane, tar safety, or CI repair snapshot helpers change.
 - `cargo test -p jeryu-readmodel -p jeryu-tui --jobs 40` when the workcells,
   agent-runs, codegraph/oracle dashboard, or TUI projection contract changes.

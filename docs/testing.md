@@ -40,9 +40,44 @@ Database migrations and rollbacks live under `db/`; see `db/README.md`.
 | `just artifact-support` | `ops/ci/artifact_support.sh` | artifact support checks |
 | `just required` | `ops/ci/pr-ci.sh` | the protected `jeryu-core/required` gate (below) |
 
-`scripts/ci-local.sh` runs `just fast` then `just check`. `ops/ci/proof_evidence.sh`
-writes jankurai audit and security evidence under `target/jankurai/`; hosted CI
-runs it after `pr-ci.sh`.
+`scripts/ci-local.sh` runs `just fast` then `just check`.
+
+### Proof evidence lane
+
+`ops/ci/proof_evidence.sh` is the last step of `ops/ci/pr-ci.sh`, so it is part
+of the protected `jeryu-core/required` check and blocks merge
+(`agent/proof-lanes.toml`). The mirrored workflow runs it only through
+`pr-ci.sh`. Every Jankurai tool in it runs for real on the exact head and every
+report is read and gated; nothing is synthesized. The rules live in
+`ops/ci/proof_baseline.sh`:
+
+- **Baseline.** Protected main's tip as the forge serves it when the gate runs.
+  `origin` must be exactly `https://git.neverhuman.org/git/jeryu/jeryu-core.git`,
+  the lane fetches `main` from it, and audits that commit in a disposable
+  checkout under `target/jeryu-core-proof-baseline.*`. That needs network access
+  to the forge. No baseline is read from the tree under test.
+- **Change set.** It starts at the head's fork point from that tip. A head behind
+  the tip is judged, not refused. Main's own head, or a head that touches
+  nothing, is an empty change set and passes the change-surface checks
+  (proofbind and proofmark do not run).
+- **Ratchet.** The head's whole tree must score at least main's and the policy
+  floor, with no new cap or hard finding and no higher migration liability.
+  The result depends on main's tip at gate time: a head that passed can go red
+  after main moves to a score it does not reach. Rebase it and rerun.
+- **Audit policy.** The floor is the policy's own integer `minimum_score`. A head
+  may amend `agent/audit-policy.toml`, but it may not lower the floor. The lane
+  then judges it twice. Under main's policy it is ratcheted against main's
+  baseline, so no policy edit lets a weaker tree through. Under its own policy
+  it is ratcheted against main's tree audited with that same policy. Jankurai
+  reads only the audited tree's own policy, so each swap is a one-file commit
+  in a disposable checkout.
+- **Leftovers.** Each run holds an exclusive `flock` on its checkout's `.lock`.
+  The next run removes checkouts whose lock nobody holds, and unlocked ones
+  older than two hours.
+
+The lane writes its ratchet report to `target/jankurai/proof-ratchet-score.*`
+and its summary to `target/jankurai/proof-evidence-summary.json`. It leaves
+`score.sh`'s `target/jankurai/repo-score.*` in place.
 
 Everyday loops:
 

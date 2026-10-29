@@ -1,18 +1,18 @@
 //! The evidence lane's own guards: where its ratchet baseline may come from,
-//! and that it still refuses what it is meant to refuse.
+//! which change set it judges, how a policy amendment is judged, and that it
+//! still refuses what it is meant to refuse.
 //!
-//! `ops/ci/proof_baseline.sh` is sourced and called here with a `git` stub on
-//! PATH, so each refusal is executed — no forge, no network and no auditor are
-//! needed. The lane itself (`ops/ci/proof_evidence.sh`) runs every Jankurai
-//! tool for real and cannot be run from a unit test; what is checked of it here
-//! is the wiring a reader cannot see from one file: that it is in the required
-//! gate, that it takes no baseline out of the tree under test, and that no tool
-//! result is ignored or stood in for.
+//! `ops/ci/proof_baseline.sh` is sourced and its functions are run against
+//! throwaway git repositories, so each rule is executed without a forge, a
+//! network or an auditor. The lane itself (`ops/ci/proof_evidence.sh`) runs
+//! every Jankurai tool for real and cannot run from a unit test; what is checked
+//! of it here is the wiring a reader cannot see from one file.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, Output, Stdio};
+
+const FORGE: &str = "https://git.neverhuman.org/git/jeryu/jeryu-core.git";
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -22,405 +22,536 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn temp_dir(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("jeryu_core-proof-{name}-{nanos}"));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("temp dir");
-    dir
+fn guards() -> PathBuf {
+    repo_root().join("ops/ci/proof_baseline.sh")
 }
 
-/// Install a `git` stub whose body is `body`, and return the directory to put
-/// first on PATH.
-fn git_stub(dir: &Path, body: &str) -> PathBuf {
-    let bin = dir.join("bin");
-    fs::create_dir_all(&bin).expect("stub bin");
-    let script = format!("#!/usr/bin/env bash\nset -u\n{body}\n");
-    let path = bin.join("git");
-    fs::write(&path, script).expect("write git stub");
-    let mode = 0o755;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod stub");
-    }
-    bin
+fn with_identity(command: &mut Command) -> &mut Command {
+    command
+        .env("GIT_AUTHOR_NAME", "proof-test")
+        .env("GIT_AUTHOR_EMAIL", "proof-test@invalid")
+        .env("GIT_COMMITTER_NAME", "proof-test")
+        .env("GIT_COMMITTER_EMAIL", "proof-test@invalid")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
 }
 
-/// Source the baseline guards and run `snippet` with `stub_bin` first on PATH.
-fn run_guard(stub_bin: Option<&Path>, snippet: &str) -> Output {
-    let root = repo_root();
-    let base_path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
-    let path = match stub_bin {
-        Some(bin) => format!("{}:{base_path}", bin.display()),
-        None => base_path,
-    };
-    Command::new("bash")
-        .arg("-c")
-        .arg(format!("source ops/ci/proof_baseline.sh\n{snippet}"))
-        .current_dir(&root)
-        .env("PATH", path)
+/// Source the guards in `cwd` and run `snippet`.
+fn guard(cwd: &Path, snippet: &str) -> Output {
+    with_identity(Command::new("bash").arg("-c").arg(format!(
+        "set -euo pipefail\nsource {:?}\n{snippet}",
+        guards().display().to_string()
+    )))
+    .current_dir(cwd)
+    .output()
+    .expect("run guard")
+}
+
+fn ok(output: &Output) -> String {
+    assert!(
+        output.status.success(),
+        "guard failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn refused(output: &Output, needle: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "guard passed; expected {needle:?}"
+    );
+    assert!(stderr.contains(needle), "expected {needle:?} in: {stderr}");
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = with_identity(Command::new("git").args(args))
+        .current_dir(dir)
         .output()
-        .expect("run guard")
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn commit_file(dir: &Path, path: &str, body: &str) -> String {
+    let file = dir.join(path);
+    fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+    fs::write(&file, body).expect("write");
+    git(dir, &["add", path]);
+    git(dir, &["commit", "--quiet", "-m", path]);
+    git(dir, &["rev-parse", "HEAD"])
+}
+
+/// A repository whose main has a policy, then two more commits, and a feature
+/// branch forked from the first commit that changes one file.
+struct Fixture {
+    _temp: tempfile::TempDir,
+    repo: PathBuf,
+    fork: String,
+    tip: String,
+    head: String,
+}
+
+fn fixture() -> Fixture {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("repo");
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    let fork = commit_file(&repo, "agent/audit-policy.toml", "minimum_score = 85\n");
+    commit_file(&repo, "main-only.txt", "one\n");
+    let tip = commit_file(&repo, "main-only.txt", "two\n");
+    git(&repo, &["update-ref", "refs/remotes/origin/main", &tip]);
+    git(&repo, &["switch", "--quiet", "-c", "feature", &fork]);
+    let head = commit_file(&repo, "src/change.rs", "fn change() {}\n");
+    Fixture {
+        _temp: temp,
+        repo,
+        fork,
+        tip,
+        head,
+    }
+}
+
+#[test]
+fn only_the_hosted_source_repository_may_serve_the_baseline() {
+    let fx = fixture();
+    let refused_urls = [
+        "http://git.neverhuman.org/git/jeryu/jeryu-core.git",
+        "git://git.neverhuman.org/git/jeryu/jeryu-core.git",
+        "ssh://git@git.neverhuman.org/git/jeryu/jeryu-core.git",
+        "git@git.neverhuman.org:jeryu/jeryu-core.git",
+        "https://git.neverhuman.org.example/git/jeryu/jeryu-core.git",
+        "https://github.com/neverhuman/jeryu-core.git",
+        "/srv/jeryu-core.git",
+    ];
+    git(&fx.repo, &["remote", "add", "origin", FORGE]);
+    ok(&guard(&fx.repo, "proof_require_origin"));
+    for url in refused_urls {
+        git(&fx.repo, &["remote", "set-url", "origin", url]);
+        refused(
+            &guard(&fx.repo, "proof_require_origin"),
+            "not the hosted source repository",
+        );
+    }
+    git(&fx.repo, &["remote", "remove", "origin"]);
+    refused(&guard(&fx.repo, "proof_require_origin"), "no origin remote");
+}
+
+#[test]
+fn a_head_behind_the_tip_is_judged_from_its_fork_point() {
+    let fx = fixture();
+    let fork = ok(&guard(
+        &fx.repo,
+        &format!("proof_fork_point {} {}", fx.tip, fx.head),
+    ));
+    assert_eq!(
+        fork, fx.fork,
+        "the change set starts where the head left main"
+    );
+    let out = fx.repo.join("changed");
+    ok(&guard(
+        &fx.repo,
+        &format!("proof_changed_paths {} {} {:?}", fork, fx.head, out),
+    ));
+    assert_eq!(
+        fs::read(&out).expect("changed"),
+        b"src/change.rs\0",
+        "main's own later commits are not this head's change"
+    );
+    assert!(!fx.repo.join("changed.unsorted").exists());
+}
+
+#[test]
+fn protected_main_gating_its_own_head_is_an_empty_change_set() {
+    let fx = fixture();
+    let fork = ok(&guard(
+        &fx.repo,
+        &format!("proof_fork_point {} {}", fx.tip, fx.tip),
+    ));
+    assert_eq!(fork, fx.tip);
+    let out = fx.repo.join("changed");
+    ok(&guard(
+        &fx.repo,
+        &format!("proof_changed_paths {} {} {:?}", fork, fx.tip, out),
+    ));
+    assert!(fs::read(&out).expect("changed").is_empty());
+}
+
+#[test]
+fn a_head_with_no_shared_history_is_refused() {
+    let fx = fixture();
+    git(&fx.repo, &["switch", "--quiet", "--orphan", "unrelated"]);
+    let unrelated = commit_file(&fx.repo, "other.txt", "x\n");
+    refused(
+        &guard(
+            &fx.repo,
+            &format!("proof_fork_point {} {}", fx.tip, unrelated),
+        ),
+        "shares no history",
+    );
+}
+
+#[test]
+fn the_floor_is_the_policy_own_integer_and_never_lowered() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let policy = temp.path().join("audit-policy.toml");
+    for (body, floor) in [
+        ("minimum_score = 82\n", Some("82")),
+        ("schema = 1\nminimum_score=91 # calibrated\n", Some("91")),
+        ("minimum_score = 85.5\n", None),
+        ("minimum_score = 85\nminimum_score = 90\n", None),
+        ("hard_findings_allowed = 0\n", None),
+    ] {
+        fs::write(&policy, body).expect("policy");
+        let output = guard(
+            temp.path(),
+            &format!("proof_effective_floor {:?}", policy.display().to_string()),
+        );
+        match floor {
+            Some(floor) => assert_eq!(ok(&output), floor, "{body}"),
+            None => refused(&output, "one integer minimum_score"),
+        }
+    }
+    ok(&guard(temp.path(), "proof_require_floor_kept 85 85"));
+    ok(&guard(temp.path(), "proof_require_floor_kept 86 85"));
+    refused(
+        &guard(temp.path(), "proof_require_floor_kept 84 85"),
+        "lowers the audit floor from 85 to 84",
+    );
+}
+
+#[test]
+fn a_policy_variant_changes_only_the_policy_of_the_named_commit() {
+    let fx = fixture();
+    let policy = fx.repo.join("../amended.toml");
+    fs::write(&policy, "minimum_score = 90\n").expect("policy");
+    let dest = fx.repo.join("../variant");
+    let variant = ok(&guard(
+        &fx.repo,
+        &format!(
+            "proof_checkout_variant {:?} refs/remotes/origin/main {} {:?} {:?}",
+            fx.repo.display().to_string(),
+            fx.tip,
+            dest.display().to_string(),
+            policy.display().to_string()
+        ),
+    ));
+    assert_ne!(variant, fx.tip);
+    assert_eq!(git(&dest, &["rev-parse", "HEAD^"]), fx.tip);
+    assert_eq!(
+        git(&dest, &["diff", "--name-only", &fx.tip, &variant]),
+        "agent/audit-policy.toml"
+    );
+    assert_eq!(
+        fs::read_to_string(dest.join("agent/audit-policy.toml")).expect("read"),
+        "minimum_score = 90\n"
+    );
+
+    // Without a policy it is the exact commit, checked out clean.
+    let plain = fx.repo.join("../plain");
+    let at = ok(&guard(
+        &fx.repo,
+        &format!(
+            "proof_checkout_variant {:?} refs/remotes/origin/main {} {:?}",
+            fx.repo.display().to_string(),
+            fx.tip,
+            plain.display().to_string()
+        ),
+    ));
+    assert_eq!(at, fx.tip);
+
+    // A ref that moved since the lane read it is refused, not followed.
+    let moved = fx.repo.join("../moved");
+    refused(
+        &guard(
+            &fx.repo,
+            &format!(
+                "proof_checkout_variant {:?} refs/remotes/origin/main {} {:?}",
+                fx.repo.display().to_string(),
+                fx.fork,
+                moved.display().to_string()
+            ),
+        ),
+        "moved during the proof lane",
+    );
+}
+
+#[test]
+fn only_canonical_policy_files_are_read() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let real = temp.path().join("policy.toml");
+    fs::write(&real, "minimum_score = 85\n").expect("policy");
+    let canonical = real.canonicalize().expect("canonical");
+    ok(&guard(
+        temp.path(),
+        &format!(
+            "proof_require_canonical_file {:?}",
+            canonical.display().to_string()
+        ),
+    ));
+    let link = temp.path().join("link.toml");
+    std::os::unix::fs::symlink(&canonical, &link).expect("symlink");
+    let hard = temp.path().join("hard.toml");
+    fs::hard_link(&canonical, &hard).expect("hard link");
+    for path in [link, hard] {
+        refused(
+            &guard(
+                temp.path(),
+                &format!(
+                    "proof_require_canonical_file {:?}",
+                    path.display().to_string()
+                ),
+            ),
+            "canonical one-link regular file",
+        );
+    }
+}
+
+#[test]
+fn migration_liability_may_not_rise_or_drop_lanes_at_equal_liability() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let report = |name: &str, root: &str, liability: u32, lanes: &[&str]| {
+        let path = temp.path().join(name);
+        let body = serde_json::json!({
+            "schema_version": "1.0.0", "command": "jankurai migrate", "status": "complete",
+            "source_root": root, "liability_score": liability, "required_proof_lanes": lanes,
+        });
+        fs::write(&path, body.to_string()).expect("report");
+        path.display().to_string()
+    };
+    let base = report("base.json", "/main", 10, &["db-migration-analyze"]);
+    let check = |candidate: &str| {
+        guard(
+            temp.path(),
+            &format!("proof_require_migration {base:?} /main {candidate:?} ."),
+        )
+    };
+    ok(&check(&report(
+        "same.json",
+        ".",
+        10,
+        &["db-migration-analyze"],
+    )));
+    ok(&check(&report("lower.json", ".", 9, &[])));
+    refused(
+        &check(&report("higher.json", ".", 11, &["db-migration-analyze"])),
+        "migration liability regressed",
+    );
+    refused(
+        &check(&report("dropped.json", ".", 10, &[])),
+        "migration liability regressed",
+    );
+    refused(
+        &check(&report("elsewhere.json", "/other", 1, &[])),
+        "incomplete or not of .",
+    );
+}
+
+/// Hold an exclusive flock on `lock` in a child process until it is killed.
+fn hold_lock(lock: &Path) -> Child {
+    let child = Command::new("flock")
+        .arg("--exclusive")
+        .arg(lock)
+        .args(["sleep", "60"])
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("flock");
+    for _ in 0..100 {
+        let probe = Command::new("flock")
+            .args(["--exclusive", "--nonblock"])
+            .arg(lock)
+            .arg("true")
+            .status()
+            .expect("probe");
+        if !probe.success() {
+            return child;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("the child never took the lock");
+}
+
+#[test]
+fn the_sweep_removes_only_checkouts_no_live_run_holds() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let parent = temp.path().join("target");
+    let dir = |name: &str| parent.join(format!("jeryu-core-proof-baseline.{name}"));
+    let (live, released, fresh, aged) = (dir("live"), dir("released"), dir("fresh"), dir("aged"));
+    let other = parent.join("debug");
+    for path in [&live, &released, &fresh, &aged, &other] {
+        fs::create_dir_all(path.join("main")).expect("dir");
+    }
+    fs::write(live.join(".lock"), "").expect("lock");
+    fs::write(released.join(".lock"), "").expect("lock");
+    // A live run that has run for longer than two hours keeps its checkout:
+    // the lock, not the age, says whether it is in use.
+    for path in [&live, &aged] {
+        let status = Command::new("touch")
+            .args(["-d", "4 hours ago"])
+            .arg(path)
+            .status()
+            .expect("touch");
+        assert!(status.success());
+    }
+    let mut holder = hold_lock(&live.join(".lock"));
+    let swept = guard(
+        temp.path(),
+        &format!(
+            "proof_sweep_stale {:?} jeryu-core-proof-baseline",
+            parent.display().to_string()
+        ),
+    );
+    let _ = holder.kill();
+    let _ = holder.wait();
+    ok(&swept);
+    assert!(
+        live.exists(),
+        "a checkout a running lane holds is left alone"
+    );
+    assert!(
+        !released.exists(),
+        "a checkout whose run is gone is removed"
+    );
+    assert!(
+        fresh.exists(),
+        "a new checkout not yet locked is left alone"
+    );
+    assert!(
+        !aged.exists(),
+        "an unlocked checkout older than two hours is removed"
+    );
+    assert!(other.exists(), "the sweep touches only its own checkouts");
+    ok(&guard(
+        temp.path(),
+        &format!(
+            "proof_sweep_stale {:?} jeryu-core-proof-baseline",
+            temp.path().join("absent").display().to_string()
+        ),
+    ));
 }
 
 fn lane_source() -> String {
     fs::read_to_string(repo_root().join("ops/ci/proof_evidence.sh")).expect("lane source")
 }
 
-const MAIN_COMMIT: &str = "1111111111111111111111111111111111111111";
-
-#[test]
-fn baseline_origin_must_be_a_remote_the_head_cannot_write() {
-    let dir = temp_dir("origin");
-    let remote = git_stub(
-        &dir,
-        r#"if [[ "$1 $2 $3" == "remote get-url origin" ]]; then
-  printf '%s\n' "$STUB_ORIGIN"; exit 0
-fi
-exit 1"#,
-    );
-
-    let out = run_guard(
-        Some(&remote),
-        "STUB_ORIGIN=https://forge.example/jeryu/jeryu-core.git proof_baseline_remote_url",
-    );
-    assert!(out.status.success(), "a remote URL is the baseline source");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "https://forge.example/jeryu/jeryu-core.git"
-    );
-
-    for local in ["/home/someone/jeryu-core", "../jeryu-core", ""] {
-        let out = run_guard(
-            Some(&remote),
-            &format!("STUB_ORIGIN={local:?} proof_baseline_remote_url"),
-        );
-        assert!(
-            !out.status.success(),
-            "a local origin ({local}) must not be trusted as the forge"
-        );
-    }
-}
-
-#[test]
-fn a_shallow_checkout_is_deepened_before_ancestry_is_asked() {
-    let dir = temp_dir("shallow");
-    // A depth-1 checkout: the baseline commit is absent until a fetch brings
-    // it, and `--unshallow` is the fetch that makes ancestry answerable.
-    let stub = git_stub(
-        &dir,
-        r#"log="$STUB_LOG"
-printf '%s\n' "$*" >>"$log"
-case "$*" in
-  "rev-parse --is-shallow-repository") [[ -e "$log.deep" ]] && printf 'false\n' || printf 'true\n'; exit 0 ;;
-  "fetch --quiet --no-tags --unshallow origin main") : >"$log.deep"; exit 0 ;;
-  cat-file*) [[ -e "$log.deep" ]] && exit 0 || exit 1 ;;
-  "merge-base --is-ancestor"*) exit 0 ;;
-esac
-exit 1"#,
-    );
-    let log = dir.join("calls");
-    let out = run_guard(
-        Some(&stub),
-        &format!(
-            "STUB_LOG={:?} proof_baseline_require_descendant {MAIN_COMMIT} HEAD",
-            log.display().to_string()
-        ),
-    );
-    assert!(
-        out.status.success(),
-        "deepening then asking must pass: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let calls = fs::read_to_string(&log).expect("stub log");
-    let unshallow = calls
+fn code_lines(source: &str) -> impl Iterator<Item = &str> {
+    source
         .lines()
-        .position(|l| l.contains("--unshallow"))
-        .expect("the guard deepens the checkout");
-    let ancestry = calls
-        .lines()
-        .position(|l| l.starts_with("merge-base"))
-        .expect("the guard asks about ancestry");
-    assert!(
-        unshallow < ancestry,
-        "ancestry must be asked only after the history is here: {calls}"
-    );
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
 }
 
 #[test]
-fn a_head_that_does_not_descend_from_protected_main_is_refused() {
-    let dir = temp_dir("descend");
-    let stub = git_stub(
-        &dir,
-        r#"case "$*" in
-  "rev-parse --is-shallow-repository") printf 'false\n'; exit 0 ;;
-  cat-file*) exit 0 ;;
-  "merge-base --is-ancestor"*) exit 1 ;;
-esac
-exit 1"#,
-    );
-    let out = run_guard(
-        Some(&stub),
-        &format!("proof_baseline_require_descendant {MAIN_COMMIT} HEAD"),
-    );
-    assert!(!out.status.success(), "a stale head must fail the lane");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("does not descend from protected main"),
-        "the refusal says what to do: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    // A commit id is all the guard will pass to git: no ref name, no option.
-    for bad in ["--upload-pack=touch /tmp/x", "origin/main", "1111111"] {
-        let out = run_guard(
-            Some(&stub),
-            &format!("proof_baseline_require_descendant {bad:?} HEAD"),
-        );
-        assert!(!out.status.success(), "{bad} is not a commit id");
-    }
-}
-
-#[test]
-fn a_baseline_commit_that_never_arrives_fails_closed() {
-    let dir = temp_dir("missing");
-    let stub = git_stub(
-        &dir,
-        r#"case "$*" in
-  "rev-parse --is-shallow-repository") printf 'false\n'; exit 0 ;;
-  cat-file*) exit 1 ;;
-  fetch*) exit 0 ;;
-esac
-exit 1"#,
-    );
-    let out = run_guard(
-        Some(&stub),
-        &format!("proof_baseline_require_descendant {MAIN_COMMIT} HEAD"),
-    );
-    assert!(
-        !out.status.success(),
-        "a fetch that brought nothing must not be taken for ancestry"
-    );
-    assert!(String::from_utf8_lossy(&out.stderr).contains("is not in this checkout"));
-}
-
-#[test]
-fn an_unclean_or_commitless_protected_clone_is_refused() {
-    let dir = temp_dir("clone");
-    let stub = git_stub(
-        &dir,
-        r#"case "$1" in
-  clone) mkdir -p "${@: -1}"; exit 0 ;;
-esac
-case "$*" in
-  *"rev-parse --verify HEAD^{commit}") printf '%s\n' "$STUB_HEAD"; exit 0 ;;
-  *"status --porcelain=v1 --untracked-files=all") printf '%s' "$STUB_DIRTY"; exit 0 ;;
-esac
-exit 1"#,
-    );
-    let ok = run_guard(
-        Some(&stub),
-        &format!(
-            "STUB_HEAD={MAIN_COMMIT} STUB_DIRTY= proof_baseline_clone https://forge.example/r.git {:?}",
-            dir.join("a").display().to_string()
-        ),
-    );
-    assert!(ok.status.success(), "a clean clone is the baseline");
-    assert_eq!(String::from_utf8_lossy(&ok.stdout).trim(), MAIN_COMMIT);
-
-    let dirty = run_guard(
-        Some(&stub),
-        &format!(
-            "STUB_HEAD={MAIN_COMMIT} STUB_DIRTY=' M agent/audit-policy.toml' proof_baseline_clone https://forge.example/r.git {:?}",
-            dir.join("b").display().to_string()
-        ),
-    );
-    assert!(
-        !dirty.status.success(),
-        "a dirty clone is not protected main"
-    );
-
-    let short = run_guard(
-        Some(&stub),
-        &format!(
-            "STUB_HEAD=1111111 STUB_DIRTY= proof_baseline_clone https://forge.example/r.git {:?}",
-            dir.join("c").display().to_string()
-        ),
-    );
-    assert!(
-        !short.status.success(),
-        "an abbreviated head is not a commit id"
-    );
-}
-
-#[test]
-fn the_head_may_not_edit_the_policy_that_judges_it() {
-    let dir = temp_dir("policy");
-    let candidate = dir.join("candidate.toml");
-    let protected = dir.join("protected.toml");
-    fs::write(&candidate, "minimum_score = 85\n").expect("write candidate");
-    fs::write(&protected, "minimum_score = 85\n").expect("write protected");
-    let same = run_guard(
-        None,
-        &format!(
-            "proof_baseline_require_policy_identity {:?} {:?}",
-            candidate.display().to_string(),
-            protected.display().to_string()
-        ),
-    );
-    assert!(same.status.success(), "the same policy judges both sides");
-
-    fs::write(&candidate, "minimum_score = 10\n").expect("rewrite candidate");
-    let drifted = run_guard(
-        None,
-        &format!(
-            "proof_baseline_require_policy_identity {:?} {:?}",
-            candidate.display().to_string(),
-            protected.display().to_string()
-        ),
-    );
-    assert!(
-        !drifted.status.success(),
-        "a head that lowers the floor must not be judged by its own policy"
-    );
-
-    let missing = run_guard(
-        None,
-        &format!(
-            "proof_baseline_require_policy_identity {:?} {:?}",
-            dir.join("absent.toml").display().to_string(),
-            protected.display().to_string()
-        ),
-    );
-    assert!(!missing.status.success(), "a missing policy fails closed");
-}
-
-#[test]
-fn the_lane_keeps_no_baseline_and_no_result_it_did_not_produce() {
+fn no_tool_result_is_discarded_or_stood_in_for() {
     let lane = lane_source();
-    assert!(
-        !lane.contains("|| true"),
-        "no tool in the lane may have its failure discarded"
-    );
+    let guards = fs::read_to_string(guards()).expect("guards");
+    for (name, source) in [("lane", &lane), ("guards", &guards)] {
+        for line in code_lines(source) {
+            for pattern in [
+                "|| true",
+                "|| :",
+                "|| exit 0",
+                "|| echo",
+                "set +e",
+                "|| printf '{",
+                "|| return 0",
+            ] {
+                assert!(
+                    !line.contains(pattern),
+                    "{name} discards a failure with {pattern:?}: {line}"
+                );
+            }
+        }
+    }
+    // Every file written into target/ by the lane itself is the summary of this
+    // run; tool reports are each tool's own output.
+    for line in code_lines(&lane) {
+        let writes =
+            line.contains("> target/") || line.contains(">target/") || line.contains("tee target/");
+        if writes {
+            assert_eq!(
+                line, "> target/jankurai/proof-evidence-summary.json",
+                "the lane synthesizes an artifact: {line}"
+            );
+        }
+    }
     assert!(
         !lane.contains("agent/baselines"),
-        "the ratchet baseline may not come from a file in the tree under test"
-    );
-    assert!(
-        lane.contains("proof_baseline_clone"),
-        "the baseline comes from the forge's copy of protected main"
-    );
-    assert!(
-        lane.contains("proof_baseline_require_policy_identity"),
-        "the lane checks that main's policy judges this head"
-    );
-    // Every write into target/ is a tool's own output or the summary of this
-    // run; a `printf > target/...` fallback would be a result nobody produced.
-    for line in lane.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || !line.contains("> target/") {
-            continue;
-        }
-        assert!(
-            line.starts_with("> \"target/jankurai/proof-evidence-summary.json\""),
-            "the lane synthesizes an artifact: {line}"
-        );
-    }
-    assert!(
-        lane.contains("migration-report.json") && lane.contains("liability_score <= $baseline"),
-        "the migration analysis result is gated, not merely written"
-    );
-    // The only commands the lane names without running are the two whose runner
-    // needs the jankurai crate in this workspace. Anything else named for the
-    // adoption detector and not run would be evidence of a tool that never ran.
-    let catalog: Vec<&str> = lane
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| line.starts_with("#   "))
-        .collect();
-    assert_eq!(
-        catalog,
-        vec![
-            "#   cargo run -p jankurai -- copy-code . --json target/jankurai/copy-code.json --md target/jankurai/copy-code.md",
-            "#   cargo test -p jankurai --test language_bad_behavior",
-        ],
-        "the lane names a command for adoption detection that it does not run"
-    );
-    assert!(
-        lane.contains("needs a clean checkout"),
-        "the lane refuses a tree that is not the head it reports on"
+        "no baseline from the tree under test"
     );
 }
 
 #[test]
-fn the_required_gate_runs_the_lane() {
-    let pr_ci = fs::read_to_string(repo_root().join("ops/ci/pr-ci.sh")).expect("pr-ci.sh");
-    let invocation = pr_ci
-        .lines()
-        .find(|line| line.trim() == "bash ops/ci/proof_evidence.sh")
-        .is_some();
+fn the_lane_takes_its_baseline_from_protected_main_and_judges_policy_amendments() {
+    let lane = lane_source();
+    for needle in [
+        "proof_require_origin",
+        "proof_require_history",
+        "refs/remotes/origin/main",
+        "proof_fork_point",
+        "proof_checkout_variant \"$repo_root\" refs/remotes/origin/main \"$base_commit\"",
+        "cmp -s -- \"$candidate_policy\" \"$protected_policy\"",
+        "proof_require_floor_kept",
+        "proof_require_migration",
+        "proof_effective_floor",
+        "needs a clean exact-head checkout",
+    ] {
+        assert!(lane.contains(needle), "the lane lost {needle:?}");
+    }
     assert!(
-        invocation,
+        !lane.contains("host_floor") && !lane.contains("floor=85"),
+        "the floor comes from the policy, not a constant in the lane"
+    );
+    assert!(
+        code_lines(&lane).all(|line| !line.contains("target/jankurai/repo-score")),
+        "the lane leaves score.sh's report alone and writes its ratchet elsewhere"
+    );
+}
+
+#[test]
+fn the_tool_adoption_catalog_is_retained_verbatim() {
+    // Jankurai credits adoption by finding catalog commands in CI text; losing
+    // one lowers this head's score against main's, which still has them all.
+    let lane = lane_source();
+    for command in [
+        "jankurai audit . --mode ratchet --baseline target/jankurai/accepted-baseline.json --json target/jankurai/repo-score.json --md target/jankurai/repo-score.md",
+        "jankurai proofbind verify . --changed-from origin/main",
+        "jankurai proofmark rust . --obligations target/jankurai/proofbind/obligations.json",
+        "cargo run -p jankurai -- copy-code . --json target/jankurai/copy-code.json --md target/jankurai/copy-code.md",
+        "jankurai security run . --out target/jankurai/security/evidence.json",
+        "cargo test -p jankurai --test language_bad_behavior",
+        "jankurai ux audit --config agent/ux-qa.toml --out target/jankurai/ux-qa.json",
+        "jankurai migrate . --analyze --json target/jankurai/migration-report.json",
+        "jankurai rust witness build .",
+        "jankurai vibe coverage --source agent/vibe-coverage.toml --tips tips/vibe_coding --json target/jankurai/vibe-coverage.json --md target/jankurai/vibe-coverage.md",
+        "jankurai coverage audit . --config agent/coverage-sources.toml --json target/jankurai/coverage/coverage-audit.json --md target/jankurai/coverage/coverage-audit.md",
+    ] {
+        assert!(
+            lane.lines().any(|line| line == format!("# {command}")),
+            "catalog command missing: {command}"
+        );
+    }
+}
+
+#[test]
+fn the_required_gate_runs_the_lane_once() {
+    let pr_ci = fs::read_to_string(repo_root().join("ops/ci/pr-ci.sh")).expect("pr-ci.sh");
+    assert!(
+        pr_ci
+            .lines()
+            .any(|line| line.trim() == "bash ops/ci/proof_evidence.sh"),
         "ops/ci/pr-ci.sh must run the evidence lane unconditionally"
     );
     let workflow =
         fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("ci.yml");
+    assert!(workflow.contains("bash ops/ci/pr-ci.sh"));
     assert!(
-        workflow.contains("bash ops/ci/proof_evidence.sh"),
-        "the mirrored workflow runs the same lane"
+        !workflow.contains("bash ops/ci/proof_evidence.sh"),
+        "the mirrored workflow runs the lane through pr-ci.sh only"
     );
-}
-
-#[test]
-fn stale_baseline_clones_are_swept_and_a_live_one_is_left_alone() {
-    let dir = temp_dir("sweep");
-    let parent = dir.join("target");
-    let stale = parent.join("jeryu-core-proof-baseline.aaaaaaaa");
-    let live = parent.join("jeryu-core-proof-baseline.bbbbbbbb");
-    let other = parent.join("debug");
-    for path in [&stale, &live, &other] {
-        fs::create_dir_all(path.join("main")).expect("clone dir");
-    }
-    // The clone a killed run left behind, by its age: `find -mmin +120`.
-    let aged = Command::new("touch")
-        .args(["-d", "4 hours ago"])
-        .arg(&stale)
-        .status()
-        .expect("age the stale clone");
-    assert!(aged.success(), "touch -d is needed to age the stale clone");
-
-    let swept = run_guard(
-        None,
-        &format!(
-            "proof_baseline_sweep_stale {:?} jeryu-core-proof-baseline",
-            parent.display().to_string()
-        ),
-    );
-    assert!(
-        swept.status.success(),
-        "sweeping is part of taking a baseline: {}",
-        String::from_utf8_lossy(&swept.stderr)
-    );
-    assert!(!stale.exists(), "a clone no run can still be using is removed");
-    assert!(
-        live.exists(),
-        "a clone touched within two hours may belong to a running lane"
-    );
-    assert!(other.exists(), "the sweep touches only its own clones");
-
-    // A parent directory that does not exist yet is not an error: the first run
-    // of the lane in a fresh checkout has no target/ to sweep.
-    let fresh = run_guard(
-        None,
-        &format!(
-            "proof_baseline_sweep_stale {:?} jeryu-core-proof-baseline",
-            dir.join("absent").display().to_string()
-        ),
-    );
-    assert!(fresh.status.success(), "a missing target/ is nothing to sweep");
-
-    let _ = fs::remove_dir_all(&dir);
 }
