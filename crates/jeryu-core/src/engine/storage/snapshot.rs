@@ -157,7 +157,7 @@ const OWNED_TABLES: &[OwnedTable] = &[
     },
     OwnedTable {
         name: "reviews",
-        columns: "id,repo_id,pull_number,author,state,body,submitted_at,head_sha,dismissed_review_id,head_patch_ids_json",
+        columns: "id,repo_id,pull_number,author,state,body,submitted_at,head_sha,dismissed_review_id,head_patch_ids_json,dismissal_authority",
         primary_key: "id",
     },
     OwnedTable {

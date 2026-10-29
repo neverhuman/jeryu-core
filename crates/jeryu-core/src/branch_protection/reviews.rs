@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::{BranchProtectionRule, PullRequest, Review, ReviewState};
+use crate::model::{BranchProtectionRule, DismissalAuthority, PullRequest, Review, ReviewState};
 
 /// Which heads a verdict can speak for.
 ///
@@ -58,19 +58,13 @@ fn reduce_reviews<'a>(
     // A targeted dismissal withdraws its verdict for good, at every head and
     // identity: a withdrawn approval never resurfaces because the identity
     // came back to the one it was written against.
-    // Core authorizes the actor when appending a targeted dismissal. Do not
-    // recheck authorship or current grants here: an administrator's recorded
-    // decision survives later access changes. Head-less rows withdraw nothing.
-    let withdrawn: std::collections::BTreeSet<_> = reviews
+    let withdrawn = withdrawn_verdicts(reviews);
+    // Separation of duties: an administrator who withdrew another reviewer's
+    // verdict on this pull request supplies no approval to it.
+    let dismissing_admins: std::collections::BTreeSet<_> = reviews
         .iter()
-        .filter(|review| review.state == ReviewState::Dismissed && review.head_sha.is_some())
-        .filter_map(|dismissal| {
-            let target = dismissal.dismissed_review_id?;
-            reviews
-                .iter()
-                .any(|review| review.id == target)
-                .then_some(target)
-        })
+        .filter(|review| is_cross_author_dismissal(reviews, review))
+        .map(|review| review.author.to_ascii_lowercase())
         .collect();
     let mut latest = BTreeMap::<&str, &Review>::new();
     for review in reviews.iter().filter(|review| {
@@ -86,6 +80,13 @@ fn reduce_reviews<'a>(
         // An invalid inherited self approval cannot erase an earlier rejection.
         if review.state == ReviewState::Approved
             && pr_author.is_some_and(|author| review.author.eq_ignore_ascii_case(author))
+        {
+            continue;
+        }
+        // Nor can an approval from an administrator who dismissed another
+        // reviewer's verdict here.
+        if review.state == ReviewState::Approved
+            && dismissing_admins.contains(&review.author.to_ascii_lowercase())
         {
             continue;
         }
@@ -135,4 +136,43 @@ pub fn effective_reviews_for_pull_request_with<'a>(
         reach,
         Some(&pr.author),
     )
+}
+
+/// A recorded administrator dismissal of a verdict written by someone else
+/// on the same pull request.
+pub(crate) fn is_cross_author_dismissal(reviews: &[Review], dismissal: &Review) -> bool {
+    dismissal.state == ReviewState::Dismissed
+        && dismissal.head_sha.is_some()
+        && dismissal.dismissal_authority == Some(DismissalAuthority::RepositoryAdmin)
+        && dismissal.dismissed_review_id.is_some_and(|target| {
+            reviews
+                .iter()
+                .any(|review| review.id == target && review.author != dismissal.author)
+        })
+}
+
+/// Verdicts a recorded targeted dismissal withdraws, for good, at every head.
+///
+/// Only a dismissal `dismiss_review` writes counts, recorded against a head:
+/// by the verdict's own author, or by someone else only when Core recorded
+/// the administrator authority it verified at write time. Current grants are
+/// not rechecked: the recorded decision survives later access changes. Any
+/// other cross-author or head-less row withdraws nothing.
+pub(crate) fn withdrawn_verdicts(reviews: &[Review]) -> std::collections::BTreeSet<uuid::Uuid> {
+    reviews
+        .iter()
+        .filter(|review| review.state == ReviewState::Dismissed && review.head_sha.is_some())
+        .filter_map(|dismissal| {
+            let target = dismissal.dismissed_review_id?;
+            reviews
+                .iter()
+                .any(|review| {
+                    review.id == target
+                        && (review.author == dismissal.author
+                            || dismissal.dismissal_authority
+                                == Some(DismissalAuthority::RepositoryAdmin))
+                })
+                .then_some(target)
+        })
+        .collect()
 }

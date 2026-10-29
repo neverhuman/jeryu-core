@@ -92,6 +92,10 @@ const ROLLBACKS: &[(&str, &str)] = &[
         "0025_password_recovery_tokens.sql",
         include_str!("../../../../../db/rollbacks/0025_password_recovery_tokens.sql"),
     ),
+    (
+        "0026_review_dismissal_authority.sql",
+        include_str!("../../../../../db/rollbacks/0026_review_dismissal_authority.sql"),
+    ),
 ];
 
 fn db_dir(kind: &str) -> PathBuf {
@@ -254,6 +258,11 @@ fn rollback_scripts_execute_and_roll_forward() {
             "0018_waitlist_signups.sql" => assert!(!table_exists(&conn, "waitlist_signups")),
             "0025_password_recovery_tokens.sql" => {
                 assert!(!table_exists(&conn, "password_recovery_tokens"));
+            }
+            "0026_review_dismissal_authority.sql" => {
+                // Dropping the recorded authority is the documented effect:
+                // an administrator dismissal withdraws nothing again.
+                assert!(!column_exists(&conn, "reviews", "dismissal_authority").expect("inspect"));
             }
             "0024_diff_identity.sql" => {
                 // Dropping the recorded diff identities is the documented

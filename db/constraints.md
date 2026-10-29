@@ -346,8 +346,10 @@ verdict removed by a new immutable `DISMISSED` event; its body stores the reason
 Existing rows remain unchanged with a NULL target. The application guards the
 column addition with `PRAGMA table_info(reviews)` for repeated opens.
 
-Core validates the same repository, PR, current head, owning actor and effective
-explicit verdict while holding its state write guard. It rejects blank reasons,
+Core validates the same repository, PR, current head, actor authority and
+effective explicit verdict while holding its state write guard. The actor is
+the verdict's own author, or an administrator under the rules in
+`docs/review-semantics.md`; 0026 records that authority on the row. It rejects blank reasons,
 generic target-less dismissal submissions and author self approvals. The shared
 PR selector excludes inherited self approvals from required-count and CODEOWNERS
 qualification. A targeted dismissal clears only its named current verdict and
@@ -596,3 +598,23 @@ Rollback/backfill:
 - No backfill; the table starts empty.
 - `db/rollbacks/0025_password_recovery_tokens.sql` drops the table. That ends
   outstanding recovery links only; people ask for a new one.
+
+## 0026 Review dismissal authority
+
+The additive nullable `reviews.dismissal_authority` records the authority Core
+verified when it wrote a dismissal of another reviewer's verdict. The only value
+is `repository_admin` (a column CHECK); a reviewer's own dismissal and every
+other row stay NULL. Existing rows are unchanged and there is no backfill. The
+application guards the addition with `PRAGMA table_info(reviews)`.
+
+Branch protection honors a `DISMISSED` row whose author differs from its
+target's author only when this column records `repository_admin`, so a row from
+an older or foreign writer against the same database withdraws nothing. It also
+ignores any approval from an actor who holds such a dismissal on the PR. SQLite
+still provides no row-level security: the column records what Core verified, it
+does not authenticate the writer. The matching `pull.review_dismissal` receipts
+live in `forge_audit_log`.
+
+An older writer's full-state rewrite drops the column's values, which reinstates
+the dismissed verdicts: stricter, never looser. `db/rollbacks/0026_review_dismissal_authority.sql`
+drops the column with the same effect.

@@ -7,12 +7,34 @@ approvals cannot satisfy required approval counts or CODEOWNERS or erase an
 earlier rejection.
 
 `ForgeCore::dismiss_review` requires a target UUID, full lowercase SHA-1 current
-head and nonempty reason. Only the target's own reviewer may dismiss the current
-explicit verdict.
+head and nonempty reason. The target's own reviewer may always dismiss their
+current explicit verdict. Dismissing another reviewer's verdict is an
+administrator decision bound by the same rules as an audited merge decision
+(below):
+
+- the actor is an active repository administrator (the global admin role or an
+  explicit Admin grant; owning the namespace alone is not), not a team bot and
+  not the pull request author;
+- the base branch rule opts in with `allow_merge_override=true` and does not
+  set `enforce_admins`. With no rule, without the opt-in, or with
+  administrators enforced, only the verdict's own reviewer may dismiss it;
+- separation of duties: the administrator has no standing approval on the PR,
+  and after the dismissal cannot approve it. Branch protection also ignores
+  any approval from an administrator who dismissed another reviewer's verdict
+  on that PR, so one person cannot clear a hold and supply the approval;
+- the core has durable storage. A `pull.review_dismissal` audit receipt is
+  recorded as `requested` before the row is written and `completed` after; a
+  refused attempt on another reviewer's verdict records `failed`.
+
 The operation appends a `DISMISSED` event with `dismissed_review_id` and the reason
-in `body`. It never changes the target row. Superseded, already-dismissed,
-wrong-head and other-actor targets are refused. Generic `event=DISMISSED` review
-creation is unsupported. Later explicit decisions can establish a new verdict;
+in `body`. For an administrator dismissal it also records
+`dismissal_authority = repository_admin` (migration 0026). Branch protection
+honors a dismissal written by someone other than the verdict's author only with
+that recorded authority; current grants are not rechecked, so the decision
+survives later access changes, while a cross-author row without it withdraws
+nothing. It never changes the target row. Superseded, already-dismissed,
+wrong-head and unauthorized other-actor targets are refused. Generic
+`event=DISMISSED` review creation is unsupported. Later explicit decisions can establish a new verdict;
 dismissal never recovers an older verdict. Historical target-less dismissals
 suppress prior approvals without erasing rejections or inferring targets.
 
@@ -43,10 +65,17 @@ never a submitted actor login.
 
 The new source contract `DismissPullReviewRequest` supplies `expected_head_sha`
 and `reason`; the target UUID is a route parameter. Add authenticated native
-review-history GET and targeted self-dismissal POST routes using this Core
+review-history GET and targeted dismissal POST routes using this Core
 operation. Required route regressions cover 401, 403, malformed bodies, stale
-heads, no administrator override, unchanged history on refusal and matching
-posture/history after success. Durable history sequence and complete authority
+heads, unchanged history on refusal and matching posture/history after success.
+For another reviewer's verdict they also cover: a repository administrator on
+an opted-in branch succeeds; the 403 refusals for a non-administrator, a team
+bot, the PR author, a branch without `allow_merge_override`, a branch with
+`enforce_admins`, and an administrator with a standing approval; and a 403 on
+that administrator's later approval. History must show both the original
+verdict and the dismissal's actor and reason; `PullRequestReview` does not
+carry the recorded authority yet, so a consumer that needs it adds the field
+in the same cut. Durable history sequence and complete authority
 bindings are still required by the broader program.
 
 Generate contracts from Rust with
@@ -61,7 +90,9 @@ Run in the allocated CI window with `CARGO_BUILD_JOBS=2`:
 
 ```sh
 cargo test --locked -p jeryu-core --test review_semantics
+cargo test --locked -p jeryu-core --test admin_review_dismissal
 cargo test --locked -p jeryu-core --lib migration_0016_preserves_unbound_dismissals
+cargo test --locked -p jeryu-core --lib migration_0026_leaves_existing_reviews_without_a_dismissal_authority
 cargo test --locked -p jeryu-core
 cargo test --locked -p jeryu-readmodel
 cargo clippy --locked --workspace --all-targets -- -D warnings

@@ -1,0 +1,27 @@
+# jankurai:migration v1
+id = "0026_review_dismissal_authority"
+owner = "forge-api"
+reviewer = "forge-api"
+change_type = "expand"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "expand"
+app_compatibility = "new_app_old_db"
+requires = ["0025_password_recovery_tokens"]
+rollback = "db/rollbacks/0026_review_dismissal_authority.sql"
+backfill = "none; every existing row keeps NULL, which is how a reviewer's own dismissal and every verdict are recorded"
+data_classification = "internal"
+tenant_impact = "Adds the authority Core verified for an administrator's dismissal of another reviewer's verdict. An older writer records none, so its cross-author dismissal rows withdraw nothing."
+tests = [
+  "db-migration-analyze",
+  "migration_0026_leaves_existing_reviews_without_a_dismissal_authority",
+  "administrator_dismissal_survives_reopen_and_later_access_loss",
+]
+approval = "forge-api"
+backup = "VACUUM INTO copy of forge.sqlite before apply"
+restore = "restore that snapshot; no data is rewritten, so recovering forward is also safe"
+irreversible = false
+verify = "reviews has dismissal_authority and every existing row is NULL; COUNT(*) of reviews unchanged"

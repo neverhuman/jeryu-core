@@ -696,7 +696,7 @@ pub(super) fn load_reviews(conn: &Connection, state: &mut State) -> Result<()> {
             r#"
             SELECT r.owner, r.name, v.id, v.pull_number, v.author, v.state,
                    v.body, v.submitted_at, v.head_sha, v.dismissed_review_id,
-                   v.head_patch_ids_json
+                   v.head_patch_ids_json, v.dismissal_authority
             FROM reviews v
             JOIN repositories r ON r.id = v.repo_id
             ORDER BY v.rowid
@@ -724,6 +724,7 @@ pub(super) fn load_reviews(conn: &Connection, state: &mut State) -> Result<()> {
                 .map_err(storage_error)?
                 .map(parse_uuid)
                 .transpose()?,
+            dismissal_authority: from_optional_text(row.get(11).map_err(storage_error)?)?,
             submitted_at: parse_time(row.get(7).map_err(storage_error)?)?,
         };
         state

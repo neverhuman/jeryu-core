@@ -1,0 +1,23 @@
+# jankurai:migration v1
+id = "0026_review_dismissal_authority_rollback"
+owner = "forge-api"
+reviewer = "forge-api"
+approval = "forge-api"
+change_type = "contract"
+safety = "online"
+transaction = "required"
+lock_timeout = "5s"
+statement_timeout = "60s"
+estimated_rows = 0
+deploy_phase = "contract"
+app_compatibility = "old_app_new_db"
+rollback = "db/migrations/0026_review_dismissal_authority.sql"
+roll_forward = "db/migrations/0026_review_dismissal_authority.sql"
+backup = "VACUUM INTO copy of forge.sqlite before apply"
+restore = "restore that snapshot to keep administrator dismissals in force"
+irreversible = false
+backfill = "none; drops the recorded dismissal authority only"
+data_classification = "internal"
+tenant_impact = "Administrator dismissals of another reviewer's verdict stop withdrawing it, which is stricter, never looser."
+verify = "PRAGMA table_info(reviews) has no dismissal_authority; COUNT(*) of reviews unchanged"
+tests = ["db-migration-analyze", "migration_0026_leaves_existing_reviews_without_a_dismissal_authority"]

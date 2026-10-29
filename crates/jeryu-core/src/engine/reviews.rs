@@ -1,8 +1,25 @@
 //! Pull request reviews and review comments.
 //!
-//! A verdict author or an active repository administrator may dismiss a current
-//! verdict. Core checks repository access under the same lock as the head and
-//! appends a targeted dismissal, preserving the verdict and its comments.
+//! A reviewer may always dismiss their own current verdict. Dismissing another
+//! reviewer's verdict is an administrator decision bound by the same rules as
+//! a merge override (`merge_overrides.rs`), checked under the same lock as the
+//! head:
+//!
+//! - the actor is an active repository administrator (global admin role or an
+//!   explicit Admin grant), never a team bot and never the pull request author;
+//! - the base branch has a protection rule that opts in with
+//!   `allow_merge_override` and does not set `enforce_admins`;
+//! - separation of duties: the actor has no standing approval on the pull
+//!   request, and after the dismissal the actor's approvals never count there
+//!   (Core refuses new ones and branch protection ignores old ones);
+//! - the core has durable storage: a `pull.review_dismissal` audit receipt is
+//!   recorded as `requested` before the row is written, `completed` after, and
+//!   `failed` for a refused attempt.
+//!
+//! Core records `DismissalAuthority::RepositoryAdmin` on such a row, and branch
+//! protection honors a cross-author dismissal only with it. The original
+//! verdict and its comments stay in history.
+//!
 //! The API edge must authenticate the actor (never accept an actor from the
 //! request body), enforce credential scopes and repository access, and expose
 //! `DismissReviewRequest` with a target review, exact head SHA and non-empty
@@ -17,6 +34,7 @@ use uuid::Uuid;
 use super::{ForgeCore, apply_evaluation, emit_event_locked, evaluate_locked};
 use crate::branch_protection::{
     VerdictReach, effective_reviews_for_head, effective_reviews_for_pull_request_with,
+    is_cross_author_dismissal, withdrawn_verdicts,
 };
 use crate::errors::{ForgeError, Result};
 use crate::model::*;
@@ -64,19 +82,51 @@ impl ForgeCore {
                 "review dismissal requires a full lowercase SHA-1 head".to_string(),
             ));
         }
-        self.record_review(
+        let target_id = request.review_id;
+        let result = self.record_review(
             owner,
             repo,
             number,
             actor,
             CreateReviewRequest {
-                body: Some(request.reason),
+                body: Some(request.reason.clone()),
                 event: ReviewState::Dismissed,
                 comments: Vec::new(),
                 expected_head_sha: Some(request.expected_head_sha),
             },
-            Some(request.review_id),
-        )
+            Some(target_id),
+        );
+        if let Err(error) = &result {
+            // A refused attempt on another reviewer's verdict is the probe
+            // worth detecting, recorded like a refused merge override. The
+            // receipt never masks the refusal.
+            let target_author = self
+                .state
+                .read()
+                .reviews
+                .get(&(owner.to_string(), repo.to_string(), number))
+                .and_then(|reviews| reviews.iter().find(|review| review.id == target_id))
+                .map(|review| review.author.clone());
+            if target_author.is_some_and(|target_author| target_author != actor) {
+                let _ = self.append_audit_as(
+                    if actor.trim().is_empty() {
+                        "unknown"
+                    } else {
+                        actor
+                    },
+                    DISMISSAL_AUDIT_ACTION,
+                    &format!("{owner}/{repo}#{number}"),
+                    "failed",
+                    json!({
+                        "pr_number": number,
+                        "review_id": target_id,
+                        "reason": request.reason.trim(),
+                        "error": error.to_string(),
+                    }),
+                );
+            }
+        }
+        result
     }
 
     fn record_review(
@@ -100,6 +150,19 @@ impl ForgeCore {
                         "pull request authors cannot approve their own changes".to_string(),
                     ));
                 }
+                if request.event == ReviewState::Approved
+                    && state.reviews.get(&key).is_some_and(|reviews| {
+                        reviews.iter().any(|review| {
+                            review.author.eq_ignore_ascii_case(author)
+                                && is_cross_author_dismissal(reviews, review)
+                        })
+                    })
+                {
+                    return Err(ForgeError::Forbidden(
+                        "an administrator who dismissed another reviewer's verdict cannot approve this pull request"
+                            .to_string(),
+                    ));
+                }
                 if request
                     .expected_head_sha
                     .as_deref()
@@ -117,6 +180,7 @@ impl ForgeCore {
                 )));
             }
         };
+        let mut dismissal_authority = None;
         if let Some(target_id) = dismissed_review_id {
             let reviews = state.reviews.get(&key).map(Vec::as_slice).unwrap_or(&[]);
             let target = reviews
@@ -125,14 +189,14 @@ impl ForgeCore {
                 .ok_or_else(|| {
                     ForgeError::NotFound(format!("review {target_id} in {owner}/{repo}#{number}"))
                 })?;
-            if target.author != author
-                && !super::auth::repo_access_for_locked(&state, author, owner, repo)
-                    .is_some_and(RepoAccessLevel::allows_admin)
-            {
-                return Err(ForgeError::Forbidden(
-                    "dismissing another reviewer requires repository administrator access"
-                        .to_string(),
-                ));
+            if target.author != author {
+                authorize_cross_author_dismissal(&state, &pr_now, reviews, author)?;
+                if self.storage.is_none() {
+                    return Err(ForgeError::Validation(
+                        "dismissing another reviewer requires durable audit storage".to_string(),
+                    ));
+                }
+                dismissal_authority = Some(DismissalAuthority::RepositoryAdmin);
             }
             if !matches!(
                 target.state,
@@ -162,6 +226,31 @@ impl ForgeCore {
                 ));
             }
         }
+        let review_id = Uuid::new_v4();
+        let audit = dismissal_authority.map(|_| {
+            (
+                format!("{owner}/{repo}#{number}"),
+                json!({
+                    "pr_number": number,
+                    "dismissal_id": review_id,
+                    "review_id": dismissed_review_id,
+                    "head_sha": head_sha,
+                    "reason": request.body.as_deref().map(str::trim),
+                    "authority": dismissal_authority,
+                }),
+            )
+        });
+        if let Some((subject, detail)) = &audit {
+            // Bound before the row exists: no administrator dismissal is
+            // written without its receipt.
+            self.append_audit_as(
+                author,
+                DISMISSAL_AUDIT_ACTION,
+                subject,
+                "requested",
+                detail.clone(),
+            )?;
+        }
         let previous = state.clone();
         // Preserve the existing trusted-caller profile behavior in the same
         // transaction as the review. A profile is not an authenticated account.
@@ -175,7 +264,6 @@ impl ForgeCore {
                 email: None,
                 created_at: Utc::now(),
             });
-        let review_id = Uuid::new_v4();
         let review = Review {
             id: review_id,
             owner: owner.to_string(),
@@ -187,6 +275,7 @@ impl ForgeCore {
             head_sha: Some(head_sha),
             head_patch_ids,
             dismissed_review_id,
+            dismissal_authority,
             submitted_at: Utc::now(),
         };
         let comments: Vec<_> = request
@@ -235,6 +324,18 @@ impl ForgeCore {
             event_payload("submitted", "review", json!(review.clone())),
         );
         self.persist_after_mutation(&mut state, previous)?;
+        drop(state);
+        if let Some((subject, detail)) = audit {
+            // The row is durable; a missing `completed` beside its `requested`
+            // receipt is visible in the trail, so it does not undo the write.
+            let _ = self.append_audit_as(
+                author,
+                DISMISSAL_AUDIT_ACTION,
+                &subject,
+                "completed",
+                detail,
+            );
+        }
         Ok(review)
     }
 
@@ -275,4 +376,62 @@ impl ForgeCore {
             },
         )
     }
+}
+
+/// Audit action for an administrator's dismissal of another reviewer's verdict.
+const DISMISSAL_AUDIT_ACTION: &str = "pull.review_dismissal";
+
+/// The rules for withdrawing another reviewer's verdict: the same binding as
+/// a merge override (`merge_overrides::validate_override`). An administrator
+/// who may not override the merge gate may not clear its review holds either.
+fn authorize_cross_author_dismissal(
+    state: &super::State,
+    pr: &PullRequest,
+    reviews: &[Review],
+    actor: &str,
+) -> Result<()> {
+    // A human administrator's decision; a team bot's acting login never takes
+    // one, even where its grants would allow repository admin.
+    let admin = parse_team_bot_login(actor).is_none()
+        && super::auth::repo_access_for_locked(state, actor, &pr.owner, &pr.repo)
+            .is_some_and(RepoAccessLevel::allows_admin);
+    if !admin {
+        return Err(ForgeError::Forbidden(
+            "dismissing another reviewer requires an active repository administrator".to_string(),
+        ));
+    }
+    let protection = state
+        .branch_protections
+        .get(&(pr.owner.clone(), pr.repo.clone(), pr.base.ref_name.clone()))
+        .filter(|rule| rule.allow_merge_override);
+    let Some(protection) = protection else {
+        return Err(ForgeError::Forbidden(
+            "dismissing another reviewer requires explicit allow_merge_override=true".to_string(),
+        ));
+    };
+    if protection.enforce_admins {
+        return Err(ForgeError::Forbidden(
+            "dismissing another reviewer is unavailable while the branch enforces administrators"
+                .to_string(),
+        ));
+    }
+    if pr.author.eq_ignore_ascii_case(actor) {
+        return Err(ForgeError::Forbidden(
+            "a pull request author cannot dismiss another reviewer's verdict on it".to_string(),
+        ));
+    }
+    // Separation of duties: the deciding administrator may not also be a
+    // reviewer whose approval stands on this pull request, at any head.
+    let withdrawn = withdrawn_verdicts(reviews);
+    if reviews.iter().any(|review| {
+        review.state == ReviewState::Approved
+            && review.author.eq_ignore_ascii_case(actor)
+            && !withdrawn.contains(&review.id)
+    }) {
+        return Err(ForgeError::Forbidden(
+            "an administrator with a standing approval cannot dismiss another reviewer's verdict"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }

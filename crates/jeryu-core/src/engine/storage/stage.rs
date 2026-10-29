@@ -368,8 +368,9 @@ pub(super) fn stage_state(conn: &Connection, state: &State) -> Result<()> {
                 r#"
                 INSERT INTO temp.reviews (
                   id, repo_id, pull_number, author, state, body, submitted_at,
-                  head_sha, dismissed_review_id, head_patch_ids_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                  head_sha, dismissed_review_id, head_patch_ids_json,
+                  dismissal_authority
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                 "#,
                 params![
                     review.id.to_string(),
@@ -382,6 +383,7 @@ pub(super) fn stage_state(conn: &Connection, state: &State) -> Result<()> {
                     review.head_sha,
                     review.dismissed_review_id.map(|id| id.to_string()),
                     json(&review.head_patch_ids)?,
+                    review.dismissal_authority.as_ref().map(text).transpose()?,
                 ],
             )
             .map_err(storage_error)?;

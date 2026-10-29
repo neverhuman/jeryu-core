@@ -186,6 +186,16 @@ pub enum ReviewState {
     Dismissed,
 }
 
+/// Why Core accepted a dismissal written by someone other than the verdict's
+/// author. Recorded on the dismissal row at write time.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DismissalAuthority {
+    /// An active repository administrator on a branch that opts in with
+    /// `allow_merge_override` and does not enforce administrators.
+    RepositoryAdmin,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Review {
     pub id: Uuid,
@@ -209,6 +219,13 @@ pub struct Review {
     /// target-less dismissals remain unbound audit evidence.
     #[serde(default)]
     pub dismissed_review_id: Option<Uuid>,
+    /// The authority Core verified when it wrote a dismissal of *another*
+    /// reviewer's verdict. `None` on every other row, including a reviewer's
+    /// own dismissal. Branch protection honors a cross-author dismissal only
+    /// when this records [`DismissalAuthority::RepositoryAdmin`], so a row
+    /// written by an older or foreign writer withdraws nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismissal_authority: Option<DismissalAuthority>,
     pub submitted_at: DateTime<Utc>,
 }
 

@@ -61,6 +61,8 @@ const MIGRATION_0023: &str = include_str!("../../../../../db/migrations/0023_tea
 const MIGRATION_0024: &str = include_str!("../../../../../db/migrations/0024_diff_identity.sql");
 const MIGRATION_0025: &str =
     include_str!("../../../../../db/migrations/0025_password_recovery_tokens.sql");
+const MIGRATION_0026: &str =
+    include_str!("../../../../../db/migrations/0026_review_dismissal_authority.sql");
 /// The 0017 constraint 0021 removes. Its presence in `sqlite_master` is the
 /// guard: 0017 re-runs `CREATE TABLE IF NOT EXISTS bots` on every open, so a
 /// fresh database gets the old shape first and 0021 rebuilds it once.
@@ -74,7 +76,14 @@ pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     apply_migration_0024(conn)?;
     // 0025 is pure CREATE TABLE/INDEX IF NOT EXISTS: idempotent, no guard.
     conn.execute_batch(MIGRATION_0025).map_err(storage_error)?;
+    apply_migration_0026(conn)?;
     Ok(())
+}
+
+/// 0026 records the authority behind a cross-author dismissal. Guarded by the
+/// column it adds; every existing row stays NULL.
+fn apply_migration_0026(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "reviews", "dismissal_authority", MIGRATION_0026)
 }
 
 /// 0024 adds the recorded diff identity to pull requests and reviews, in one
@@ -652,6 +661,37 @@ mod tests {
         let key = ("alice".to_string(), "demo".to_string(), 1);
         assert!(state.pulls[&key].head_patch_ids.is_empty());
         assert!(state.reviews[&key][0].head_patch_ids.is_empty());
+    }
+
+    /// 0026 adds the dismissal authority without inventing one: every
+    /// existing row stays NULL, so no recorded dismissal changes meaning.
+    #[test]
+    fn migration_0026_leaves_existing_reviews_without_a_dismissal_authority() {
+        let conn = historical_review_connection();
+        apply_migrations(&conn).expect("apply through 0026");
+        apply_migrations(&conn).expect("reapply idempotently");
+        assert!(column_exists(&conn, "reviews", "dismissal_authority").unwrap());
+        let reviews: (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(dismissal_authority) FROM reviews",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(reviews.0 > 0, "reviews fixture must contain rows");
+        assert_eq!(reviews.1, 0, "dismissal authorities remain NULL");
+        assert!(
+            conn.execute("UPDATE reviews SET dismissal_authority = 'owner'", [])
+                .is_err(),
+            "dismissal_authority is closed to the recorded authorities"
+        );
+        let state = super::super::load_state(&conn).unwrap();
+        let key = ("alice".to_string(), "demo".to_string(), 1);
+        assert!(
+            state.reviews[&key]
+                .iter()
+                .all(|review| review.dismissal_authority.is_none())
+        );
     }
 
     #[test]

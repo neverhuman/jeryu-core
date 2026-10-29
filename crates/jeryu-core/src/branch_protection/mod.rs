@@ -10,6 +10,7 @@ pub use reviews::{
     VerdictReach, effective_reviews_for_head, effective_reviews_for_pull_request,
     effective_reviews_for_pull_request_with,
 };
+pub(crate) use reviews::{is_cross_author_dismissal, withdrawn_verdicts};
 pub use types::{
     BranchProtectionEvaluation, EvaluationContext, MergeBlocker, RefOperation, RefOperationBlocker,
     RefOperationEvaluation,
