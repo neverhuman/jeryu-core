@@ -107,3 +107,19 @@ proof_baseline_require_policy_identity() {
     return 1
   fi
 }
+
+# The baseline clone lives under this repository's own output directory, which
+# nothing else empties, so a run killed before its cleanup trap fires leaves a
+# copy of main behind and every later run leaves another. Sweep those before
+# taking a new one, and only the ones no longer in use: a directory touched in
+# the last two hours may belong to a run still going, so it is left alone.
+# Failing to sweep fails the lane rather than letting the pile grow unseen.
+proof_baseline_sweep_stale() {
+  local dir="$1" prefix="$2"
+  [[ -d "$dir" ]] || return 0
+  if ! find "$dir" -maxdepth 1 -type d -name "${prefix}.*" -mmin +120 \
+      -prune -exec rm -rf -- '{}' +; then
+    printf 'cannot sweep stale baseline clones under %s\n' "$dir" >&2
+    return 1
+  fi
+}

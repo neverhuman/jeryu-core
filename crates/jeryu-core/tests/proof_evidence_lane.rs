@@ -373,3 +373,54 @@ fn the_required_gate_runs_the_lane() {
         "the mirrored workflow runs the same lane"
     );
 }
+
+#[test]
+fn stale_baseline_clones_are_swept_and_a_live_one_is_left_alone() {
+    let dir = temp_dir("sweep");
+    let parent = dir.join("target");
+    let stale = parent.join("jeryu-core-proof-baseline.aaaaaaaa");
+    let live = parent.join("jeryu-core-proof-baseline.bbbbbbbb");
+    let other = parent.join("debug");
+    for path in [&stale, &live, &other] {
+        fs::create_dir_all(path.join("main")).expect("clone dir");
+    }
+    // The clone a killed run left behind, by its age: `find -mmin +120`.
+    let aged = Command::new("touch")
+        .args(["-d", "4 hours ago"])
+        .arg(&stale)
+        .status()
+        .expect("age the stale clone");
+    assert!(aged.success(), "touch -d is needed to age the stale clone");
+
+    let swept = run_guard(
+        None,
+        &format!(
+            "proof_baseline_sweep_stale {:?} jeryu-core-proof-baseline",
+            parent.display().to_string()
+        ),
+    );
+    assert!(
+        swept.status.success(),
+        "sweeping is part of taking a baseline: {}",
+        String::from_utf8_lossy(&swept.stderr)
+    );
+    assert!(!stale.exists(), "a clone no run can still be using is removed");
+    assert!(
+        live.exists(),
+        "a clone touched within two hours may belong to a running lane"
+    );
+    assert!(other.exists(), "the sweep touches only its own clones");
+
+    // A parent directory that does not exist yet is not an error: the first run
+    // of the lane in a fresh checkout has no target/ to sweep.
+    let fresh = run_guard(
+        None,
+        &format!(
+            "proof_baseline_sweep_stale {:?} jeryu-core-proof-baseline",
+            dir.join("absent").display().to_string()
+        ),
+    );
+    assert!(fresh.status.success(), "a missing target/ is nothing to sweep");
+
+    let _ = fs::remove_dir_all(&dir);
+}

@@ -45,6 +45,7 @@ head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
 head_short="${head_commit:0:7}"
 
 mkdir -p target
+proof_baseline_sweep_stale "$repo_root/target" jeryu-core-proof-baseline
 baseline_parent="$(mktemp -d "$repo_root/target/jeryu-core-proof-baseline.XXXXXXXX")"
 cleanup_baseline() {
   case "$baseline_parent" in
