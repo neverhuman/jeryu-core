@@ -104,4 +104,7 @@ elif [ "$coverage_rc" -ne 0 ]; then
   echo "[pr-ci] coverage ratchet failed (exit $coverage_rc)" >&2
   exit "$coverage_rc"
 fi
+echo "[pr-ci] proof evidence" >&2
+bash ops/ci/proof_evidence.sh
+
 echo "[pr-ci] jeryu-core OK" >&2

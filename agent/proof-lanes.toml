@@ -17,3 +17,7 @@ blocks_merge = true
 [lanes.artifact-support]
 required = ["just artifact-support"]
 blocks_merge = false
+
+[lanes.proof-evidence]
+required = ["bash ops/ci/proof_evidence.sh"]
+blocks_merge = true
