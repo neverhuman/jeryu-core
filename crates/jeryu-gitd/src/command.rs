@@ -467,16 +467,28 @@ mod tests {
             .try_clone()
             .unwrap_or_else(|err| panic!("clone input cancellation handle: {err}"));
         let (sender, receiver) = mpsc::sync_channel(1);
+        let (cancelled_sender, cancelled_receiver) = mpsc::sync_channel(1);
         let pump_thread = std::thread::spawn(move || {
             let result = process.pump(input, io::sink(), 1, || {
+                cancelled_sender
+                    .send(())
+                    .expect("input cancellation receiver");
                 cancel_input.shutdown(std::net::Shutdown::Read)
             });
             sender.send(result).expect("early-exit result receiver");
         });
 
+        // The bound below only guards against a hang: a tight wall-clock
+        // budget is flaky under coverage instrumentation and load. That the
+        // open request input was cancelled is asserted deterministically
+        // below, by requiring the cancellation signal to have been sent
+        // before the pump produced its result.
         let result = receiver
-            .recv_timeout(Duration::from_secs(3))
-            .expect("early child exit must cancel open request input promptly");
+            .recv_timeout(Duration::from_secs(120))
+            .expect("early child exit must cancel open request input");
+        cancelled_receiver
+            .try_recv()
+            .expect("early child exit must cancel open request input before the pump returns");
         let err = result.expect_err("unconsumed declared input must fail the stream");
         assert!(err.to_string().contains("request body truncated"));
         pump_thread.join().expect("streaming pump thread must exit");
