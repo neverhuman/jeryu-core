@@ -50,6 +50,7 @@ fn fixture() -> ForgeCore {
 
 fn owners(names: &[&str]) -> BotReach {
     BotReach::Owners {
+        refs: None,
         owners: names.iter().map(|name| (*name).to_string()).collect(),
     }
 }
@@ -197,6 +198,7 @@ fn owners_reach_is_normalized_and_validated_at_enrollment() {
             "Twenty",
             BotKind::AGENT,
             BotReach::Owners {
+                refs: None,
                 owners: twenty_distinct
             },
         )
@@ -207,7 +209,10 @@ fn owners_reach_is_normalized_and_validated_at_enrollment() {
         "m",
         "M",
         BotKind::AGENT,
-        BotReach::Owners { owners: many },
+        BotReach::Owners {
+            refs: None,
+            owners: many,
+        },
     ));
     assert!(too_many.starts_with(code), "{too_many}");
     let unknown = validation(core.enroll_bot(
@@ -248,6 +253,7 @@ fn repository_roster_lists_an_owners_bot_only_where_it_reaches() {
     assert_eq!(
         roster[0].reach,
         BotReach::Repositories {
+            refs: None,
             repos: vec![BotRepoRef {
                 owner: "acme".to_string(),
                 name: "widgets".to_string(),

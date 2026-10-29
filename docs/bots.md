@@ -65,3 +65,36 @@ An organization's bot is a team bot (`engine/team_bots.rs`):
   login may still steward the bot. Leaving the steward team, or a disabled or
   locked account, revokes the tokens that person issued; a password change
   does not. `revoke_issued_team_bot_tokens` revokes all of one person's at once.
+
+## Ref Reach
+
+Every reach mode accepts an optional `refs` allowlist. For example:
+
+```json
+{"mode":"repositories","repos":[{"owner":"jeryu","name":"jeryu-core"}],"refs":["refs/tags/*-split.*","refs/heads/preserve/hosted-cargo/*","refs/heads/releasebot/*"]}
+```
+
+Omitting `refs` (or sending null) preserves existing behavior and omits the
+field when serialized. An empty list denies every ref write. A list narrows
+writes, never reads or repository grants. Core validates it during enrollment
+for both account and team bots. It persists with the reach, including across
+SQLite reopen.
+
+Patterns must be full `refs/tags/` or `refs/heads/` names following Git ref
+syntax, except that `*` matches any sequence of characters, including slashes.
+Matching is case sensitive and covers the entire ref. No other glob syntax is
+accepted. There may be at most 100 patterns, each at most 1024 bytes. Invalid
+lists return `invalid_reach_refs`. Exact refs are allowed too.
+
+Edges should call `ForgeCore::authorize_bot_ref_write(&BotCall, full_ref)` for
+each destination of a create, update, delete, or merge. This checks live
+credentials, write grants (even if the call's effect says read), repository and
+task reach, then the ref allowlist. A ref refusal is audited as
+`bot.authorize` with code `ref_not_granted`. Supply the actual destination
+ref and trusted task context, never a client assertion about another ref.
+Existing repository/task refusal codes remain unchanged.
+
+The general `authorize_bot` method has no destination ref and does not enforce
+this additional limit. Deploy's receive-pack and REST/v3/MCP route integration
+is a separate release step after consuming the core split tag. Until those
+edges call the new helper, configuring a list alone does not enforce it there.

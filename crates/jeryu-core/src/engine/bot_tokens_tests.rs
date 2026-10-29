@@ -12,7 +12,13 @@ fn fixture() -> (ForgeCore, BotEnrollment) {
     let core = ForgeCore::new();
     seed(&core);
     let bot = core
-        .enroll_bot("alice", "atlas", "Atlas", BotKind::GROK, BotReach::General)
+        .enroll_bot(
+            "alice",
+            "atlas",
+            "Atlas",
+            BotKind::GROK,
+            BotReach::General { refs: None },
+        )
         .unwrap();
     (core, bot)
 }
@@ -206,7 +212,13 @@ fn agent_tokens_survive_sqlite_reopen_without_plaintext() {
         let core = ForgeCore::open_sqlite(&path).unwrap();
         seed(&core);
         let bot = core
-            .enroll_bot("alice", "atlas", "Atlas", BotKind::MUSE, BotReach::General)
+            .enroll_bot(
+                "alice",
+                "atlas",
+                "Atlas",
+                BotKind::MUSE,
+                BotReach::General { refs: None },
+            )
             .unwrap();
         core.issue_bot_access_token("alice", bot.bot.id, Some("ci"), None)
             .unwrap()

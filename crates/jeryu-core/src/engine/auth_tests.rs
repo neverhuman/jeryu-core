@@ -235,7 +235,13 @@ fn reset_password_revokes_credentials_and_forces_change() {
     ));
     assert!(is_validation(&core.reset_account_password("bob", "short")));
     let bot = core
-        .enroll_bot("bob", "helper", "Helper", BotKind::GROK, BotReach::General)
+        .enroll_bot(
+            "bob",
+            "helper",
+            "Helper",
+            BotKind::GROK,
+            BotReach::General { refs: None },
+        )
         .unwrap();
     let bot_token = core
         .issue_bot_access_token("bob", bot.bot.id, Some("ci"), None)

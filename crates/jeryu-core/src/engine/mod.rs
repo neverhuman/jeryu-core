@@ -29,6 +29,8 @@ mod bot_tokens_tests;
 mod bots;
 #[cfg(test)]
 mod bots_owner_reach_tests;
+#[cfg(test)]
+mod bots_ref_reach_tests;
 mod branch_protection;
 mod check_runs;
 mod commit_status;

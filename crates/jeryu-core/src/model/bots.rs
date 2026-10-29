@@ -202,29 +202,117 @@ pub struct BotRepoRef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum BotReach {
-    General,
+    General {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refs: Option<Vec<String>>,
+    },
     /// Every repository under one of these owners (accounts or
     /// organizations) on which the bot's owner holds an explicit grant,
     /// including repositories created after enrollment. A public read without
     /// a grant is not enough. Wire shape: `{"mode":"owners","owners":["acme"]}`.
     Owners {
         owners: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refs: Option<Vec<String>>,
     },
     Repositories {
         repos: Vec<BotRepoRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refs: Option<Vec<String>>,
     },
     Task {
         repo: BotRepoRef,
         task_kind: BotTaskKind,
         task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refs: Option<Vec<String>>,
     },
 }
 
 impl BotReach {
+    /// At most 100 patterns of at most 1024 bytes each.
+    pub const MAX_REFS: usize = 100;
+
+    pub fn refs(&self) -> Option<&[String]> {
+        match self {
+            Self::General { refs }
+            | Self::Owners { refs, .. }
+            | Self::Repositories { refs, .. }
+            | Self::Task { refs, .. } => refs.as_deref(),
+        }
+    }
+
+    /// Validate an optional allowlist. An empty list deliberately denies all refs.
+    pub fn validate_refs(&self) -> Result<(), crate::errors::ForgeError> {
+        if let Some(refs) = self.refs() {
+            if refs.len() > Self::MAX_REFS
+                || refs.iter().any(|pattern| !valid_bot_ref(pattern, true))
+            {
+                return Err(crate::errors::ForgeError::Validation(
+                    "invalid_reach_refs: expected at most 100 full refs/heads/ or refs/tags/ patterns, each at most 1024 bytes; only * is a wildcard".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn allows_ref(&self, reference: &str) -> bool {
+        match self.refs() {
+            None => true,
+            Some(patterns) => {
+                valid_bot_ref(reference, false)
+                    && patterns.iter().any(|pattern| {
+                        valid_bot_ref(pattern, true) && ref_pattern_matches(pattern, reference)
+                    })
+            }
+        }
+    }
+
     /// Most owners one `owners` reach may name.
     pub const MAX_OWNERS: usize = 20;
     /// Machine code of the validation error a rejected `owners` reach returns.
     pub const INVALID_OWNERS_CODE: &'static str = "invalid_reach_owners";
+}
+
+// Git full-ref rules, restricted to branch and tag namespaces. Patterns use
+// the same rules except that * can match any sequence, including a slash.
+fn valid_bot_ref(value: &str, pattern: bool) -> bool {
+    (value.starts_with("refs/heads/") || value.starts_with("refs/tags/"))
+        && value.len() <= 1024
+        && !value.ends_with('.')
+        && !value.contains("..")
+        && !value.contains("@{")
+        && !value.bytes().any(|byte| {
+            byte <= b' '
+                || byte == 127
+                || matches!(byte, b'~' | b'^' | b':' | b'?' | b'[' | b'\\')
+                || (!pattern && byte == b'*')
+        })
+        && value
+            .split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
+}
+
+fn ref_pattern_matches(pattern: &str, reference: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or("");
+    let Some(mut rest) = reference.strip_prefix(first) else {
+        return false;
+    };
+    let mut parts = parts.peekable();
+    if parts.peek().is_none() {
+        return rest.is_empty();
+    }
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            return rest.ends_with(part);
+        }
+        let Some(index) = rest.find(part) else {
+            return false;
+        };
+        rest = &rest[index + part.len()..];
+    }
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -89,7 +89,13 @@ fn credentials_of(core: &ForgeCore, login: &str) -> Credentials {
         .unwrap()
         .secret;
     let bot = core
-        .enroll_bot(login, "helper", "Helper", BotKind::GROK, BotReach::General)
+        .enroll_bot(
+            login,
+            "helper",
+            "Helper",
+            BotKind::GROK,
+            BotReach::General { refs: None },
+        )
         .unwrap();
     let bot_token = core
         .issue_bot_access_token(login, bot.bot.id, Some("ci"), None)
@@ -218,7 +224,7 @@ fn recovery_leaves_other_accounts_and_team_bots_untouched() {
             "reviewer",
             "Reviewer",
             BotKind::default(),
-            BotReach::General,
+            BotReach::General { refs: None },
         )
         .unwrap()
         .bot;
@@ -470,7 +476,13 @@ fn administrative_reset_still_revokes_everything() {
         .create_personal_access_token("bob", "ci", None)
         .unwrap();
     let bot = core
-        .enroll_bot("bob", "helper", "Helper", BotKind::GROK, BotReach::General)
+        .enroll_bot(
+            "bob",
+            "helper",
+            "Helper",
+            BotKind::GROK,
+            BotReach::General { refs: None },
+        )
         .unwrap();
     let bot_token = core
         .issue_bot_access_token("bob", bot.bot.id, Some("ci"), None)

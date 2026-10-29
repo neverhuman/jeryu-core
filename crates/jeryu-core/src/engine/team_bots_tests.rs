@@ -60,7 +60,7 @@ fn enroll(core: &ForgeCore) -> BotSummary {
         "reviewer",
         "Reviewer",
         BotKind::default(),
-        BotReach::General,
+        BotReach::General { refs: None },
     )
     .unwrap()
     .bot
@@ -106,7 +106,7 @@ fn an_owner_enrolls_a_team_bot_that_acts_as_its_own_name() {
             "other",
             "Other",
             BotKind::default(),
-            BotReach::General,
+            BotReach::General { refs: None },
         )
         .unwrap_err();
     assert!(matches!(error, ForgeError::Forbidden(_)), "{error:?}");
@@ -118,7 +118,7 @@ fn an_owner_enrolls_a_team_bot_that_acts_as_its_own_name() {
             "other",
             "Other",
             BotKind::default(),
-            BotReach::General,
+            BotReach::General { refs: None },
         )
         .unwrap_err();
     assert!(matches!(error, ForgeError::Validation(_)), "{error:?}");
@@ -130,7 +130,7 @@ fn an_owner_enrolls_a_team_bot_that_acts_as_its_own_name() {
             "reviewer",
             "Again",
             BotKind::default(),
-            BotReach::General,
+            BotReach::General { refs: None },
         )
         .unwrap_err();
     assert!(matches!(error, ForgeError::Conflict(_)), "{error:?}");
@@ -318,7 +318,7 @@ fn a_team_bot_enrollment_key_is_never_exchangeable() {
             "ci",
             "CI",
             BotKind::default(),
-            BotReach::General,
+            BotReach::General { refs: None },
         )
         .unwrap();
     let error = core

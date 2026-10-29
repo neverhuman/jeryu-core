@@ -63,8 +63,8 @@ enum BotFailure {
     /// repair_hint: rerun cargo test -p jeryu-core --lib core::bots::tests
     Conflict,
     /// purpose: authorize a Grokbot or Musebot inside the owner's non-admin reach.
-    /// reason: the repository is outside the grant, the task is not the one granted, or the effect exceeds the owner's rights.
-    /// common fixes: narrow the call to a granted repository or task; do not request forge admin, release, pin, or user administration.
+    /// reason: the repository or ref is outside the grant, the task is not the one granted, or the effect exceeds the owner's rights.
+    /// common fixes: narrow the call to a granted repository, ref, or task; do not request forge admin, release, pin, or user administration.
     /// docs_url: docs/errors.md#bot-reach
     /// repair_hint: rerun cargo test -p jeryu-core --lib core::bots::tests
     NotGranted,
@@ -142,8 +142,8 @@ impl BotFailure {
             },
             Self::NotGranted => BotFailureRepair {
                 purpose: "authorize a Grokbot or Musebot inside the owner's non-admin reach",
-                reason: "the repository is outside the grant, the task is not the one granted, or the effect exceeds the owner's rights",
-                common_fixes: "narrow the call to a granted repository or task; do not request forge admin, release, pin, or user administration",
+                reason: "the repository or ref is outside the grant, the task is not the one granted, or the effect exceeds the owner's rights",
+                common_fixes: "narrow the call to a granted repository, ref, or task; do not request forge admin, release, pin, or user administration",
                 docs_url: "docs/errors.md#bot-reach",
                 repair_hint: "rerun cargo test -p jeryu-core --lib core::bots::tests",
             },
@@ -884,6 +884,18 @@ impl ForgeCore {
     /// Repository access is the owner's explicit grant. Forge admin does not
     /// widen it. A public repository still allows a read for any active account.
     pub fn authorize_bot(&self, call: &BotCall) -> Result<BotSummary> {
+        self.authorize_bot_call(call, None)
+    }
+
+    /// Authorize a full ref write using live credentials, grants, task reach,
+    /// and ref reach. The edge must supply the actual destination ref.
+    pub fn authorize_bot_ref_write(&self, call: &BotCall, reference: &str) -> Result<BotSummary> {
+        let mut write = call.clone();
+        write.effect = BotEffect::Write;
+        self.authorize_bot_call(&write, Some(reference))
+    }
+
+    fn authorize_bot_call(&self, call: &BotCall, reference: Option<&str>) -> Result<BotSummary> {
         let state = self.state.read();
         let bot = state
             .bots
@@ -910,6 +922,8 @@ impl ForgeCore {
             Some("repo_not_granted")
         } else if !reach_allows(&state, bot, call) {
             Some(reach_denial_code(&bot.reach, call))
+        } else if reference.is_some_and(|reference| !bot.reach.allows_ref(reference)) {
+            Some("ref_not_granted")
         } else {
             None
         };
@@ -1267,10 +1281,11 @@ impl ForgeCore {
     }
 
     pub(super) fn normalize_reach(&self, actor: &str, reach: BotReach) -> Result<BotReach> {
+        reach.validate_refs()?;
         match reach {
-            BotReach::General => Ok(BotReach::General),
-            BotReach::Owners { owners } => self.normalize_owners(owners),
-            BotReach::Repositories { repos } => {
+            BotReach::General { refs } => Ok(BotReach::General { refs }),
+            BotReach::Owners { owners, refs } => self.normalize_owners(owners, refs),
+            BotReach::Repositories { repos, refs } => {
                 if repos.is_empty() || repos.len() > MAX_REPOS {
                     return Err(ForgeError::Validation(
                         "repository reach needs between 1 and 100 repositories".to_string(),
@@ -1283,9 +1298,10 @@ impl ForgeCore {
                         seen.push(normalized);
                     }
                 }
-                Ok(BotReach::Repositories { repos: seen })
+                Ok(BotReach::Repositories { refs, repos: seen })
             }
             BotReach::Task {
+                refs,
                 repo,
                 task_kind,
                 task_id,
@@ -1293,6 +1309,7 @@ impl ForgeCore {
                 let repo = self.require_readable_repo(actor, &repo.owner, &repo.name)?;
                 validate_task(self, &repo, task_kind, &task_id)?;
                 Ok(BotReach::Task {
+                    refs,
                     repo,
                     task_kind,
                     task_id: task_id.trim().to_string(),
@@ -1305,7 +1322,7 @@ impl ForgeCore {
     /// first-seen order. Each must be a known account, user, or organization,
     /// or own at least one repository. The bot's owner needs no grant at
     /// enrollment: reach is checked per request, so a later grant widens it.
-    fn normalize_owners(&self, owners: Vec<String>) -> Result<BotReach> {
+    fn normalize_owners(&self, owners: Vec<String>, refs: Option<Vec<String>>) -> Result<BotReach> {
         let code = BotReach::INVALID_OWNERS_CODE;
         let limit = BotReach::MAX_OWNERS;
         let count_error = || {
@@ -1338,7 +1355,7 @@ impl ForgeCore {
             }
             seen.push(owner);
         }
-        Ok(BotReach::Owners { owners: seen })
+        Ok(BotReach::Owners { refs, owners: seen })
     }
 
     fn require_readable_repo(&self, actor: &str, owner: &str, repo: &str) -> Result<BotRepoRef> {
@@ -1430,11 +1447,11 @@ fn reach_lists_repo(state: &super::State, bot: &BotRecord, owner: &str, repo: &s
         // A public repository is readable by every account, so a public read
         // would list every general bot on the forge. Only an explicit grant
         // puts a general bot on this roster.
-        BotReach::General => bot_has_grant(state, bot, owner, repo),
-        BotReach::Owners { owners } => {
+        BotReach::General { .. } => bot_has_grant(state, bot, owner, repo),
+        BotReach::Owners { owners, .. } => {
             owners.iter().any(|item| item == owner) && bot_has_grant(state, bot, owner, repo)
         }
-        BotReach::Repositories { repos } => repos
+        BotReach::Repositories { repos, .. } => repos
             .iter()
             .any(|item| item.owner == owner && item.name == repo),
         BotReach::Task { repo: bound, .. } => bound.owner == owner && bound.name == repo,
@@ -1447,13 +1464,15 @@ fn reach_lists_repo(state: &super::State, bot: &BotRecord, owner: &str, repo: &s
 /// the viewer's to learn.
 fn clip_reach(reach: &BotReach, owner: &str, repo: &str) -> BotReach {
     match reach {
-        BotReach::Owners { .. } => BotReach::Repositories {
+        BotReach::Owners { refs, .. } => BotReach::Repositories {
+            refs: refs.clone(),
             repos: vec![BotRepoRef {
                 owner: owner.to_string(),
                 name: repo.to_string(),
             }],
         },
-        BotReach::Repositories { repos } => BotReach::Repositories {
+        BotReach::Repositories { repos, refs } => BotReach::Repositories {
+            refs: refs.clone(),
             repos: repos
                 .iter()
                 .filter(|item| item.owner == owner && item.name == repo)
@@ -1646,20 +1665,21 @@ pub(super) fn same_secret_hash(left: &str, right: &str) -> bool {
 
 fn reach_allows(state: &super::State, bot: &BotRecord, call: &BotCall) -> bool {
     match &bot.reach {
-        BotReach::General => true,
+        BotReach::General { .. } => true,
         // Explicit grant only, as for a general bot's roster: a public read
         // does not put another owner's repository inside a family reach.
-        BotReach::Owners { owners } => {
+        BotReach::Owners { owners, .. } => {
             owners.iter().any(|owner| owner == &call.owner)
                 && bot_has_grant(state, bot, &call.owner, &call.repo)
         }
-        BotReach::Repositories { repos } => repos
+        BotReach::Repositories { repos, .. } => repos
             .iter()
             .any(|repo| repo.owner == call.owner && repo.name == call.repo),
         BotReach::Task {
             repo,
             task_kind,
             task_id,
+            ..
         } => {
             if repo.owner != call.owner || repo.name != call.repo {
                 return false;
@@ -2328,14 +2348,14 @@ mod tests {
     #[test]
     fn many_bots_keep_separate_keys_and_kinds() {
         let (core, _) = fixture();
-        let grok = enroll(&core, "atlas", BotReach::General);
+        let grok = enroll(&core, "atlas", BotReach::General { refs: None });
         let muse = core
             .enroll_bot(
                 "alice",
                 "reviewer",
                 "Reviewer",
                 BotKind::MUSE,
-                BotReach::General,
+                BotReach::General { refs: None },
             )
             .unwrap();
         assert_ne!(grok.key_id, muse.key_id);
@@ -2345,8 +2365,14 @@ mod tests {
         let listed = core.list_account_bots("alice").unwrap();
         assert_eq!(listed.len(), 2);
         assert!(
-            core.enroll_bot("alice", "atlas", "Atlas", BotKind::GROK, BotReach::General)
-                .is_err()
+            core.enroll_bot(
+                "alice",
+                "atlas",
+                "Atlas",
+                BotKind::GROK,
+                BotReach::General { refs: None }
+            )
+            .is_err()
         );
         let debug = format!("{:?}", grok);
         assert!(!debug.contains(&grok.enrollment_key));
@@ -2355,7 +2381,7 @@ mod tests {
     #[test]
     fn unknown_and_wrong_enrollment_keys_are_the_same_error() {
         let (core, _) = fixture();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let unknown =
             core.exchange_bot_enrollment_key("jbk_live.abcdefghjkmn.not-a-real-secret-value");
         let mut parts = enrolled.enrollment_key.split('.');
@@ -2389,6 +2415,7 @@ mod tests {
             "Sneak",
             BotKind::MUSE,
             BotReach::Repositories {
+                refs: None,
                 repos: vec![BotRepoRef {
                     owner: "alice".to_string(),
                     name: "other".to_string(),
@@ -2403,11 +2430,12 @@ mod tests {
     #[test]
     fn general_repo_and_task_reach_follow_the_owner() {
         let (core, issue) = fixture();
-        let general = enroll(&core, "general", BotReach::General);
+        let general = enroll(&core, "general", BotReach::General { refs: None });
         let listed = enroll(
             &core,
             "listed",
             BotReach::Repositories {
+                refs: None,
                 repos: vec![BotRepoRef {
                     owner: "alice".to_string(),
                     name: "widgets".to_string(),
@@ -2418,6 +2446,7 @@ mod tests {
             &core,
             "tasked",
             BotReach::Task {
+                refs: None,
                 repo: BotRepoRef {
                     owner: "alice".to_string(),
                     name: "widgets".to_string(),
@@ -2512,7 +2541,7 @@ mod tests {
     #[test]
     fn reused_refresh_token_revokes_the_family() {
         let (core, _) = fixture();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let first = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
@@ -2568,7 +2597,7 @@ mod tests {
             .unwrap();
             core.grant_repo_access("alice", "alice", "alice", "widgets", RepoAccessLevel::Write)
                 .unwrap();
-            let enrolled = enroll(&core, "atlas", BotReach::General);
+            let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
             let first = core
                 .exchange_bot_enrollment_key(&enrolled.enrollment_key)
                 .unwrap();
@@ -2616,7 +2645,7 @@ mod tests {
     fn idempotent_refresh_replay_expires_after_grace() {
         let (core, _) = fixture();
         let core = vaulted(core);
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let first = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
@@ -2639,7 +2668,7 @@ mod tests {
     fn idempotent_refresh_rejects_a_different_body() {
         let (core, _) = fixture();
         let core = vaulted(core);
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let first = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
@@ -2657,7 +2686,7 @@ mod tests {
     fn idempotent_refresh_rejects_a_short_key_and_does_not_cross_tokens() {
         let (core, _) = fixture();
         let core = vaulted(core);
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let first = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
@@ -2690,7 +2719,7 @@ mod tests {
     fn idempotent_refresh_replay_stops_when_the_bot_or_successor_is_spent() {
         let (core, _) = fixture();
         let core = vaulted(core);
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let first = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
@@ -2726,7 +2755,7 @@ mod tests {
     fn idempotent_refresh_revokes_a_spent_token_after_it_expires() {
         let (core, _) = fixture();
         let core = vaulted(core);
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let first = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
@@ -2752,7 +2781,7 @@ mod tests {
     fn refresh_idempotency_rejects_a_long_key_and_the_reserved_operation() {
         let (core, _) = fixture();
         let core = vaulted(core);
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let first = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
@@ -2782,7 +2811,7 @@ mod tests {
                 .with_vault_key(crate::VaultKey::from_bytes(&[11; 32]).expect("vault key"));
             core.create_account("alice", PASSWORD, UserRole::User)
                 .unwrap();
-            let enrolled = enroll(&core, "atlas", BotReach::General);
+            let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
             let first = core
                 .exchange_bot_enrollment_key(&enrolled.enrollment_key)
                 .unwrap();
@@ -2871,7 +2900,7 @@ mod tests {
     #[test]
     fn rotation_grace_then_retirement_and_revoke() {
         let (core, _) = fixture();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let rotated = core.rotate_bot_key("alice", enrolled.bot.id).unwrap();
         assert!(
             core.exchange_bot_enrollment_key(&enrolled.enrollment_key)
@@ -2896,7 +2925,7 @@ mod tests {
     #[test]
     fn observation_keeps_secrets_out_of_activity_and_failed_auth_does_not_count() {
         let (core, _) = fixture();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         core.note_bot_observation(
             enrolled.bot.id,
             BotObservation {
@@ -2926,7 +2955,7 @@ mod tests {
     #[test]
     fn idempotent_operation_replays_and_rejects_a_different_body() {
         let (core, _) = fixture();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let digest = "ab".repeat(32);
         assert!(matches!(
             core.reserve_bot_operation(enrolled.bot.id, "session.start", "k1", &digest)
@@ -2981,7 +3010,7 @@ mod tests {
             .unwrap();
             core.grant_repo_access("alice", "alice", "alice", "widgets", RepoAccessLevel::Write)
                 .unwrap();
-            let enrolled = enroll(&core, "atlas", BotReach::General);
+            let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
             enrolled.enrollment_key
         };
         let core = ForgeCore::open_sqlite(&path).unwrap();
@@ -3024,7 +3053,13 @@ mod tests {
         )
         .unwrap();
         let enrolled = core
-            .enroll_bot("root", "atlas", "Atlas", BotKind::GROK, BotReach::General)
+            .enroll_bot(
+                "root",
+                "atlas",
+                "Atlas",
+                BotKind::GROK,
+                BotReach::General { refs: None },
+            )
             .unwrap();
         let session = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
@@ -3067,7 +3102,7 @@ mod tests {
     #[test]
     fn expired_refresh_does_not_revoke_the_family() {
         let (core, _) = fixture();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let first = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
@@ -3096,7 +3131,7 @@ mod tests {
     #[test]
     fn password_change_kills_bot_keys_until_the_owner_rotates() {
         let (core, _) = fixture();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let session = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
@@ -3145,7 +3180,7 @@ mod tests {
     #[test]
     fn observation_rejects_credential_material() {
         let (core, _) = fixture();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let rejected = core.note_bot_observation(
             enrolled.bot.id,
             BotObservation {
@@ -3173,7 +3208,7 @@ mod tests {
         let (core, _) = fixture();
         core.grant_repo_access("alice", "alice", "alice", "other", RepoAccessLevel::Write)
             .unwrap();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         core.note_bot_observation(
             enrolled.bot.id,
             BotObservation {
@@ -3233,6 +3268,7 @@ mod tests {
             &core,
             "listed",
             BotReach::Repositories {
+                refs: None,
                 repos: vec![
                     BotRepoRef {
                         owner: "alice".to_string(),
@@ -3250,7 +3286,7 @@ mod tests {
             .unwrap();
         assert_eq!(roster.len(), 1);
         match &roster[0].reach {
-            BotReach::Repositories { repos } => {
+            BotReach::Repositories { repos, .. } => {
                 assert_eq!(repos.len(), 1);
                 assert_eq!(repos[0].name, "widgets");
             }
@@ -3263,7 +3299,7 @@ mod tests {
             .unwrap()
             .reach
         {
-            BotReach::Repositories { repos } => assert_eq!(repos.len(), 2),
+            BotReach::Repositories { repos, .. } => assert_eq!(repos.len(), 2),
             other => panic!("owner list keeps the full reach, got {other:?}"),
         }
     }
@@ -3271,7 +3307,7 @@ mod tests {
     #[test]
     fn live_refresh_tokens_stay_capped_at_five() {
         let (core, _) = fixture();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let mut sessions = Vec::new();
         for _ in 0..6 {
             sessions.push(
@@ -3299,7 +3335,7 @@ mod tests {
     #[test]
     fn suspended_locked_and_rejected_inputs_stay_closed() {
         let (core, issue) = fixture();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let session = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
@@ -3445,6 +3481,7 @@ mod tests {
                 "Lab",
                 BotKind::MUSE,
                 BotReach::Repositories {
+                    refs: None,
                     repos: vec![
                         BotRepoRef {
                             owner: "alice".to_string(),
@@ -3461,7 +3498,7 @@ mod tests {
             .unwrap();
         assert!(test_key.enrollment_key.starts_with("jbk_test."));
         match &test_key.bot.reach {
-            BotReach::Repositories { repos } => assert_eq!(repos.len(), 1),
+            BotReach::Repositories { repos, .. } => assert_eq!(repos.len(), 1),
             other => panic!("duplicate repos collapse, got {other:?}"),
         }
         assert!(
@@ -3470,7 +3507,7 @@ mod tests {
                 "long-name",
                 &"n".repeat(81),
                 BotKind::GROK,
-                BotReach::General,
+                BotReach::General { refs: None },
                 "live",
             )
             .is_err()
@@ -3481,7 +3518,7 @@ mod tests {
                 "bad-env",
                 "Bad",
                 BotKind::GROK,
-                BotReach::General,
+                BotReach::General { refs: None },
                 "dev",
             )
             .is_err()
@@ -3492,7 +3529,10 @@ mod tests {
                 "empty-reach",
                 "Empty",
                 BotKind::GROK,
-                BotReach::Repositories { repos: Vec::new() },
+                BotReach::Repositories {
+                    refs: None,
+                    repos: Vec::new()
+                },
             )
             .is_err()
         );
@@ -3525,6 +3565,7 @@ mod tests {
             &core,
             "puller",
             BotReach::Task {
+                refs: None,
                 repo: BotRepoRef {
                     owner: "alice".to_string(),
                     name: "widgets".to_string(),
@@ -3537,6 +3578,7 @@ mod tests {
             &core,
             "brancher",
             BotReach::Task {
+                refs: None,
                 repo: BotRepoRef {
                     owner: "alice".to_string(),
                     name: "widgets".to_string(),
@@ -3561,6 +3603,7 @@ mod tests {
                     slug,
                     BotKind::GROK,
                     BotReach::Task {
+                        refs: None,
                         repo: BotRepoRef {
                             owner: "alice".to_string(),
                             name: "widgets".to_string(),
@@ -3661,7 +3704,13 @@ mod tests {
         core.grant_repo_access("alice", "bob", "alice", "widgets", RepoAccessLevel::Read)
             .unwrap();
         let bob_bot = core
-            .enroll_bot("bob", "helper", "Helper", BotKind::GROK, BotReach::General)
+            .enroll_bot(
+                "bob",
+                "helper",
+                "Helper",
+                BotKind::GROK,
+                BotReach::General { refs: None },
+            )
             .unwrap();
         core.lock_account("bob").unwrap();
         assert!(
@@ -3674,7 +3723,7 @@ mod tests {
                 "after-lock",
                 "After",
                 BotKind::MUSE,
-                BotReach::General
+                BotReach::General { refs: None }
             )
             .is_err()
         );
@@ -3702,7 +3751,7 @@ mod tests {
             .unwrap();
             core.grant_repo_access("alice", "alice", "alice", "widgets", RepoAccessLevel::Write)
                 .unwrap();
-            let enrolled = enroll(&core, "atlas", BotReach::General);
+            let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
             let first = core
                 .exchange_bot_enrollment_key(&enrolled.enrollment_key)
                 .unwrap();
@@ -3753,7 +3802,7 @@ mod tests {
                     "paused",
                     "Paused",
                     BotKind::MUSE,
-                    BotReach::General,
+                    BotReach::General { refs: None },
                     "test",
                 )
                 .unwrap();
@@ -3807,7 +3856,7 @@ mod tests {
     #[test]
     fn activity_coalesces_until_the_outcome_changes_or_the_window_elapses() {
         let (core, _) = fixture();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let id = enrolled.bot.id;
         core.note_bot_observation(id, observation(&enrolled.key_id, "whoami", "ok"))
             .unwrap();
@@ -3855,8 +3904,8 @@ mod tests {
     #[test]
     fn activity_keeps_the_newest_five_hundred_events_for_that_bot() {
         let (core, _) = fixture();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
-        let other = enroll(&core, "nova", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
+        let other = enroll(&core, "nova", BotReach::General { refs: None });
         core.note_bot_observation(other.bot.id, observation(&other.key_id, "stay", "ok"))
             .unwrap();
         for index in 0..=ACTIVITY_CAP {
@@ -3898,7 +3947,7 @@ mod tests {
         }
         core.grant_repo_access("alice", "alice", "alice", "widgets", RepoAccessLevel::Write)
             .unwrap();
-        let enrolled = enroll(&core, "atlas", BotReach::General);
+        let enrolled = enroll(&core, "atlas", BotReach::General { refs: None });
         let session = core
             .exchange_bot_enrollment_key(&enrolled.enrollment_key)
             .unwrap();
