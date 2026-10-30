@@ -555,3 +555,38 @@ fn the_required_gate_runs_the_lane_once() {
         "the mirrored workflow runs the lane through pr-ci.sh only"
     );
 }
+
+#[test]
+fn candidate_auditor_declaration_matches_the_verified_governed_version() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let policy = temp.path().join("policy.toml");
+    for (body, accepted) in [
+        ("required_tool_version = \"1.7.6\"\n", true),
+        ("required_tool_version = \"1.7.5\"\n", false),
+        ("minimum_score = 85\n", false),
+        (
+            "required_tool_version = \"1.7.6\"\nrequired_tool_version = \"1.7.6\"\n",
+            false,
+        ),
+        ("required_tool_version = \"1.7.6\n", false),
+    ] {
+        fs::write(&policy, body).expect("policy");
+        let result = guard(
+            temp.path(),
+            &format!(
+                "proof_require_governed_declaration {:?} 1.7.6",
+                policy.display().to_string()
+            ),
+        );
+        assert_eq!(
+            result.status.success(),
+            accepted,
+            "{body}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    let gate = fs::read_to_string(repo_root().join("ops/ci/pr-ci.sh")).expect("gate");
+    assert!(gate.contains(
+        "proof_require_governed_declaration agent/audit-policy.toml \"${JERYU_JANKURAI_SEMVER:?}\""
+    ));
+}

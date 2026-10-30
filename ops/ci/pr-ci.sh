@@ -47,6 +47,11 @@ consumer_repo="$(awk -F'\"' '/^workspace =/ {print $2; exit}' agent/audit-policy
 bash "$render_real" --check --repo "$consumer_repo" \
 --repo-root "$consumer_repo=$repo_root"
 
+# Bind the candidate declaration to the installation receipt that lib.sh has
+# already verified, even when this repo is reviewed without the family tree.
+source ops/ci/proof_baseline.sh
+proof_require_governed_declaration agent/audit-policy.toml "${JERYU_JANKURAI_SEMVER:?}"
+
 # Ordinary compilation -- cargo check and the workspace test build -- builds in the gate runner's
 # retained per-slot cache when the gate host offers one (JERYU_CI_BUILD_CACHE_DIR; jeryu-ci-runner
 # ops/pr-gate/README.md, "Reusing ordinary compilation without retaining proof"). Reports this

@@ -84,7 +84,7 @@ if [[ "${#changed_paths[@]}" -eq 0 ]]; then
   # is no change surface to bind. Every whole-tree check below still runs.
   printf '[proof] empty change set from fork point %s\n' "$fork_commit" >&2
 else
-  # Proofbind and proofmark stay advisory in Jankurai 1.7.5: required mode asks
+  # Proofbind and proofmark stay advisory for contract prose: required mode asks
   # Rust line and mutation evidence of contract prose too. They run for real
   # against the changed surface and their review counts go in the summary.
   jankurai proofbind verify . --changed-from "$fork_commit" --mode advisory --out target/jankurai/proofbind/surface-witness.json --obligations-out target/jankurai/proofbind/obligations.json --md target/jankurai/proofbind/proofbind.md

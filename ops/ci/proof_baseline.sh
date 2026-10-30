@@ -229,3 +229,25 @@ proof_sweep_stale() {
     }
   done
 }
+
+# The candidate declaration must name the receipt-verified governed binary.
+# Baseline policy variants may still be audited under main's older policy;
+# this check applies to the candidate at the required-gate entry point.
+proof_require_governed_declaration() {
+  local policy="$1" governed="$2" declared
+  declared="$(awk -F '"' '
+    /^[[:space:]]*required_tool_version[[:space:]]*=/ {
+      count += 1
+      if ($0 !~ /^[[:space:]]*required_tool_version[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"[[:space:]]*(#.*)?$/) invalid = 1
+      version = $2
+    }
+    END { if (count != 1 || invalid) exit 1; print version }
+  ' "$policy")" || {
+    printf 'audit policy needs one valid required_tool_version declaration\n' >&2
+    return 1
+  }
+  if [[ ! "$governed" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || "$declared" != "$governed" ]]; then
+    printf 'audit policy version %s differs from verified governed auditor %s\n' "$declared" "$governed" >&2
+    return 1
+  fi
+}

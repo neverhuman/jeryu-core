@@ -24,3 +24,9 @@ path = "contracts/connection-v1/"
 source = "contracts/connection-v1/"
 command = "cargo test --locked -p jeryu-core --test connection_v1_contract"
 write_policy = "hand_authored"
+
+# agent/audit-policy.toml is hand-authored policy except its single
+# required_tool_version scalar, which jeryu-tool/ops/render-tool-manifest.sh
+# renders from protected tool-manifest.toml (crates/jeryu-tool-control/src/render_rules.rs).
+# The whole policy is deliberately not declared a generated zone. pr-ci.sh
+# additionally compares that scalar with the receipt-verified governed auditor.
