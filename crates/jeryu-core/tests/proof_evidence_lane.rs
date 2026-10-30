@@ -354,11 +354,19 @@ fn migration_liability_may_not_rise_or_drop_lanes_at_equal_liability() {
 
 /// Hold an exclusive flock on `lock` in a child process until it is killed.
 fn hold_lock(lock: &Path) -> Child {
-    let child = Command::new("flock")
-        .arg("--exclusive")
+    // Take the lock in the shell, then `exec` the sleeper so the lock holder is
+    // one process: killing it releases the lock and leaves no orphan holding
+    // nextest's stdout/stderr pipes open (which nextest reports as LEAK).
+    let child = Command::new("sh")
+        .args([
+            "-c",
+            "exec 9>>\"$1\" && flock --exclusive 9 && exec sleep 60",
+            "sh",
+        ])
         .arg(lock)
-        .args(["sleep", "60"])
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .expect("flock");
     for _ in 0..100 {
