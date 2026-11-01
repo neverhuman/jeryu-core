@@ -618,3 +618,13 @@ live in `forge_audit_log`.
 An older writer's full-state rewrite drops the column's values, which reinstates
 the dismissed verdicts: stricter, never looser. `db/rollbacks/0026_review_dismissal_authority.sql`
 drops the column with the same effect.
+
+## 0027 Check run creation sequence
+
+`check_runs.creation_sequence` is the immutable per-repository creation order of
+a check run: assigned once under the state lock (highest existing + 1) and never
+changed by completion. Gate verdicts and readers pick the newest run with
+`CheckRun::newest` (sequence, then start time, then id), not by
+`completed_at.or(started_at)`. Rows holding 0 (pre-0027 or from a writer that
+drops the column) are renumbered in insertion order on load; no SQL backfill.
+`db/rollbacks/0027_check_run_creation_sequence.sql` drops the column.

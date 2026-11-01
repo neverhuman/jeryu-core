@@ -63,6 +63,8 @@ const MIGRATION_0025: &str =
     include_str!("../../../../../db/migrations/0025_password_recovery_tokens.sql");
 const MIGRATION_0026: &str =
     include_str!("../../../../../db/migrations/0026_review_dismissal_authority.sql");
+const MIGRATION_0027: &str =
+    include_str!("../../../../../db/migrations/0027_check_run_creation_sequence.sql");
 /// The 0017 constraint 0021 removes. Its presence in `sqlite_master` is the
 /// guard: 0017 re-runs `CREATE TABLE IF NOT EXISTS bots` on every open, so a
 /// fresh database gets the old shape first and 0021 rebuilds it once.
@@ -77,7 +79,14 @@ pub(super) fn apply_migrations(conn: &Connection) -> Result<()> {
     // 0025 is pure CREATE TABLE/INDEX IF NOT EXISTS: idempotent, no guard.
     conn.execute_batch(MIGRATION_0025).map_err(storage_error)?;
     apply_migration_0026(conn)?;
+    apply_migration_0027(conn)?;
     Ok(())
+}
+
+/// 0027 records each check run's immutable creation order. Guarded by the
+/// column it adds; existing rows hold 0 and the loader numbers them.
+fn apply_migration_0027(conn: &Connection) -> Result<()> {
+    add_column_if_missing(conn, "check_runs", "creation_sequence", MIGRATION_0027)
 }
 
 /// 0026 records the authority behind a cross-author dismissal. Guarded by the
@@ -692,6 +701,39 @@ mod tests {
                 .iter()
                 .all(|review| review.dismissal_authority.is_none())
         );
+    }
+
+    #[test]
+    fn migration_0027_numbers_existing_check_runs_in_insertion_order() {
+        let conn = historical_review_connection();
+        apply_migrations(&conn).expect("apply through 0027");
+        apply_migrations(&conn).expect("reapply idempotently");
+        assert!(column_exists(&conn, "check_runs", "creation_sequence").unwrap());
+        for id in [
+            "00000000-0000-0000-0000-0000000000a1",
+            "00000000-0000-0000-0000-0000000000a2",
+        ] {
+            conn.execute(
+                "INSERT INTO check_runs (id, repo_id, name, head_sha, status, started_at)
+                 VALUES (?1, '00000000-0000-0000-0000-000000000001', 'p', 'abc', 'queued',
+                         '2026-08-26T00:00:00Z')",
+                [id],
+            )
+            .unwrap();
+        }
+        let stored: i64 = conn
+            .query_row("SELECT MAX(creation_sequence) FROM check_runs", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, 0, "existing rows keep 0 until loaded");
+        let state = super::super::load_state(&conn).unwrap();
+        let runs = &state.check_runs[&("alice".to_string(), "demo".to_string())];
+        let order: Vec<(String, u64)> = runs
+            .iter()
+            .map(|run| (run.name.clone(), run.creation_sequence))
+            .collect();
+        assert_eq!(order, [("p".to_string(), 1), ("p".to_string(), 2)]);
     }
 
     #[test]

@@ -21,8 +21,13 @@ mod tests {
     use chrono::Utc;
     use uuid::Uuid;
 
+    use super::evaluate::{RequiredContextState, required_context_state};
     use super::*;
-    use crate::model::{BranchProtectionRule, GitBranchRef, PullRequest, PullRequestState};
+    use crate::model::{
+        BranchProtectionRule, CheckConclusion, CheckRun, CheckRunStatus, GitBranchRef, PullRequest,
+        PullRequestState,
+    };
+    use chrono::TimeZone;
 
     fn pr() -> PullRequest {
         PullRequest {
@@ -49,6 +54,41 @@ mod tests {
             head_patch_ids: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    fn proof_run(sequence: u64, conclusion: CheckConclusion, finished_after: i64) -> CheckRun {
+        let started = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        CheckRun {
+            id: Uuid::new_v4(),
+            owner: "acme".to_string(),
+            repo: "jeryu".to_string(),
+            name: "jankurai/proof".to_string(),
+            head_sha: "abc".to_string(),
+            status: CheckRunStatus::Completed,
+            conclusion: Some(conclusion),
+            details_url: None,
+            output: None,
+            started_at: started,
+            completed_at: Some(started + chrono::Duration::seconds(finished_after)),
+            creation_sequence: sequence,
+        }
+    }
+
+    #[test]
+    fn newest_proof_is_the_last_created_whatever_finished_last() {
+        // Same start instant; the older run finished later. Creation order
+        // decides, in either storage order.
+        let older = proof_run(1, CheckConclusion::Success, 90);
+        let newer = proof_run(2, CheckConclusion::Failure, 5);
+        for runs in [
+            vec![older.clone(), newer.clone()],
+            vec![newer.clone(), older.clone()],
+        ] {
+            assert_eq!(
+                required_context_state("jankurai/proof", &[], &runs, "main"),
+                RequiredContextState::Failed
+            );
         }
     }
 

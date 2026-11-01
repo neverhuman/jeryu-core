@@ -855,7 +855,7 @@ pub(super) fn load_check_runs(conn: &Connection, state: &mut State) -> Result<()
             r#"
             SELECT r.owner, r.name, c.id, c.name, c.head_sha, c.status,
                    c.conclusion, c.details_url, c.output_json, c.started_at,
-                   c.completed_at
+                   c.completed_at, c.creation_sequence
             FROM check_runs c
             JOIN repositories r ON r.id = c.repo_id
             ORDER BY c.rowid
@@ -878,8 +878,19 @@ pub(super) fn load_check_runs(conn: &Connection, state: &mut State) -> Result<()
             output: parse_optional_json(row.get(8).map_err(storage_error)?)?,
             started_at: parse_time(row.get(9).map_err(storage_error)?)?,
             completed_at: parse_optional_time(row.get(10).map_err(storage_error)?)?,
+            creation_sequence: row.get::<_, i64>(11).map_err(storage_error)?.max(0) as u64,
         };
         state.check_runs.entry((owner, repo)).or_default().push(run);
+    }
+    // A 0 means the row predates the sequence or came from a writer that
+    // drops it. Rows are appended and read in insertion order, so that order
+    // is the creation order: renumber the whole repository from it.
+    for runs in state.check_runs.values_mut() {
+        if runs.iter().any(|run| run.creation_sequence == 0) {
+            for (index, run) in runs.iter_mut().enumerate() {
+                run.creation_sequence = index as u64 + 1;
+            }
+        }
     }
     Ok(())
 }

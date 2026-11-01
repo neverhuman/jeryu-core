@@ -206,7 +206,7 @@ pub fn evaluate_ref_operation(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequiredContextState {
+pub(super) enum RequiredContextState {
     Satisfied,
     Missing,
     Failed,
@@ -219,7 +219,7 @@ enum RequiredContextState {
 /// be green for one base and unanswered (pending) for another at the same time.
 /// Check runs are not base-bound and answer for every base, except for a
 /// context whose statuses are pinned to bases: there only a status answers.
-fn required_context_state(
+pub(super) fn required_context_state(
     context: &str,
     statuses: &[CommitStatus],
     check_runs: &[CheckRun],
@@ -245,10 +245,7 @@ fn required_context_state(
         return RequiredContextState::Missing;
     }
 
-    let check_match = check_runs
-        .iter()
-        .filter(|check| check.name == context)
-        .max_by_key(|check| check.completed_at.or(Some(check.started_at)));
+    let check_match = CheckRun::newest(check_runs.iter().filter(|check| check.name == context));
 
     if let Some(check) = check_match {
         return if check.status == CheckRunStatus::Completed

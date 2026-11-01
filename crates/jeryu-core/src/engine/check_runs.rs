@@ -23,6 +23,18 @@ impl ForgeCore {
         self.ensure_repository_writable(owner, repo)?;
         let completed = matches!(request.status, Some(CheckRunStatus::Completed))
             || request.conclusion.is_some();
+        let mut state = self.state.write();
+        let previous = state.clone();
+        let runs = state
+            .check_runs
+            .entry((owner.to_string(), repo.to_string()))
+            .or_default();
+        let creation_sequence = runs
+            .iter()
+            .map(|run| run.creation_sequence)
+            .max()
+            .unwrap_or(0)
+            + 1;
         let check_run = CheckRun {
             id: Uuid::new_v4(),
             owner: owner.to_string(),
@@ -39,14 +51,9 @@ impl ForgeCore {
             output: request.output,
             started_at: Utc::now(),
             completed_at: if completed { Some(Utc::now()) } else { None },
+            creation_sequence,
         };
-        let mut state = self.state.write();
-        let previous = state.clone();
-        state
-            .check_runs
-            .entry((owner.to_string(), repo.to_string()))
-            .or_default()
-            .push(check_run.clone());
+        runs.push(check_run.clone());
         refresh_pull_mergeability_for_sha(&mut state, owner, repo, &check_run.head_sha);
         emit_event_locked(
             &mut state,

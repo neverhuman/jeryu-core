@@ -456,8 +456,8 @@ pub(super) fn stage_state(conn: &Connection, state: &State) -> Result<()> {
                 r#"
                 INSERT INTO temp.check_runs (
                   id, repo_id, name, head_sha, status, conclusion, details_url,
-                  output_json, started_at, completed_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                  output_json, started_at, completed_at, creation_sequence
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                 "#,
                 params![
                     run.id.to_string(),
@@ -470,6 +470,7 @@ pub(super) fn stage_state(conn: &Connection, state: &State) -> Result<()> {
                     optional_json(&run.output)?,
                     time(run.started_at),
                     optional_time(run.completed_at),
+                    run.creation_sequence as i64,
                 ],
             )
             .map_err(storage_error)?;

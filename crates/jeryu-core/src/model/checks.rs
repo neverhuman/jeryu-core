@@ -236,6 +236,25 @@ pub struct CheckRun {
     pub output: Option<CheckRunOutput>,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// Per-repository creation order, assigned once when the run is created
+    /// and never changed by completion. 0 only on a payload from a writer
+    /// that predates it; storage renumbers those in insertion order.
+    #[serde(default)]
+    pub creation_sequence: u64,
+}
+
+impl CheckRun {
+    /// The one ordering that picks the newest run among like-named runs:
+    /// creation sequence, then start time, then id so equal timestamps never
+    /// fall back to iteration order.
+    pub fn recency_key(&self) -> (u64, DateTime<Utc>, Uuid) {
+        (self.creation_sequence, self.started_at, self.id)
+    }
+
+    /// The newest of `runs` by [`CheckRun::recency_key`].
+    pub fn newest<'a>(runs: impl IntoIterator<Item = &'a CheckRun>) -> Option<&'a CheckRun> {
+        runs.into_iter().max_by_key(|run| run.recency_key())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

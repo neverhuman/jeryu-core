@@ -187,7 +187,7 @@ const OWNED_TABLES: &[OwnedTable] = &[
     },
     OwnedTable {
         name: "check_runs",
-        columns: "id,repo_id,name,head_sha,status,conclusion,details_url,output_json,started_at,completed_at",
+        columns: "id,repo_id,name,head_sha,status,conclusion,details_url,output_json,started_at,completed_at,creation_sequence",
         primary_key: "id",
     },
     OwnedTable {

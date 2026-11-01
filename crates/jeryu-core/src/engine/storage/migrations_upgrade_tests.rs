@@ -96,6 +96,10 @@ const ROLLBACKS: &[(&str, &str)] = &[
         "0026_review_dismissal_authority.sql",
         include_str!("../../../../../db/rollbacks/0026_review_dismissal_authority.sql"),
     ),
+    (
+        "0027_check_run_creation_sequence.sql",
+        include_str!("../../../../../db/rollbacks/0027_check_run_creation_sequence.sql"),
+    ),
 ];
 
 fn db_dir(kind: &str) -> PathBuf {
@@ -263,6 +267,9 @@ fn rollback_scripts_execute_and_roll_forward() {
                 // Dropping the recorded authority is the documented effect:
                 // an administrator dismissal withdraws nothing again.
                 assert!(!column_exists(&conn, "reviews", "dismissal_authority").expect("inspect"));
+            }
+            "0027_check_run_creation_sequence.sql" => {
+                assert!(!column_exists(&conn, "check_runs", "creation_sequence").expect("inspect"));
             }
             "0024_diff_identity.sql" => {
                 // Dropping the recorded diff identities is the documented
