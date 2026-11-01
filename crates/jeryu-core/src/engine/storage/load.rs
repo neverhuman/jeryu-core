@@ -882,14 +882,21 @@ pub(super) fn load_check_runs(conn: &Connection, state: &mut State) -> Result<()
         };
         state.check_runs.entry((owner, repo)).or_default().push(run);
     }
-    // A 0 means the row predates the sequence or came from a writer that
-    // drops it. Rows are appended and read in insertion order, so that order
-    // is the creation order: renumber the whole repository from it.
+    // Assign missing ordinals after the stored maximum, preserving every
+    // already-issued sequence. Old writers preserve future columns on updates,
+    // but new rows can have the column's zero default; rowid orders those rows.
     for runs in state.check_runs.values_mut() {
-        if runs.iter().any(|run| run.creation_sequence == 0) {
-            for (index, run) in runs.iter_mut().enumerate() {
-                run.creation_sequence = index as u64 + 1;
-            }
+        let mut next = runs
+            .iter()
+            .map(|run| run.creation_sequence)
+            .max()
+            .unwrap_or(0);
+        for run in runs.iter_mut().filter(|run| run.creation_sequence == 0) {
+            next = next
+                .checked_add(1)
+                .filter(|value| *value <= i64::MAX as u64)
+                .ok_or_else(|| storage_error("check-run creation sequence exhausted"))?;
+            run.creation_sequence = next;
         }
     }
     Ok(())

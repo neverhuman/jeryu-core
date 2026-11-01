@@ -115,3 +115,54 @@ fn payload_without_a_sequence_reads_as_zero() {
     let parsed: CheckRun = serde_json::from_value(value).unwrap();
     assert_eq!(parsed.creation_sequence, 0);
 }
+
+#[test]
+fn mixed_legacy_rows_preserve_stored_ordinals_through_reconciliation() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("forge.sqlite");
+    let ids = {
+        let core = open_with_repo(&db);
+        for _ in 0..3 {
+            core.create_check_run("alice", "jeryu", request(None))
+                .unwrap();
+        }
+        runs(&core).iter().map(|run| run.id).collect::<Vec<_>>()
+    };
+    let conn = Connection::open(&db).unwrap();
+    for (id, sequence) in [(ids[0], 10), (ids[1], 20), (ids[2], 0)] {
+        conn.execute(
+            "UPDATE check_runs SET creation_sequence=?1 WHERE id=?2",
+            rusqlite::params![sequence, id.to_string()],
+        )
+        .unwrap();
+    }
+    // Physical row order is not a stored ordinal: a reinserted older row can
+    // follow a new legacy row, without acquiring a newer creation identity.
+    conn.execute(
+        "UPDATE check_runs SET rowid=10000 WHERE id=?1",
+        [ids[0].to_string()],
+    )
+    .unwrap();
+    drop(conn);
+    let core = ForgeCore::open_sqlite(&db).unwrap();
+    let expected = [(ids[0], 10), (ids[1], 20), (ids[2], 21)]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let ordinals = |core: &ForgeCore| {
+        runs(core)
+            .into_iter()
+            .map(|run| (run.id, run.creation_sequence))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(ordinals(&core), expected);
+    assert_eq!(CheckRun::newest(&runs(&core)).unwrap().id, ids[2]);
+    let next = core
+        .create_check_run("alice", "jeryu", request(None))
+        .unwrap();
+    assert_eq!(next.creation_sequence, 22);
+    drop(core);
+    let reopened = ForgeCore::open_sqlite(&db).unwrap();
+    let mut expected = expected;
+    expected.insert(next.id, 22);
+    assert_eq!(ordinals(&reopened), expected);
+}
