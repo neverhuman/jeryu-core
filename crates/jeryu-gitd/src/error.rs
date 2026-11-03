@@ -42,6 +42,8 @@ pub enum GitdError {
     Forbidden(String),
     /// The repository is archived (read-only); pushes and ref updates are refused.
     RepositoryArchived(String),
+    /// Every pack RPC slot stayed busy for the whole admission wait; retry later.
+    Busy(String),
 }
 
 impl Display for GitdError {
@@ -76,6 +78,7 @@ impl Display for GitdError {
                 f,
                 "repository_archived: {repo} is archived and read-only; unarchive it to push"
             ),
+            Self::Busy(msg) => write!(f, "busy: {msg}"),
         }
     }
 }

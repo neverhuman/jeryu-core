@@ -19,6 +19,7 @@ pub mod merge_base;
 pub mod mirror;
 pub mod object_fsck;
 pub mod pack;
+pub mod pack_rpc;
 pub mod patch_id;
 pub mod path;
 pub mod pktline;

@@ -19,9 +19,23 @@ only a capped command prelude for protected-ref policy. The same production edge
 streams authenticated Git LFS object downloads directly from an opened regular
 object file to the client socket with an exact `Content-Length`; it never
 materializes the object in a response `Vec`. The public
-`SmartHttpServer::route(HttpRequest)` API remains a fully materialized synthetic
-compatibility seam for unit adapters and is neither the production pack nor
-large-object transport.
+`SmartHttpServer::route(HttpRequest)` API is fully materialized: the request
+body and the whole pack response are held in memory. The unified `jeryu serve`
+mounts `/git` through it today (jeryu-deploy `git_transport.rs`, with its own
+bounded body reads), so a clone's pack is buffered once per concurrent request
+there.
+
+Buffered smart-HTTP pack RPCs (`route()`, the `jeryu serve` path) pass
+`jeryu_gitd::pack_rpc`: at most `JERYU_GITD_MAX_PACK_RPCS` run at once
+(default: available parallelism, 2..=64); a request waits up to
+`JERYU_GITD_PACK_RPC_WAIT_SECS` (default 30, clamped 1..=300) for a slot and is
+otherwise answered `503` with `Retry-After`. A slot covers only the `git`
+child's work: the body is already in memory and the response is returned as
+bytes. The streaming paths (`serve()`, `prepare_pack_rpc`) pump client sockets,
+so they are recorded but never take a slot. SSH sessions (one process each) and
+ref advertisement (`info/refs`) are neither bounded nor recorded. Each recorded
+RPC writes one `{"event":"gitd.pack_rpc",...}` line to stderr with its service,
+repository, bytes in and out, wait, duration, concurrency and outcome.
 
 Every receive-pack runs with `receive.fsckObjects=true`, so Git rejects a
 malformed object a push sends while unpacking it; the pre-receive guard no

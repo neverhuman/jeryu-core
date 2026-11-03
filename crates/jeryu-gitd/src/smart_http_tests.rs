@@ -913,3 +913,48 @@ fn a_push_carrying_a_malformed_object_is_refused_and_moves_no_ref() {
     let _ = std::fs::remove_dir_all(seed);
     let _ = std::fs::remove_dir_all(clone);
 }
+
+#[test]
+fn a_buffered_pack_rpc_finding_every_slot_taken_gets_503_with_retry_after() {
+    if Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| !output.status.success())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let root = temp_dir("jeryu-busy-root");
+    let manager = RepoManager::new(GitdConfig::new(&root));
+    manager
+        .create_bare(&RepoId::new("acme", "busy").expect("valid repo id"))
+        .expect("create bare repository");
+    let gate: &'static crate::pack_rpc::PackRpcGate = Box::leak(Box::new(
+        crate::pack_rpc::PackRpcGate::new(1, Duration::from_millis(20)),
+    ));
+    let server = SmartHttpServer::new(manager).with_pack_rpc_gate(gate);
+    // `route` is the buffered path `jeryu serve` mounts; this is what its clients see.
+    let upload_pack = || HttpRequest {
+        method: "POST".to_string(),
+        path: "/acme/busy.git/git-upload-pack".to_string(),
+        query: std::collections::HashMap::new(),
+        headers: std::collections::HashMap::new(),
+        body: b"0000".to_vec(),
+        is_loopback: true,
+        auth_prechecked: true,
+    };
+
+    let held = gate.acquire().expect("occupy the only slot");
+    let refused = server.route(upload_pack());
+    assert_eq!(refused.status(), 503, "a full gate must refuse as busy");
+    assert_eq!(
+        refused.header("Retry-After"),
+        Some(crate::pack_rpc::RETRY_AFTER_SECS.to_string().as_str()),
+        "a busy refusal must tell git when to retry"
+    );
+
+    drop(held);
+    let admitted = server.route(upload_pack());
+    assert_ne!(admitted.status(), 503, "a free slot must admit the request");
+    let _ = std::fs::remove_dir_all(root);
+}

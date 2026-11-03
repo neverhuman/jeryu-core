@@ -23,13 +23,25 @@ const AUTH_REALM: &str = "jeryu";
 #[derive(Clone, Debug)]
 pub struct SmartHttpServer {
     manager: RepoManager,
+    /// Bounds concurrent buffered pack RPCs ([`Self::route`]).
+    pack_gate: &'static crate::pack_rpc::PackRpcGate,
 }
 
 impl SmartHttpServer {
     /// Create a server.
     #[must_use]
     pub fn new(manager: RepoManager) -> Self {
-        Self { manager }
+        Self {
+            manager,
+            pack_gate: crate::pack_rpc::PackRpcGate::global(),
+        }
+    }
+
+    /// Use `gate` instead of the process-wide gate for buffered pack RPCs.
+    #[must_use]
+    pub fn with_pack_rpc_gate(mut self, gate: &'static crate::pack_rpc::PackRpcGate) -> Self {
+        self.pack_gate = gate;
+        self
     }
 
     /// Open the auth registry rooted under the manager's storage root.
@@ -169,14 +181,20 @@ impl SmartHttpServer {
         } else {
             None
         };
-        let process = spawn_stateless_rpc(
-            &self.manager.config().git_bin,
-            &repo,
+        let git_protocol = git_protocol_header(request)?;
+        // Recorded, never bounded: pumping this RPC copies client sockets, and a
+        // stalled client must not be able to hold a slot (see `crate::pack_rpc`).
+        let admission = crate::pack_rpc::record_streamed(
+            self.pack_gate,
             service,
-            git_protocol_header(request)?,
-        )?;
+            &id.to_string(),
+            content_length,
+        );
+        let process =
+            spawn_stateless_rpc(&self.manager.config().git_bin, &repo, service, git_protocol)?;
         Ok(PreparedRpc {
             process,
+            admission,
             push,
             body_prefix,
             remaining,
@@ -198,9 +216,12 @@ impl SmartHttpServer {
 
     /// Prepare a pack RPC for a host that terminates HTTP itself.
     ///
-    /// The mounted `/git` route in `jeryu serve` owns its own HTTP layer, so it
-    /// cannot use the socket path in [`Self::serve`]; without this seam it has
-    /// to materialize the whole pack to call [`Self::route`]. The returned
+    /// For an embedding HTTP edge that wants to stream instead of materializing
+    /// the pack for [`Self::route`]. `jeryu serve` (jeryu-deploy
+    /// `git_transport.rs`) does not use this seam today: it reads the body and
+    /// calls [`Self::route`], so production pack RPCs take the buffered path,
+    /// which is the one the pack-RPC gate bounds. A streamed RPC here is
+    /// recorded but never holds a gate slot (see [`crate::pack_rpc`]). The returned
     /// [`PackRpc`] has `git` already spawned and the receive-pack command
     /// prelude already read and checked, so the caller can inspect the ref
     /// updates and then pump the remaining body straight into the child.
@@ -322,12 +343,24 @@ impl SmartHttpServer {
         } else {
             None
         };
-        let body = stateless_rpc_with_protocol(
-            &self.manager.config().git_bin,
-            &repo,
+        let git_protocol = git_protocol_header(request)?;
+        // The body is already in memory and the response comes back as bytes, so
+        // the slot covers only the git child's work, never a client socket.
+        let body = crate::pack_rpc::admitted(
+            self.pack_gate,
             service,
-            &request.body,
-            git_protocol_header(request)?,
+            &id.to_string(),
+            request.body.len() as u64,
+            |body: &Vec<u8>| body.len() as u64,
+            || {
+                stateless_rpc_with_protocol(
+                    &self.manager.config().git_bin,
+                    &repo,
+                    service,
+                    &request.body,
+                    git_protocol,
+                )
+            },
         )?;
         if let Some(before) = before {
             self.manager.finish_push(&repo, &before)?;
@@ -485,6 +518,8 @@ impl PackRpc {
 #[derive(Debug)]
 struct PreparedRpc {
     process: StreamingCommand,
+    /// The record this streamed RPC writes once it has been pumped.
+    admission: crate::pack_rpc::PackRpcAdmission,
     push: Option<PendingPush>,
     body_prefix: Vec<u8>,
     remaining: u64,
@@ -511,8 +546,14 @@ impl PreparedRpc {
         cancel_input: C,
     ) -> Result<()> {
         let body = Cursor::new(self.body_prefix).chain(rest);
-        self.process
-            .pump(body, output, self.content_length, cancel_input)?;
+        let mut counted = crate::pack_rpc::CountingWriter::new(output);
+        let pumped = self
+            .process
+            .pump(body, &mut counted, self.content_length, cancel_input);
+        // The record is written whether or not git succeeded.
+        self.admission
+            .finish(pumped.as_ref().ok().map(|()| counted.count()));
+        pumped?;
         if let Some(push) = self.push {
             push.manager.finish_push(&push.repo, &push.before)?;
         }
@@ -943,6 +984,11 @@ fn error_response(err: GitdError) -> HttpResponse {
         GitdError::ProtectedRefDenied(msg) => forbidden_response(&msg),
         err @ GitdError::RepositoryArchived(_) => forbidden_response(&err.to_string()),
         GitdError::Lfs(msg) => lfs_error_response(422, &msg),
+        err @ GitdError::Busy(_) => HttpResponse::text(503, &format!("jeryu_gitd {err}\n"))
+            .with_header(
+                "Retry-After",
+                &crate::pack_rpc::RETRY_AFTER_SECS.to_string(),
+            ),
         err => HttpResponse::text(500, &format!("jeryu_gitd error: {err}\n")),
     }
 }
