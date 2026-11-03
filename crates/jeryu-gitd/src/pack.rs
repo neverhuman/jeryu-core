@@ -9,6 +9,27 @@ use std::collections::BTreeSet;
 use std::io::Read;
 
 const MAIN_REF: &str = "refs/heads/main";
+
+/// Git configuration every receive-pack runs with: Git checks each incoming
+/// object while it unpacks the push (`index-pack --strict`), so a malformed
+/// object never reaches the repository and the check costs what the push
+/// sends, not what the repository holds. It is passed on the command line so
+/// it holds for every repository, whatever its own config says, and for every
+/// transport (smart HTTP buffered or streamed, and SSH).
+pub const RECEIVE_PACK_GIT_CONFIG: [&str; 2] = ["-c", "receive.fsckObjects=true"];
+
+/// The git argv for `service` on `path`, with [`RECEIVE_PACK_GIT_CONFIG`]
+/// ahead of a receive-pack and `extra` flags after the subcommand.
+fn service_argv<'a>(service: PackService, extra: &[&'a str], path: &'a str) -> Vec<&'a str> {
+    let mut argv = Vec::with_capacity(5 + extra.len());
+    if service == PackService::ReceivePack {
+        argv.extend(RECEIVE_PACK_GIT_CONFIG);
+    }
+    argv.push(service.git_subcommand());
+    argv.extend_from_slice(extra);
+    argv.push(path);
+    argv
+}
 const MAX_RECEIVE_PACK_PRELUDE_BYTES: usize = 1024 * 1024;
 const SHA1_HEX_LEN: usize = 40;
 
@@ -101,11 +122,10 @@ pub(crate) fn stateless_rpc_with_protocol(
     git_protocol: Option<&str>,
 ) -> Result<Vec<u8>> {
     let path = repo.path.to_string_lossy().to_string();
-    let command = service.git_subcommand();
     let env = git_protocol.map(|value| [("GIT_PROTOCOL", value)]);
     let out = run_with_stdin_with_env(
         git_bin,
-        &[command, "--stateless-rpc", &path],
+        &service_argv(service, &["--stateless-rpc"], &path),
         body,
         None,
         env.as_ref().map_or(&[], |values| values.as_slice()),
@@ -127,7 +147,7 @@ pub(crate) fn spawn_stateless_rpc(
     let env = git_protocol.map(|value| [("GIT_PROTOCOL", value)]);
     spawn_streaming_with_env(
         git_bin,
-        &[service.git_subcommand(), "--stateless-rpc", &path],
+        &service_argv(service, &["--stateless-rpc"], &path),
         None,
         env.as_ref().map_or(&[], |values| values.as_slice()),
     )
@@ -375,6 +395,32 @@ fn receive_pack_prelude_state(input: &[u8], offset: &mut usize) -> Result<Prelud
 mod tests {
     use super::*;
     use crate::pktline;
+
+    #[test]
+    fn every_receive_pack_checks_incoming_objects_and_upload_pack_is_unchanged() {
+        assert_eq!(
+            service_argv(
+                PackService::ReceivePack,
+                &["--stateless-rpc"],
+                "/srv/acme.git"
+            ),
+            [
+                "-c",
+                "receive.fsckObjects=true",
+                "receive-pack",
+                "--stateless-rpc",
+                "/srv/acme.git"
+            ]
+        );
+        assert_eq!(
+            service_argv(
+                PackService::UploadPack,
+                &["--stateless-rpc"],
+                "/srv/acme.git"
+            ),
+            ["upload-pack", "--stateless-rpc", "/srv/acme.git"]
+        );
+    }
 
     #[test]
     fn receive_pack_policy_rejects_main_before_pack_payload() {

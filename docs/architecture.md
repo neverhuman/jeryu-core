@@ -23,6 +23,12 @@ materializes the object in a response `Vec`. The public
 compatibility seam for unit adapters and is neither the production pack nor
 large-object transport.
 
+Every receive-pack runs with `receive.fsckObjects=true`, so Git rejects a
+malformed object a push sends while unpacking it; the pre-receive guard no
+longer runs a whole-repository `fsck --strict` on each push. That narrows what
+is checked to each push's own objects: objects imported by `jeryu_gitd::mirror`
+(clone or fetch from a remote) are not checked by either path.
+
 The shared workcell control plane is part of the runner/CI stack, not a separate subsystem. `jeryu-runnerd` owns warm-pool claims, epoch-fenced release/heartbeat handling, startup rebase enforcement, and quarantine-first tar validation on top of the existing runner fabric.
 
 The R5 proof lane lives in `crates/jeryu-api` and closes the loop from claim to reviewed pull request: rebase, jailed edit, namespaced branch export, PR creation, and CI evidence verification. The export request carries the changed-file list so the pull request preserves branch ownership and reviewer-visible edit scope.

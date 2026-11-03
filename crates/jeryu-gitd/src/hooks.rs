@@ -130,7 +130,11 @@ impl PreReceiveGuard {
             .collect();
         self.fsck
             .reject_oversized_raw_blobs(repo, &new_oids, RAW_GIT_BLOB_LIMIT_BYTES)?;
-        self.fsck.fsck(repo)?;
+        // Object validity is receive-pack's job (`crate::pack::RECEIVE_PACK_GIT_CONFIG`): it checks
+        // each object a push sends, as it unpacks. That is a narrower set than the whole-repository
+        // `fsck --strict` this replaced, which cost what the repository holds on every push and also
+        // re-checked objects that arrived another way. Objects imported by `crate::mirror` (clone
+        // or fetch from a remote) are not checked by either path now; a push's own objects are.
         Ok(changes)
     }
 

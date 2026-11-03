@@ -181,7 +181,10 @@ pub fn exec_from_env(root: &Path, git_bin: &str) -> Result<i32> {
     let opened = manager.open_parts(&parsed.owner, &parsed.repo_git)?;
     opened.ensure_writable()?;
     let before = manager.begin_push(&opened)?;
-    let status = Command::new(git_bin).args([subcommand, &repo]).status()?;
+    let status = Command::new(git_bin)
+        .args(crate::pack::RECEIVE_PACK_GIT_CONFIG)
+        .args([subcommand, &repo])
+        .status()?;
     manager.finish_push(&opened, &before)?;
     Ok(status.code().unwrap_or(1))
 }

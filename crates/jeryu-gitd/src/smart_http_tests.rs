@@ -817,3 +817,99 @@ fn mounted_pack_rpc_rejects_a_non_pack_request() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn a_push_carrying_a_malformed_object_is_refused_and_moves_no_ref() {
+    if Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| !output.status.success())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let root = temp_dir("jeryu-fsck-root");
+    let seed = temp_dir("jeryu-fsck-seed");
+    let clone = temp_dir("jeryu-fsck-clone");
+    let manager = RepoManager::new(GitdConfig::new(&root));
+    let repo = manager
+        .create_bare(&RepoId::new("acme", "objects").expect("valid repo id"))
+        .expect("create bare repository");
+    seed_repository(&seed, &repo.path);
+    let (base_url, stop, server_thread) = start_test_server(SmartHttpServer::new(manager.clone()));
+    let remote = format!("{base_url}/acme/objects.git");
+    run_command(
+        Command::new("git")
+            .args(["clone", "--branch", "main"])
+            .arg(&remote)
+            .arg(&clone),
+        "clone",
+    );
+    run_git(
+        &clone,
+        &["config", "user.email", "f@example.invalid"],
+        "email",
+    );
+    run_git(&clone, &["config", "user.name", "Fsck Test"], "name");
+
+    // A tree whose entry mode is zero-padded (`0100644`): git writes it only with --literally and
+    // `fsck` rejects it. Pushed on a fresh branch, so nothing on the server already holds it.
+    let blob = git_output(&clone, &["rev-parse", "HEAD:README.md"]);
+    let mut raw_tree = b"0100644 README.md\0".to_vec();
+    raw_tree.extend(
+        (0..blob.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&blob[at..at + 2], 16).expect("hex object id")),
+    );
+    let tree_file = clone.join("bad.tree");
+    std::fs::write(&tree_file, raw_tree).expect("write raw tree");
+    let tree = git_output(
+        &clone,
+        &[
+            "hash-object",
+            "-t",
+            "tree",
+            "-w",
+            "--literally",
+            tree_file.to_str().unwrap_or_default(),
+        ],
+    );
+    let bad = git_output(&clone, &["commit-tree", &tree, "-p", "HEAD", "-m", "bad"]);
+
+    let refused = Command::new("git")
+        .args(["push", "origin", &format!("{bad}:refs/heads/bad")])
+        .current_dir(&clone)
+        .output()
+        .expect("push runs");
+    assert!(
+        !refused.status.success(),
+        "a malformed object was accepted\nstderr:\n{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let refs = git_output(&repo.path, &["for-each-ref", "--format=%(refname)"]);
+    assert!(
+        !refs.contains("refs/heads/bad"),
+        "the refused push created a ref: {refs}"
+    );
+
+    // A well-formed push still lands.
+    std::fs::write(clone.join("topic.txt"), "topic\n").expect("write topic");
+    run_git(&clone, &["add", "topic.txt"], "add");
+    run_git(&clone, &["commit", "-m", "topic"], "commit");
+    run_git(
+        &clone,
+        &["push", "origin", "HEAD:refs/heads/topic"],
+        "clean push",
+    );
+    stop.store(true, Ordering::Release);
+    server_thread.join().expect("server thread joins");
+    let refs = git_output(&repo.path, &["for-each-ref", "--format=%(refname)"]);
+    assert!(
+        refs.contains("refs/heads/topic"),
+        "the clean push did not land: {refs}"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(seed);
+    let _ = std::fs::remove_dir_all(clone);
+}
